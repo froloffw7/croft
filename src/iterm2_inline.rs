@@ -523,17 +523,19 @@ pub fn da1_advertises_sixel(reply: &[u8]) -> bool {
 /// non-responding host and does not slow normal startup.
 #[cfg(unix)]
 pub fn probe_sixel_support() -> bool {
-    use std::io::{Read, Write};
+    use std::io::Write;
     use std::os::fd::AsRawFd;
 
+    let stdin = std::io::stdin();
+    let fd = stdin.as_raw_fd();
+    if unsafe { libc::isatty(fd) } != 1 {
+        return false;
+    }
     let mut out = std::io::stdout();
     if out.write_all(b"\x1b[c").is_err() || out.flush().is_err() {
         return false;
     }
-    let stdin = std::io::stdin();
-    let fd = stdin.as_raw_fd();
     let mut buf = Vec::with_capacity(32);
-    let mut byte = [0u8; 1];
     // ~250ms total budget: comfortably covers an SSH round-trip while staying
     // imperceptible. DA1 normally returns in a few ms regardless.
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(250);
@@ -552,14 +554,19 @@ pub fn probe_sixel_support() -> bool {
         if n <= 0 {
             break; // timeout or poll error
         }
-        match stdin.lock().read(&mut byte) {
-            Ok(1) => {
-                buf.push(byte[0]);
-                if byte[0] == b'c' || buf.len() >= 64 {
-                    break; // DA1 terminator (or runaway guard)
-                }
-            }
-            _ => break,
+        // read(2) напрямую: stdin.lock() — это BufReader, который забирает
+        // весь DA1-ответ в свой буфер на первом же байте, после чего poll()
+        // видит пустой fd и ответ обрезается до одного ESC.
+        let mut byte = 0u8;
+        let n = unsafe { libc::read(fd, &mut byte as *mut u8 as *mut libc::c_void, 1) };
+        if n != 1 {
+            break;
+        }
+        buf.push(byte);
+        // 'c' завершает ответ только внутри обёртки `\x1b[?`: случайный
+        // ввод (нажатая клавиша) может содержать 'c' раньше ответа.
+        if (buf.starts_with(b"\x1b[?") && byte == b'c') || buf.len() >= 64 {
+            break; // DA1 terminator (or runaway guard)
         }
     }
     da1_advertises_sixel(&buf)
