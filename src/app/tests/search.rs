@@ -2590,3 +2590,136 @@ fn search_announces_every_match_on_a_line() {
     }];
     assert_eq!(app.a11y_snapshot().focus, "Search, 2 matches in 1 file");
 }
+
+#[test]
+fn editor_find_arrows_move_the_caret_and_typing_lands_there() {
+    let mut app = editor_app_with_lines(&["alpha"]);
+    app.handle_key(key(KeyCode::Char('f'), KeyModifiers::SUPER))
+        .unwrap();
+    // No seed under the caret at column 0 of "alpha"? There is: the whole
+    // word, selected. Typing replaces it, so start from a clean bar.
+    app.handle_key(key(KeyCode::Char('x'), KeyModifiers::NONE))
+        .unwrap();
+    for c in ['a', 'b', 'c'] {
+        app.handle_key(key(KeyCode::Char(c), KeyModifiers::NONE))
+            .unwrap();
+    }
+    assert_eq!(app.editor_find.as_ref().unwrap().query, "xabc");
+    for _ in 0..2 {
+        app.handle_key(key(KeyCode::Left, KeyModifiers::NONE))
+            .unwrap();
+    }
+    assert_eq!(
+        app.editor_find.as_ref().unwrap().caret(),
+        2,
+        "Left walks the caret into the query"
+    );
+    app.handle_key(key(KeyCode::Char('Z'), KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(
+        app.editor_find.as_ref().unwrap().query,
+        "xaZbc",
+        "typing inserts at the caret, not at the end"
+    );
+    assert_eq!(app.editor_find.as_ref().unwrap().caret(), 3);
+}
+
+#[test]
+fn editor_find_home_and_end_jump_to_the_edges() {
+    let mut app = editor_app_with_lines(&["alpha"]);
+    app.handle_key(key(KeyCode::Char('f'), KeyModifiers::SUPER))
+        .unwrap();
+    app.handle_key(key(KeyCode::Char('q'), KeyModifiers::NONE))
+        .unwrap();
+    app.handle_key(key(KeyCode::Char('w'), KeyModifiers::NONE))
+        .unwrap();
+    app.handle_key(key(KeyCode::Home, KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(app.editor_find.as_ref().unwrap().caret(), 0, "Home to the start");
+    app.handle_key(key(KeyCode::Char('0'), KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(app.editor_find.as_ref().unwrap().query, "0qw");
+    app.handle_key(key(KeyCode::End, KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(app.editor_find.as_ref().unwrap().caret(), 3, "End to the tail");
+    app.handle_key(key(KeyCode::Char('9'), KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(app.editor_find.as_ref().unwrap().query, "0qw9");
+}
+
+#[test]
+fn editor_find_delete_removes_ahead_and_backspace_behind() {
+    let mut app = editor_app_with_lines(&["alpha"]);
+    app.handle_key(key(KeyCode::Char('f'), KeyModifiers::SUPER))
+        .unwrap();
+    app.handle_key(key(KeyCode::Char('a'), KeyModifiers::NONE))
+        .unwrap();
+    app.handle_key(key(KeyCode::Char('b'), KeyModifiers::NONE))
+        .unwrap();
+    app.handle_key(key(KeyCode::Char('c'), KeyModifiers::NONE))
+        .unwrap();
+    app.handle_key(key(KeyCode::Home, KeyModifiers::NONE))
+        .unwrap();
+    app.handle_key(key(KeyCode::Delete, KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(
+        app.editor_find.as_ref().unwrap().query,
+        "bc",
+        "Delete removes the character ahead of the caret"
+    );
+    assert_eq!(app.editor_find.as_ref().unwrap().caret(), 0);
+    app.handle_key(key(KeyCode::Right, KeyModifiers::NONE))
+        .unwrap();
+    app.handle_key(key(KeyCode::Backspace, KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(
+        app.editor_find.as_ref().unwrap().query,
+        "c",
+        "Backspace removes behind the caret, not only the tail"
+    );
+    assert_eq!(app.editor_find.as_ref().unwrap().caret(), 0);
+}
+
+#[test]
+fn editor_find_delete_at_the_end_is_a_no_op() {
+    let mut app = editor_app_with_lines(&["alpha"]);
+    app.handle_key(key(KeyCode::Char('f'), KeyModifiers::SUPER))
+        .unwrap();
+    app.handle_key(key(KeyCode::Char('k'), KeyModifiers::NONE))
+        .unwrap();
+    app.handle_key(key(KeyCode::Delete, KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(app.editor_find.as_ref().unwrap().query, "k");
+    assert_eq!(app.editor_find.as_ref().unwrap().caret(), 1);
+}
+
+#[test]
+fn editor_find_ctrl_left_walks_by_a_word() {
+    let mut app = editor_app_with_lines(&["alpha"]);
+    app.clipboard_reader = || Some(String::from("foo bar"));
+    app.handle_key(key(KeyCode::Char('f'), KeyModifiers::SUPER))
+        .unwrap();
+    app.handle_key(key(KeyCode::Char('v'), KeyModifiers::SUPER))
+        .unwrap();
+    assert_eq!(app.editor_find.as_ref().unwrap().query, "foo bar");
+    app.handle_key(key(KeyCode::Left, KeyModifiers::CONTROL))
+        .unwrap();
+    assert_eq!(app.editor_find.as_ref().unwrap().caret(), 4, "Ctrl+Left stops after 'foo '");
+    app.handle_key(key(KeyCode::Left, KeyModifiers::CONTROL))
+        .unwrap();
+    assert_eq!(app.editor_find.as_ref().unwrap().caret(), 0);
+}
+
+#[test]
+fn editor_find_a_caret_key_drops_the_seeded_selection() {
+    let mut app = editor_app_with_lines(&["alphabet"]);
+    app.editor.cursor_col = 5;
+    app.handle_key(key(KeyCode::Char('f'), KeyModifiers::SUPER))
+        .unwrap();
+    assert!(app.editor_find.as_ref().unwrap().query_selected);
+    app.handle_key(key(KeyCode::Left, KeyModifiers::NONE))
+        .unwrap();
+    let state = app.editor_find.as_ref().unwrap();
+    assert!(!state.query_selected, "a caret key drops the selection");
+    assert_eq!(state.query, "alphabet", "and keeps the seed");
+}

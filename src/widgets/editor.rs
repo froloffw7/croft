@@ -18426,7 +18426,7 @@ fn top_row_home(col: usize, line: &str) -> usize {
 /// spaces, then over the word itself, to a grapheme boundary. `col` when it
 /// already sits on a word's first character. Home's stop on a continuation
 /// row of a wrapped line.
-fn word_start_from(line: &str, col: usize) -> usize {
+/*fn word_start_from(line: &str, col: usize) -> usize {
     let chars: Vec<char> = line.chars().collect();
     let mut i = col.min(chars.len());
     while i > 0 && !word_char_at(&chars, i - 1) {
@@ -18436,7 +18436,7 @@ fn word_start_from(line: &str, col: usize) -> usize {
         i -= 1;
     }
     floor_grapheme_col(line, i)
-}
+}*/
 
 /// A character VS Code breaks a wrapped line *after* (a subset of its default
 /// `editor.wordWrapBreakAfterCharacters` that matters for Latin/Markdown

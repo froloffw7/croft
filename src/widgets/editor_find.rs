@@ -39,6 +39,11 @@ pub struct EditorFind {
     /// Ctrl+A. The next typed character or paste replaces it and Backspace
     /// clears it, as in VS Code; a caret key just drops the selection.
     pub query_selected: bool,
+    /// Char index of the caret in `query` (#1729). The bar is a real input
+    /// line: Left/Right/Home/End/Delete edit where the caret sits instead of
+    /// only at the end. Reads go through [`EditorFind::caret`], which clamps
+    /// to the query's char count.
+    pub caret: usize,
     /// Find in Selection (#1577): the `(start, end)` positions, row and
     /// char column, the matches are limited to. `Alt+L` sets it from the
     /// selection and clears it again.
@@ -87,9 +92,11 @@ impl EditorFind {
     /// truncation flag stay unreachable from outside: they are one fact,
     /// written only through [`EditorFind::set_match_count`].
     pub fn new(query: String, opts: SearchOpts) -> Self {
+        let caret = query.chars().count();
         Self {
             query,
             opts,
+            caret,
             ..Default::default()
         }
     }
@@ -109,6 +116,113 @@ impl EditorFind {
     pub fn count_truncated(&self) -> bool {
         self.count_truncated
     }
+
+    /// The caret's char index, clamped to the query.
+    pub fn caret(&self) -> usize {
+        self.caret.min(self.query.chars().count())
+    }
+
+    /// Put the caret at char index `at`, clamped to the query.
+    pub fn set_caret(&mut self, at: usize) {
+        self.caret = at.min(self.query.chars().count());
+    }
+}
+
+/// Where a word walk starts when moving left from `at`: back over the run
+/// of non-word characters first, then over the word, as a text field walks.
+fn word_start_before(chars: &[char], at: usize) -> usize {
+    let mut i = at.min(chars.len());
+    while i > 0 && !crate::widgets::editor::is_word_char(chars[i - 1]) {
+        i -= 1;
+    }
+    while i > 0 && crate::widgets::editor::is_word_char(chars[i - 1]) {
+        i -= 1;
+    }
+    i
+}
+
+/// Where a word walk ends when moving right from `at`.
+fn word_end_after(chars: &[char], at: usize) -> usize {
+    let mut i = at.min(chars.len());
+    while i < chars.len() && !crate::widgets::editor::is_word_char(chars[i]) {
+        i += 1;
+    }
+    while i < chars.len() && crate::widgets::editor::is_word_char(chars[i]) {
+        i += 1;
+    }
+    i
+}
+
+/// `caret` one step left in `text`, by a word when `word`.
+pub fn caret_left(text: &str, caret: usize, word: bool) -> usize {
+    let chars: Vec<char> = text.chars().collect();
+    let at = caret.min(chars.len());
+    if word {
+        word_start_before(&chars, at)
+    } else {
+        at.saturating_sub(1)
+    }
+}
+
+/// `caret` one step right in `text`, by a word when `word`.
+pub fn caret_right(text: &str, caret: usize, word: bool) -> usize {
+    let chars: Vec<char> = text.chars().collect();
+    let at = caret.min(chars.len());
+    if word {
+        word_end_after(&chars, at)
+    } else {
+        (at + 1).min(chars.len())
+    }
+}
+
+/// `text` with `add` inserted at `caret`, and the caret after it. Control
+/// characters are dropped: the bar is one line, so a pasted newline must
+/// not enter the query.
+pub fn insert_at(text: &str, caret: usize, add: &str) -> (String, usize) {
+    let mut chars: Vec<char> = text.chars().collect();
+    let at = caret.min(chars.len());
+    let added: Vec<char> = add.chars().filter(|c| !c.is_control()).collect();
+    if added.is_empty() {
+        return (text.to_string(), at);
+    }
+    let n = added.len();
+    chars.splice(at..at, added);
+    (chars.into_iter().collect(), at + n)
+}
+
+/// `text` without the character (or, with `word`, the run) before `caret`,
+/// and the caret where the cut began.
+pub fn delete_before(text: &str, caret: usize, word: bool) -> (String, usize) {
+    let chars: Vec<char> = text.chars().collect();
+    let at = caret.min(chars.len());
+    let from = if word {
+        word_start_before(&chars, at)
+    } else {
+        at.saturating_sub(1)
+    };
+    if from == at {
+        return (text.to_string(), at);
+    }
+    let mut kept = chars;
+    kept.drain(from..at);
+    (kept.into_iter().collect(), from)
+}
+
+/// `text` without the character at `caret` (Delete), the caret unmoved.
+/// With `word`, the whole run ahead goes, as Ctrl+Delete removes it in a
+/// text field.
+pub fn delete_at(text: &str, caret: usize, word: bool) -> (String, usize) {
+    let mut chars: Vec<char> = text.chars().collect();
+    let at = caret.min(chars.len());
+    let to = if word {
+        word_end_after(&chars, at)
+    } else {
+        (at + 1).min(chars.len())
+    };
+    if to > at {
+        chars.drain(at..to);
+    }
+    (chars.into_iter().collect(), at)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -610,7 +724,11 @@ pub fn render_editor_find(
         return;
     }
     let query_selected = state.query_selected && state.focus == FindField::Query;
-    let input_row = |marker: &str, text: &str, focused: bool, selected: bool| {
+    // One input row: the marker, then the text with the caret drawn where it
+    // sits (#1729) rather than always after the last character. A query wider
+    // than the row scrolls so the caret stays in view; two cells stay free at
+    // the right for the selection chip.
+    let input_row = |marker: &str, text: &str, focused: bool, selected: bool, caret: usize| {
         let text_style = if selected {
             Style::default()
                 .fg(theme.ui(Color::Rgb(0xff, 0xff, 0xff)))
@@ -621,20 +739,59 @@ pub fn render_editor_find(
                 .fg(theme.ui(Color::Rgb(0xec, 0xef, 0xf4)))
                 .add_modifier(Modifier::BOLD)
         };
-        let mut spans = vec![
-            Span::styled(
-                marker.to_string(),
-                Style::default().fg(theme.ui(Color::Rgb(0x88, 0xc0, 0xd0))),
-            ),
-            Span::styled(text.to_string(), text_style),
-        ];
-        if focused {
-            spans.push(Span::styled(
-                "_",
-                Style::default()
-                    .fg(theme.ui(Color::Rgb(0xec, 0xef, 0xf4)))
-                    .add_modifier(Modifier::SLOW_BLINK),
-            ));
+        let cursor_style = Style::default()
+            .fg(theme.ui(Color::Rgb(0x16, 0x18, 0x1f)))
+            .bg(theme.ui(Color::Rgb(0xec, 0xef, 0xf4)))
+            .add_modifier(Modifier::SLOW_BLINK);
+        let mut spans = vec![Span::styled(
+            marker.to_string(),
+            Style::default().fg(theme.ui(Color::Rgb(0x88, 0xc0, 0xd0))),
+        )];
+        let chars: Vec<char> = text.chars().collect();
+        let caret = caret.min(chars.len());
+        let cell = |c: char| unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+        let avail = inner
+            .width
+            .saturating_sub(marker.chars().count() as u16 + 3)
+            .max(1) as usize;
+        // Drop leading chars until what is left before the caret fits, so the
+        // caret never scrolls off the right edge of a long query.
+        let before_w: usize = chars[..caret].iter().map(|&c| cell(c)).sum();
+        let mut start = 0usize;
+        let mut dropped = 0usize;
+        while start < caret && before_w - dropped >= avail {
+            dropped += cell(chars[start]);
+            start += 1;
+        }
+        let before: String = chars[start..caret].iter().collect();
+        if !before.is_empty() {
+            spans.push(Span::styled(before, text_style));
+        }
+        let mut used = before_w - dropped;
+        let mut drawn = caret;
+        // A selected query paints as one band, so its caret is not drawn.
+        if focused && !selected {
+            if caret < chars.len() {
+                let c = chars[caret];
+                used += cell(c);
+                drawn = caret + 1;
+                spans.push(Span::styled(c.to_string(), cursor_style));
+            } else {
+                spans.push(Span::styled("_", cursor_style));
+            }
+        }
+        let mut tail = String::new();
+        while drawn < chars.len() {
+            let w = cell(chars[drawn]);
+            if used + w > avail {
+                break;
+            }
+            used += w;
+            tail.push(chars[drawn]);
+            drawn += 1;
+        }
+        if !tail.is_empty() {
+            spans.push(Span::styled(tail, text_style));
         }
         Line::from(spans)
     };
@@ -655,23 +812,34 @@ pub fn render_editor_find(
         buf.set_string(inner.x + inner.width - 2, inner.y, "≡", style);
     };
     if state.replace_visible && inner.height >= 2 {
+        let query_caret = state.caret();
+        let replace_caret = state.replace.chars().count();
         let rows = vec![
             input_row(
                 "> ",
                 &state.query,
                 state.focus == FindField::Query,
                 query_selected,
+                query_caret,
             ),
             input_row(
                 "⤷ ",
                 &state.replace,
                 state.focus == FindField::Replace,
                 false,
+                replace_caret,
             ),
         ];
         Widget::render(Paragraph::new(rows), inner, buf);
     } else {
-        let prompt = input_row("> ", &state.query, true, query_selected);
+        let query_caret = state.caret();
+        let prompt = input_row(
+            "> ",
+            &state.query,
+            state.focus == FindField::Query,
+            query_selected,
+            query_caret,
+        );
         Widget::render(Paragraph::new(prompt), inner, buf);
     }
     paint_chip(buf);
