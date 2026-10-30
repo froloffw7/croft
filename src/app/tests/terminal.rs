@@ -5012,6 +5012,7 @@ fn the_terminal_image_yields_to_an_open_context_menu() {
         crumb: None,
         scroll: Default::default(),
         origin: (l.cell_x, l.cell_y),
+        submenu_scroll: Default::default(),
         items: vec![
             MenuEntry::Item {
                 label: String::from("Rename Terminal"),

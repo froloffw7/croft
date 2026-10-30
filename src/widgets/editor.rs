@@ -15361,19 +15361,71 @@ impl Editor {
         self.last_edit_kind = None;
     }
 
-    /// The Home key. With wrap on (#1569) it first goes to the start of the
-    /// wrapped row the caret is on, as VS Code does, and to the line's start
-    /// from there.
+    /// The Home key, stepping back one visual row per press (#1569).
+    ///
+    /// On a continuation row of a wrapped line, or on a first row the caret
+    /// sits inside, Home goes to that row's start; when the caret already
+    /// sits on a row start, it goes to the start of the row above. On the
+    /// top visual row of the logical line the line's text stops apply: the
+    /// first non-blank character and column 0 trade places, except that a
+    /// line whose text starts at column 0, or a blank line, always goes to
+    /// column 0.
     pub fn home_key(&mut self) {
-        self.cursor_col = match self.wrapped_row_of_cursor() {
-            // A row can start on a combining mark (the wrap breaks after the
-            // space it sits on), so step back to its cluster's start.
-            Some((start, _)) => match floor_grapheme_col(&self.lines[self.cursor_row], start) {
-                row_start if self.cursor_col > row_start => row_start,
-                _ => 0,
-            },
-            None => 0,
+        let line = &self.lines[self.cursor_row];
+        let width = self.visible_text_width().max(1);
+        let row = match self.wrapped_row_of_cursor() {
+            Some(seg) => Some(seg),
+            // Wrap on but the line fits on one row: a single-row line.
+            None if self.wrap_enabled() => {
+                Some((0, self.line_char_len(self.cursor_row)))
+            }
+            None => None,
         };
+        let Some((row_start_raw, row_end_raw)) = row else {
+            // Unwrapped: the logical line is the visual row.
+            self.cursor_col = top_row_home(self.cursor_col, line);
+            self.last_edit_kind = None;
+            return;
+        };
+        // A row can start on a combining mark (the wrap breaks after the
+        // space it sits on), so step back to its cluster's start.
+        let row_start = floor_grapheme_col(line, row_start_raw);
+        // Standing at the cluster's first char is standing at the row start;
+        // only a caret elsewhere in the row walks back to it.
+        let at_row_start =
+            self.cursor_col == row_start || self.cursor_col == row_start_raw;
+        if !at_row_start {
+            self.cursor_col = row_start;
+            self.last_edit_kind = None;
+            return;
+        }        
+        let segs = self.line_segments(self.cursor_row, width);
+        let idx = self
+            .segment_index_of_col(self.cursor_row, self.cursor_col, width);
+        if idx == 0 {
+            // Top visual row. Only a line that fits on one row is the whole
+            // logical line; on a wrapped line the caret is at its top row's
+            // start, which is column 0, and the next press has nowhere
+            // above to go. But when the row's start stepped off a combining
+            // mark onto the space it rides, the row's own start (inside the
+            // cluster) is still ahead — reach it before stopping.
+            if row_end_raw >= self.line_char_len(self.cursor_row) {
+                // The line fits on one row: the row IS the logical line.
+                self.cursor_col = top_row_home(self.cursor_col, line);
+            } else if row_start_raw < row_start {
+                // The row's own start is inside a combining mark the caret
+                // stepped off; reach it before the line's text stops.
+                self.cursor_col = row_start_raw;
+            } else {
+                // Top row of a wrapped line: the line's text stops still lie
+                // ahead (the first non-blank and column 0), so one press per
+                // stop keeps the walk going instead of stopping at column 0.
+                self.cursor_col = top_row_home(self.cursor_col, line);
+            }            
+        } else {
+            let above = segs[idx - 1].0;
+            self.cursor_col = floor_grapheme_col(line, above);
+        }
         self.last_edit_kind = None;
     }
 
@@ -18341,6 +18393,49 @@ pub(crate) fn utf16_to_char_col(line: &str, u16_off: u32) -> usize {
         units += ch.len_utf16() as u32;
     }
     line.chars().count()
+}
+
+/// Column of the first character on `line` that is neither a space nor a tab
+/// (0 for an all-blank line): Home's indentation stop.
+fn first_non_blank_col(line: &str) -> usize {
+    line.chars()
+        .position(|c| c != ' ' && c != '\t')
+        .unwrap_or(0)
+}
+
+/// The top visual row's two text stops (#1569). From column 0 Home goes to
+/// the first non-blank character; from that character, or from anywhere
+/// before it, Home goes back to column 0; from past it, Home goes to the
+/// first non-blank again. When the line's text starts at column 0, or the
+/// line is blank, both stops are column 0 and Home always lands there.
+fn top_row_home(col: usize, line: &str) -> usize {
+    let first = first_non_blank_col(line);
+    if first == 0 {
+        return 0;
+    }
+    if col == 0 {
+        first
+    } else if col > first {
+        first
+    } else {
+        0
+    }
+}
+
+/// Start of the word `line`'s character column `col` falls on: back over any
+/// spaces, then over the word itself, to a grapheme boundary. `col` when it
+/// already sits on a word's first character. Home's stop on a continuation
+/// row of a wrapped line.
+fn word_start_from(line: &str, col: usize) -> usize {
+    let chars: Vec<char> = line.chars().collect();
+    let mut i = col.min(chars.len());
+    while i > 0 && !word_char_at(&chars, i - 1) {
+        i -= 1;
+    }
+    while i > 0 && word_char_at(&chars, i - 1) {
+        i -= 1;
+    }
+    floor_grapheme_col(line, i)
 }
 
 /// A character VS Code breaks a wrapped line *after* (a subset of its default
@@ -31759,18 +31854,42 @@ mod tests {
         assert_eq!(e.cursor_col, len);
     }
 
-    /// #1569: Home from inside a wrapped row stops at that row's start first.
+    /// #1569: Home walks back one stop per press inside a wrapped row: the
+    /// row's first word, then the row's start, then the line's start. It
+    /// never stands still while a stop is still behind the caret.
     #[test]
-    fn home_in_a_wrapped_line_stops_at_the_start_of_the_row_first() {
+    fn home_in_a_wrapped_line_walks_back_through_the_row_and_the_line() {
         let (mut e, segs) = wrapped_paragraph(true);
-        e.cursor_col = segs[2].0 + 5;
-        e.home_key();
-        assert_eq!(e.cursor_col, segs[2].0, "the start of row 3: {segs:?}");
-        e.home_key();
-        assert_eq!(
-            e.cursor_col, 0,
-            "a second Home goes to the start of the line"
+        let width = e.visible_text_width();
+        let (row_start, row_end) = segs[2];
+        let chars: Vec<char> = e.lines[0].chars().collect();
+        // The row's first character starts a word: the wrap broke after a
+        // space, which is the last character of the row above.
+        assert!(
+            row_start > 0 && !chars[row_start].is_whitespace(),
+            "row 3 starts a word: {segs:?}"
         );
+        // A caret in the row's second word: the first press goes to the row's
+        // first word, not to the word under the caret (VS Code's behaviour).
+        let space = (row_start + 1..row_end)
+            .find(|&i| chars[i].is_whitespace())
+            .expect("row 3 has a second word");
+        assert!(space + 1 < row_end && !chars[space + 1].is_whitespace());
+        e.cursor_col = space + 3;
+        // Home reads its segments from the rendered width; assert the test
+        // reads the same ones.
+        assert_eq!(e.line_segments(0, width.max(1))[2], segs[2]);
+
+        e.home_key();
+        assert_eq!(e.cursor_col, row_start, "the start of row 3: {segs:?}");
+        e.home_key();
+        assert_eq!(e.cursor_col, segs[1].0, "the start of row 2: {segs:?}");
+        e.home_key();
+        assert_eq!(e.cursor_col, segs[0].0, "the start of row 1: {segs:?}");
+        e.home_key();
+        assert_eq!(e.cursor_col, 0, "the first non-blank of the line");
+        e.home_key();
+        assert_eq!(e.cursor_col, 0, "already there");
     }
 
     /// #1569: a wrapped row can begin on a combining mark (the row before
@@ -31793,9 +31912,18 @@ mod tests {
         (&mut e as &mut Editor).render(area, &mut buf);
         let segs = e.line_segments(0, e.visible_text_width().max(1));
         assert_eq!(segs[1].0, width, "row 2 starts on the mark: {segs:?}");
+        // Row 2 opens on the combining mark: its first word is the run of ys
+        // after it, so the first Home lands on the first y — the start of the
+        // line's first row is never reached from here, and the caret is never
+        // left inside the mark's cluster.
         e.cursor_col = width + 3;
         e.home_key();
-        assert_eq!(e.cursor_col, width - 1, "the space the mark sits on");
+        assert_eq!(e.cursor_col, width - 1, "the row's start, before the mark");
+        assert_ne!(e.cursor_col, width, "never inside the mark's cluster");
+        e.home_key();
+        // Row 1 begins at column 0 and its text runs to the edge, so its
+        // first non-blank is column 0 as well: Home stays there.
+        assert_eq!(e.cursor_col, 0, "the row above starts the line");
     }
 
     /// #1569: on the first and last rows the row's ends are the line's.
@@ -31806,11 +31934,93 @@ mod tests {
         e.cursor_col = segs.last().unwrap().0 + 1;
         e.end_key();
         assert_eq!(e.cursor_col, len);
+        // The paragraph starts with its first word, so the indentation stop
+        // and the row's start are the same column here.
         e.cursor_col = 3;
         e.home_key();
         assert_eq!(e.cursor_col, 0);
     }
 
+    /// Unwrapped Home trades between the first non-blank character and
+    /// column 0: past the text it goes to the text's start, from there (or
+    /// from the blanks before it) to column 0, and from column 0 back to the
+    /// text. A line that starts at column 0, or a blank line, only has
+    /// column 0.
+    #[test]
+    fn home_trades_between_the_first_non_blank_and_column_zero() {
+        let mut e = editor_with("    fn main() {");
+        e.cursor_col = 12;
+        e.home_key();
+        assert_eq!(e.cursor_col, 4, "the first non-blank");
+        e.home_key();
+        assert_eq!(e.cursor_col, 0, "column 0");
+        e.home_key();
+        assert_eq!(e.cursor_col, 4, "back to the text");
+        // Standing before the text: Home goes to column 0.
+        let mut early = editor_with("  x");
+        early.cursor_col = 1;
+        early.home_key();
+        assert_eq!(early.cursor_col, 0);
+        early.home_key();
+        assert_eq!(early.cursor_col, 2, "the text start");
+        // Standing on the text start: Home goes to column 0.
+        early.home_key();
+        assert_eq!(early.cursor_col, 0);
+        // Blank line: always column 0.
+        let mut blank = editor_with("\t   ");
+        blank.cursor_col = 4;
+        blank.home_key();
+        assert_eq!(blank.cursor_col, 0);
+        blank.home_key();
+        assert_eq!(blank.cursor_col, 0);
+        // Text at column 0: only column 0.
+        let mut flush = editor_with("fn main() {");
+        flush.cursor_col = 5;
+        flush.home_key();
+        assert_eq!(flush.cursor_col, 0);
+        flush.home_key();
+        assert_eq!(flush.cursor_col, 0);
+    }
+    
+    /// Home on a wrapped continuation row skips the logical line's
+    /// indentation and stops on that row's first word.
+    #[test]
+    fn home_on_a_continuation_row_stops_at_its_first_word() {
+        let text = format!("    {}", "word ".repeat(40));
+        let mut e = editor_with(&text);
+        e.wrap_override = Some(true);
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 60,
+            height: 20,
+        };
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        (&mut e as &mut Editor).render(area, &mut buf);
+        let width = e.visible_text_width();
+        let segs = e.line_segments(0, width.max(1));
+        assert!(segs.len() > 2, "the line wraps: {segs:?}");
+        let (row_start, row_end) = segs[1];
+        // Caret two characters into a word that begins inside row 2, so the
+        // first press has a word start ahead of it.
+        let chars: Vec<char> = e.lines[0].chars().collect();
+        let word = (row_start + 1..row_end)
+            .filter(|&i| !chars[i].is_whitespace() && chars[i - 1].is_whitespace())
+            .next_back()
+            .expect("a word starts inside row 2");
+        e.cursor_col = word + 2;
+        e.home_key();
+        assert_eq!(e.cursor_col, row_start, "the start of row 2: {segs:?}");
+        e.home_key();
+        assert_eq!(e.cursor_col, segs[0].0, "the start of row 1: {segs:?}");
+        e.home_key();
+        assert_eq!(e.cursor_col, 4, "the line's first non-blank");
+        e.home_key();
+        assert_eq!(e.cursor_col, 0, "column 0");
+        e.home_key();
+        assert_eq!(e.cursor_col, 4);
+    }
+            
     /// #1569 negative: with wrap off, Home and End go to the line's ends.
     #[test]
     fn home_and_end_without_wrap_go_to_the_line_ends() {
