@@ -69773,9 +69773,9 @@ impl App {
     /// than
     /// [`crate::hot_exit::UNREADABLE_KEPT_FOR`]. Called once, at a normal
     /// launch.
-    pub fn restore_hot_exit(&mut self) {
+    pub fn restore_hot_exit(&mut self) -> bool {
         let Some(dir) = self.hot_exit_dir.clone() else {
-            return;
+            return false;
         };
         let root = self.workspace_root().to_path_buf();
         let mut restored = 0usize;
@@ -69813,7 +69813,7 @@ impl App {
                         "Hot exit is off for this session: a backup is at its own path, {}, and could not be moved aside",
                         own.display()
                     );
-                    return;
+                    return false;
                 }
             }
         }
@@ -69969,6 +69969,8 @@ impl App {
         if !notes.is_empty() {
             self.status = notes.join("; ");
         }
+        restored > 0
+        
     }
 
     /// Write what an unsaved-changes prompt (#862) asked about: the focused
@@ -80930,14 +80932,24 @@ pub fn run(
             app.add_workspace_folder(folder);
         }
     }
-    // Restore the tabs / layout carried across a self-update re-exec, then
-    // delete the handoff file so a later normal launch starts clean.
-    if let Some(session_path) = restore_session.as_ref() {
-        match crate::session_state::SessionState::load(session_path) {
+    // Determine which session file to restore from, if any:
+    //   * a self-update re-exec names one explicitly;
+    //   * otherwise hot exit is tried first, and ".session" (saved at the
+    //     previous clean exit) is the fallback when hot exit had nothing.
+    let session_path: Option<std::path::PathBuf> = if let Some(path) = restore_session {
+        Some(path.clone())
+    } else if !app.restore_hot_exit() {
+        Some(std::path::PathBuf::from(".session"))
+    } else {
+        None
+    };
+    // Restore the tabs / layout
+    if let Some(session_path) = session_path {
+        match crate::session_state::SessionState::load(&session_path) {
             Ok(state) => {
                 let left = app.apply_session_state(&state);
                 if app.hold_unrestored_tabs(left) {
-                    let _ = std::fs::remove_file(session_path);
+                    let _ = std::fs::remove_file(&session_path);
                 } else {
                     // Kept: it holds the only copy of cells not put back.
                     app.status = format!(
@@ -80957,11 +80969,7 @@ pub fn run(
                 );
             }
         }
-    } else {
-        // A normal launch brings back what hot exit kept of this workspace
-        // when croft last ended without a clean quit (#862).
-        app.restore_hot_exit();
-    }
+    }            
     // `--zen`: hide the Explorer sidebar and terminal so the editor fills the
     // window. "Move/Copy into New Window" launches the new window this way so it
     // opens focused on just the handed-off file. Toggle back with Cmd+B / Cmd+J.
@@ -81207,6 +81215,15 @@ pub fn run(
             crate::remote::RemoteOutcome::Exited => return Ok(()),
         }
     }
+
+    let state = app.capture_session_state();
+    let file_name = ".session";
+    // let state_path = crate::session_state::persistent_session_path(&root);
+    let state_path = std::path::Path::new(&file_name);
+    if let Err(e) = state.save(&state_path) {
+        eprintln!("croft: failed to save session: {e}");
+    }
+
     Ok(())
 }
 
