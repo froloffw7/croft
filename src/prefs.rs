@@ -26,6 +26,8 @@ pub struct LayoutPrefs {
     pub activity_bar: bool,
     #[serde(default = "default_true")]
     pub status_bar: bool,
+    #[serde(default = "default_true")]
+    pub minimap: bool,
     #[serde(default)]
     pub side_bar_position: SideBarPosition,
     #[serde(default)]
@@ -56,6 +58,7 @@ impl Default for LayoutPrefs {
         Self {
             activity_bar: true,
             status_bar: true,
+            minimap: true,
             side_bar_position: SideBarPosition::default(),
             secondary_side_bar: false,
             panel_alignment: PanelAlignment::default(),
@@ -1953,6 +1956,7 @@ mod tests {
             layout: LayoutPrefs {
                 activity_bar: false,
                 status_bar: false,
+                minimap: true,
                 side_bar_position: SideBarPosition::Right,
                 secondary_side_bar: true,
                 panel_alignment: PanelAlignment::Justify,
@@ -1973,6 +1977,7 @@ mod tests {
         let old = Prefs::load(&path).expect("load old").layout;
         assert_eq!(old, LayoutPrefs::default());
         assert!(old.activity_bar && old.status_bar);
+        assert!(old.minimap && old.minimap);
         assert_eq!(old.side_bar_position, SideBarPosition::Left);
         assert!(!old.secondary_side_bar);
         assert_eq!(old.panel_alignment, PanelAlignment::Center);

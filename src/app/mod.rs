@@ -205,7 +205,7 @@ const SCRUB_OUTLINES_KEPT: usize = 256;
 /// that connects and then hangs.
 const FLEET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
-const ACTIVITY_BAR_WIDTH: u16 = 4;
+const ACTIVITY_BAR_WIDTH: u16 = 3;
 
 const ACTIVITY_ICON_HEIGHT: u16 = 2;
 const ACTIVITY_ICON_GAP: u16 = 0;
@@ -857,7 +857,7 @@ pub struct ActivityBarImages {
 }
 
 /// Single source of truth for the application's user-facing name.
-pub const APP_NAME: &str = "croft";
+pub const APP_NAME: &str = "cr<>ft";
 
 /// Agnoster-style status colours: clean working tree is green, any dirtiness
 /// (modified, staged, or untracked) flips the pill to yellow/orange.
@@ -6944,7 +6944,8 @@ impl App {
             inline_protocol: crate::iterm2_inline::detect_inline_image_protocol(),
             sixel_supported: false,
             resize_repaint_needed: false,
-            minimap_visible: true,
+            minimap_visible: layout_prefs.minimap,
+            // minimap_visible: false,
             minimap_side: MinimapSide::Right,
             minimap_base: None,
             minimap_img_rect: Rect::default(),
@@ -14545,6 +14546,7 @@ impl App {
         let saved = crate::prefs::save_layout(crate::prefs::LayoutPrefs {
             activity_bar: self.activity_bar_visible,
             status_bar: self.status_bar_visible,
+            minimap: self.minimap_visible,
             side_bar_position: self.side_bar_position,
             secondary_side_bar: self.secondary_side_bar_visible,
             panel_alignment: self.panel_alignment,
@@ -75985,7 +75987,7 @@ fn build_title(workspace: &std::path::Path) -> String {
         .map(|n| n.to_string_lossy().into_owned())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| workspace.display().to_string());
-    format!("{APP_NAME}  {name}")
+    format!("{APP_NAME} [{name}]")
 }
 
 /// Returns true if the given key event should copy the terminal pane's
@@ -78046,8 +78048,13 @@ fn is_editor_copy_key(key: KeyEvent) -> bool {
     key.modifiers.contains(KeyModifiers::CONTROL) || key.modifiers.contains(KeyModifiers::SUPER)
 }
 
-/// Cut: `Ctrl+X` / `Cmd+X`.
+/// Cut: `Ctrl+X` / `Cmd+X` / `Shift+Delete`.
 fn is_editor_cut_key(key: KeyEvent) -> bool {
+    // Проверка Shift + Delete
+    if key.code == KeyCode::Delete && key.modifiers.contains(KeyModifiers::SHIFT) {
+        return true;
+    }
+    // Проверка Ctrl+X / Cmd+X
     let KeyCode::Char(c) = key.code else {
         return false;
     };

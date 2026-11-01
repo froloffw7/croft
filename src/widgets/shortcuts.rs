@@ -422,7 +422,7 @@ pub const SHORTCUT_GROUPS: &[ShortcutGroup] = &[
                 handler: "is_copy_relative_path_key",
             },
             ShortcutEntry {
-                keys: "Cmd/Ctrl+X",
+                keys: "Cmd/Ctrl+X / Shift+Delete",
                 description: "Cut the selection",
                 handler: "is_editor_cut_key",
             },
