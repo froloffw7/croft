@@ -178,6 +178,7 @@ pub enum ActivityIcon {
     Extensions,
     Testing,
     CodeQL,
+    #[cfg(not(feature = "private-build"))]
     Sponsor,
     Settings,
 }
@@ -195,7 +196,9 @@ impl ActivityIcon {
             ActivityIcon::Extensions => Some(SidebarView::Extensions),
             ActivityIcon::Testing => Some(SidebarView::Testing),
             ActivityIcon::CodeQL => Some(SidebarView::CodeQL),
-            ActivityIcon::Sponsor | ActivityIcon::Settings => None,
+            #[cfg(not(feature = "private-build"))]
+            ActivityIcon::Sponsor => None,
+            ActivityIcon::Settings => None,
         }
     }
 }
@@ -891,7 +894,9 @@ pub struct ActivityBarImages {
     codeql_hovered: String,
     /// The sponsor heart. It opens a web page rather than a view or a menu,
     /// so it is never selected and has no active variant.
+    #[cfg(not(feature = "private-build"))]
     sponsor_inactive: String,
+    #[cfg(not(feature = "private-build"))]
     sponsor_hovered: String,
     /// The settings gear. `active` is shown while its menu is open so the
     /// button reads as pressed, mirroring the view icons' selected state;
@@ -926,6 +931,7 @@ struct ChromeBakeInput {
     is_tmux: bool,
     icon_bg: ::image::Rgba<u8>,
     icon_ink: crate::iterm2_inline::IconInk,
+    #[cfg(not(feature = "private-build"))]
     sponsor_ink: crate::iterm2_inline::IconInk,
 }
 
@@ -939,7 +945,9 @@ impl ChromeBakeInput {
         self.protocol != shown.protocol
             || self.icon_bg != shown.icon_bg
             || self.icon_ink != shown.icon_ink
+            /*
             || self.sponsor_ink != shown.sponsor_ink
+             */
             || (self.protocol == crate::iterm2_inline::InlineImageProtocol::Sixel
                 && self.cell != shown.cell)
     }
@@ -8037,6 +8045,7 @@ impl App {
                 self.theme.activity_icon_active_rgb(),
                 self.theme.activity_icon_pill_rgb(),
             ),
+            #[cfg(not(feature = "private-build"))]
             sponsor_ink: crate::iterm2_inline::IconInk::new(
                 self.theme.activity_sponsor_rgb(),
                 self.theme.activity_sponsor_hover_rgb(),
@@ -8155,6 +8164,7 @@ impl App {
             is_tmux,
             icon_bg,
             icon_ink,
+            #[cfg(not(feature = "private-build"))]
             sponsor_ink,
         } = *input;
         let canvas_w = cell_w * ACTIVITY_BAR_WIDTH as u32;
@@ -8206,6 +8216,7 @@ impl App {
         // The sponsor heart (#1940) wears its own pink, and is never selected,
         // so it bakes only its resting and hovered states. It shares the gear's
         // bias so the two keep the view icons' spacing between them.
+        #[cfg(not(feature = "private-build"))]
         let sponsor_imgs = (|| {
             let heart = |state| {
                 encode(
@@ -8279,7 +8290,9 @@ impl App {
             Some((exta, exti, exth)),
             Some((tsta, tsti, tsth)),
             Some((cqa, cqi, cqh)),
+            /*
             Some((spi, sph)),
+            */
             Some((gea, gei, geh)),
             Some((lso, lsoh, lsf, lsfh, lpo, lpoh, lpf, lpfh, lcu, lcuh)),
         ) = (
@@ -8291,6 +8304,7 @@ impl App {
             bake(ki::EXTENSIONS_SRC_SVG, 0, ki::KITTY_ID_EXTENSIONS),
             bake(ki::TESTING_SRC_SVG, 0, ki::KITTY_ID_TESTING),
             bake(ki::CODEQL_SRC_SVG, 0, ki::KITTY_ID_CODEQL),
+            #[cfg(not(feature = "private-build"))]
             sponsor_imgs,
             bake(
                 ki::SETTINGS_GEAR_SRC_SVG,
@@ -8324,7 +8338,9 @@ impl App {
                 codeql_active: cqa,
                 codeql_inactive: cqi,
                 codeql_hovered: cqh,
+                #[cfg(not(feature = "private-build"))]
                 sponsor_inactive: spi,
+                #[cfg(not(feature = "private-build"))]
                 sponsor_hovered: sph,
                 settings_active: gea,
                 settings_inactive: gei,
@@ -8933,7 +8949,9 @@ impl App {
         // The heart and the gear are bottom-anchored and may be absent on a
         // short bar (empty block). The heart is never selected; the gear
         // reads "active" while its menu/picker is open.
+        #[cfg(not(feature = "private-build"))]
         let spo_block = self.sidebar_areas.sponsor_icon;
+        #[cfg(not(feature = "private-build"))]
         let spo_state = if hov == Some(ActivityIcon::Sponsor) {
             &images.sponsor_hovered
         } else {
@@ -8983,6 +9001,7 @@ impl App {
             if cql_block.width > 0 {
                 blocks.push((cql_block, cql_state.as_str()));
             }
+            #[cfg(not(feature = "private-build"))]
             if spo_block.width > 0 {
                 blocks.push((spo_block, spo_state.as_str()));
             }
@@ -11364,8 +11383,10 @@ impl App {
             Some(ActivityIcon::Testing)
         } else if rect_contains(a.codeql_icon, col, row) {
             Some(ActivityIcon::CodeQL)
+        /*
         } else if rect_contains(a.sponsor_icon, col, row) {
             Some(ActivityIcon::Sponsor)
+        */
         } else if rect_contains(a.settings_icon, col, row) {
             Some(ActivityIcon::Settings)
         } else {
@@ -11427,6 +11448,7 @@ impl App {
                 ActivityIcon::Extensions => "Extensions",
                 ActivityIcon::Testing => "Testing",
                 ActivityIcon::CodeQL => "CodeQL",
+                #[cfg(not(feature = "private-build"))]
                 ActivityIcon::Sponsor => "Sponsor croft",
                 ActivityIcon::Settings => "Manage",
             });
@@ -19006,6 +19028,7 @@ impl App {
         let extensions_hovered = hov == Some(ActivityIcon::Extensions);
         let testing_hovered = hov == Some(ActivityIcon::Testing);
         let codeql_hovered = hov == Some(ActivityIcon::CodeQL);
+        #[cfg(not(feature = "private-build"))]
         let sponsor_hovered = hov == Some(ActivityIcon::Sponsor);
         let settings_hovered = hov == Some(ActivityIcon::Settings);
 
@@ -19156,6 +19179,7 @@ impl App {
                     codeql_hovered,
                 );
             }
+            #[cfg(not(feature = "private-build"))]
             if sponsor_block.width > 0 {
                 // The heart's own pink, not the bar's greys (see the bake).
                 let color = if sponsor_hovered {
@@ -64312,6 +64336,7 @@ impl App {
                 if let Some(icon) = self.activity_icon_at(m.column, m.row) {
                     match icon.view() {
                         Some(view) => self.click_activity_view(view),
+                        #[cfg(not(feature = "private-build"))]
                         None if icon == ActivityIcon::Sponsor => self.open_sponsor_page(),
                         None => self.open_settings_menu(),
                     }

@@ -297,4 +297,8 @@ opt-level = 2
 lto = false
 codegen-units = 16
 debug = false
-strip = "symbols"
+
+[features]
+default = ["private-build"]
+private-build = []
+

@@ -2639,7 +2639,7 @@ impl Widget for &mut SearchPanel {
         self.clear_x = 0;
         self.clear_y = inner.y;
         if inner.width > 16 {
-            let clear_x = inner.x + inner.width - 1;
+            let clear_x = inner.x + inner.width - 3;
             let refresh_x = clear_x - 3;
             for (x, glyph) in [
                 (refresh_x, crate::icons::SEARCH_REFRESH),
@@ -2653,7 +2653,12 @@ impl Widget for &mut SearchPanel {
                 } else {
                     self.theme.ui(Color::Rgb(0x8b, 0x94, 0xa4))
                 };
-                buf.set_string(x, inner.y, glyph.to_string(), Style::default().fg(color));
+                buf.set_string(
+                    x,
+                    inner.y,
+                    glyph.to_string(),
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                );
             }
             self.refresh_x = refresh_x;
             self.clear_x = clear_x;

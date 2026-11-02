@@ -8,16 +8,11 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
 };
-
 /// Background colour painted under a header pill button so it reads as a touch
 /// target, not a naked single glyph. Matches the chip behind the view title.
-pub const HEADER_BTN_BG: Color = Color::Rgb(0x1e, 0x3a, 0x6e);
-const HEADER_BTN_FG: Color = Color::Rgb(0xe6, 0xed, 0xf5);
-/// Brightened navy the Croft Dark header pill takes while the pointer rests on
-/// it (VS Code `toolbar.hoverBackground`). The Black theme instead grows a
-/// faint teal pill from nothing, so it has no separate constant here.
-pub const HEADER_BTN_HOVER_BG: Color = Color::Rgb(0x2f, 0x5a, 0xa8);
-
+pub const HEADER_BTN_BG: Color = Color::Rgb(0x27, 0x28, 0x22);
+pub const HEADER_BTN_FG: Color = Color::Rgb(0xe6, 0xed, 0xf5);
+pub const HEADER_BTN_HOVER_FG: Color = Color::Rgb(0x4e, 0x9a, 0xff);
 /// Codicon `cod-refresh` — the circular-arrow glyph VS Code paints on a view's
 /// refresh affordance. Verified against the Nerd Font cmap.
 pub const REFRESH_GLYPH: char = '\u{eb37}';
@@ -66,27 +61,23 @@ pub fn render(
     theme: crate::theme::Theme,
     hovered: bool,
 ) {
-    let brand = theme.gradient();
-    let fill = if brand {
-        hovered.then(|| crate::gradient::rgb_color(crate::gradient::POPUP_SEL_BG))
-    } else if hovered {
-        Some(theme.ui(HEADER_BTN_HOVER_BG))
-    } else {
-        Some(theme.ui(HEADER_BTN_BG))
-    };
     let mut style = Style::default().add_modifier(Modifier::BOLD);
-    if let Some(c) = fill {
-        style = style.bg(c);
-    }
+    let brand = theme.gradient();
     // VS Code paints view-action icons in a light `icon.foreground`, not an
     // accent hue. The Black theme previously used the brand teal here, which
     // read as an out-of-place dark green; use the same near-white the panel
     // title wears so the icons sit quietly on the header.
-    style = if brand {
-        style.fg(crate::gradient::rgb_color(crate::gradient::PANEL_TITLE_FG))
+    if brand && hovered {
+        style = style.bg(crate::gradient::rgb_color(crate::gradient::POPUP_SEL_BG));
+    }
+    style = style.fg(if brand {
+        crate::gradient::rgb_color(crate::gradient::PANEL_TITLE_FG)
+    } else if hovered {
+        theme.ui(HEADER_BTN_HOVER_FG)
     } else {
-        style.fg(theme.ui(HEADER_BTN_FG))
-    };
+        theme.ui(HEADER_BTN_FG)
+    });
+
     buf.set_string(x, y, glyph.to_string(), style);
 }
 

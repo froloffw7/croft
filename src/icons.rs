@@ -94,6 +94,7 @@ pub const ACTIVITY_SETTINGS: char = '\u{eb51}';
 /// 60165) and the Nerd Fonts `glyphnames.json` (`cod-heart`): both pin it to
 /// **U+EB05**. Not `heart-filled` (U+EC04), which older Nerd Fonts lack.
 /// Glyph-fallback only; the image path rasterises `assets/icons/heart.svg`.
+#[cfg(not(feature = "private-build"))]
 pub const ACTIVITY_SPONSOR: char = '\u{eb05}';
 
 /// The Customize Layout toolbar (top-right of the editor tab strip and the
