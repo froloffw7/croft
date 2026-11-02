@@ -108,7 +108,7 @@ fn set_title_seq_strips_control_bytes_that_would_break_the_escape() {
 
 #[test]
 fn app_name_constant_is_croft() {
-    assert_eq!(APP_NAME, "croft");
+    assert_eq!(APP_NAME, "cr<>ft");
 }
 
 #[test]
@@ -141,9 +141,9 @@ fn no_stale_tcode_pill_literal_in_source() {
 #[test]
 fn build_title_uses_basename_and_app_name() {
     let p = std::path::Path::new("/Users/somebody/projects/croft");
-    assert_eq!(build_title(p), "croft  croft");
+    assert_eq!(build_title(p), "cr<>ft [croft]");
     let p = std::path::Path::new("/");
-    assert_eq!(build_title(p), "croft  /");
+    assert_eq!(build_title(p), "cr<>ft [/]");
 }
 
 #[test]

@@ -795,7 +795,7 @@ fn dragging_sidebar_splitter_resizes_sidebar() {
     let tmp = tempfile::tempdir().unwrap();
     let mut app = App::new(tmp.path().to_path_buf()).unwrap();
     // Simulate a render so splitter coords are populated.
-    app.sidebar_splitter_x = Some(36); // activity(4) + sidebar(32) = 36
+    app.sidebar_splitter_x = Some(36); // activity bar + sidebar(32) = 36
     app.last_content_width = 60;
     app.last_content_height = 20;
     app.sidebar_width = 32;
@@ -807,14 +807,14 @@ fn dragging_sidebar_splitter_resizes_sidebar() {
         modifiers: KeyModifiers::NONE,
     });
     assert_eq!(app.splitter_drag, Some(SplitterDrag::Sidebar));
-    // Drag right by 10 cells: column 46 -> sidebar should grow to 42.
+    // Drag right by 10 cells: column 46 -> sidebar should grow to 43 (the activity bar is 3 wide).
     app.handle_mouse(crossterm::event::MouseEvent {
         kind: crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Left),
         column: 46,
         row: 5,
         modifiers: KeyModifiers::NONE,
     });
-    assert_eq!(app.sidebar_width, 42);
+    assert_eq!(app.sidebar_width, 43);
     // Mouse-up clears the drag state.
     app.handle_mouse(crossterm::event::MouseEvent {
         kind: crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),

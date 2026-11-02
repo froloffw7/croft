@@ -229,7 +229,7 @@ const SCRUB_OUTLINES_KEPT: usize = 256;
 /// that connects and then hangs.
 const FLEET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
-const ACTIVITY_BAR_WIDTH: u16 = 4;
+const ACTIVITY_BAR_WIDTH: u16 = 3;
 
 const ACTIVITY_ICON_HEIGHT: u16 = 2;
 const ACTIVITY_ICON_GAP: u16 = 0;
@@ -965,7 +965,7 @@ struct WelcomeBakeKey {
 }
 
 /// Single source of truth for the application's user-facing name.
-pub const APP_NAME: &str = "croft";
+pub const APP_NAME: &str = "cr<>ft";
 
 /// Agnoster-style status colours: clean working tree is green, any dirtiness
 /// (modified, staged, or untracked) flips the pill to yellow/orange.
@@ -78012,7 +78012,7 @@ fn build_title(workspace: &std::path::Path) -> String {
         .map(|n| n.to_string_lossy().into_owned())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| workspace.display().to_string());
-    format!("{APP_NAME}  {name}")
+    format!("{APP_NAME} [{name}]")
 }
 
 /// Returns true if the given key event should copy the terminal pane's
@@ -80087,8 +80087,13 @@ fn is_editor_copy_key(key: KeyEvent) -> bool {
     key.modifiers.contains(KeyModifiers::CONTROL) || key.modifiers.contains(KeyModifiers::SUPER)
 }
 
-/// Cut: `Ctrl+X` / `Cmd+X`.
+/// Cut: `Ctrl+X` / `Cmd+X` / `Shift+Delete`.
 fn is_editor_cut_key(key: KeyEvent) -> bool {
+    // Проверка Shift + Delete
+    if key.code == KeyCode::Delete && key.modifiers.contains(KeyModifiers::SHIFT) {
+        return true;
+    }
+    // Проверка Ctrl+X / Cmd+X
     let KeyCode::Char(c) = key.code else {
         return false;
     };
