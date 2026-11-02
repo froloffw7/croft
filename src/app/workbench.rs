@@ -42,7 +42,7 @@ impl ActivityIcon {
 /// Where the activity bar's sponsor heart leads (#1940).
 pub(super) const SPONSOR_URL: &str = "https://github.com/sponsors/vitali87";
 
-pub(super) const ACTIVITY_BAR_WIDTH: u16 = 4;
+pub(super) const ACTIVITY_BAR_WIDTH: u16 = 3;
 
 pub(super) const ACTIVITY_ICON_HEIGHT: u16 = 2;
 

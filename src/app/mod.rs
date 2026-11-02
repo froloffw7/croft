@@ -367,7 +367,7 @@ struct WelcomeBakeKey {
 }
 
 /// Single source of truth for the application's user-facing name.
-pub const APP_NAME: &str = "croft";
+pub const APP_NAME: &str = "cr<>ft";
 
 /// The status bar's three text tones, so hierarchy comes from brightness
 /// rather than from dividers or a colour per item: `text` for the values you
