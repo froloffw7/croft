@@ -1550,7 +1550,7 @@ pub(super) fn build_title(workspace: &std::path::Path) -> String {
         .map(|n| n.to_string_lossy().into_owned())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| workspace.display().to_string());
-    format!("{APP_NAME}  {name}")
+    format!("{APP_NAME} [{name}]")
 }
 
 /// How hints name the updater chord: with the modifier each platform's
