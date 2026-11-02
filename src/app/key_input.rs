@@ -2955,8 +2955,13 @@ pub(super) fn is_editor_copy_key(key: KeyEvent) -> bool {
     key.modifiers.contains(KeyModifiers::CONTROL) || key.modifiers.contains(KeyModifiers::SUPER)
 }
 
-/// Cut: `Ctrl+X` / `Cmd+X`.
+/// Cut: `Ctrl+X` / `Cmd+X` / `Shift+Delete`.
 pub(super) fn is_editor_cut_key(key: KeyEvent) -> bool {
+    // Проверка Shift + Delete
+    if key.code == KeyCode::Delete && key.modifiers.contains(KeyModifiers::SHIFT) {
+        return true;
+    }
+    // Проверка Ctrl+X / Cmd+X
     let KeyCode::Char(c) = key.code else {
         return false;
     };
