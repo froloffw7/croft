@@ -1278,3 +1278,21 @@ fn the_output_ports_and_captures_tabs_are_announced_by_name_and_row() {
     assert_eq!(snap.focus, "Captures, 1 capture");
     assert_eq!(snap.item.as_deref(), Some("Build failed, from zsh"));
 }
+
+/// OSC 22: the Remote view is text the user types into, so over it the
+/// pointer is an I-beam; with another view in the side bar it is the arrow.
+#[test]
+fn the_pointer_is_an_i_beam_over_the_remote_view() {
+    use crate::pointer_shape::PointerShape::{Arrow, Text};
+    let tmp = tempfile::tempdir().unwrap();
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    app.sidebar_view = SidebarView::Remote;
+    let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+    term.draw(|f| app.render(f)).unwrap();
+    let area = app.remote.last_area;
+    assert!(area.width > 2 && area.height > 2, "the view is on screen");
+    let (col, row) = (area.x + 1, area.y + 1);
+    assert_eq!(app.pointer_shape_at(col, row), Text);
+    app.sidebar_view = SidebarView::Explorer;
+    assert_eq!(app.pointer_shape_at(col, row), Arrow);
+}

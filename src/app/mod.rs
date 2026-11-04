@@ -4487,6 +4487,12 @@ pub struct App {
     /// is true, and preserves it across the theme-switch re-detect that would
     /// otherwise reset to `None` (sixel has no env signal to re-derive from).
     sixel_supported: bool,
+    /// The host terminal draws the pointer shapes croft asks for (OSC 22,
+    /// answered `1` to the launch probe). Off until it says so.
+    pointer_shapes: bool,
+    /// The shape last requested of the terminal, so one is sent only when it
+    /// changes.
+    pointer_shape: crate::pointer_shape::PointerShape,
     /// One-shot: a WINCH arrived, so the next frame must wipe and repaint every
     /// cell on EVERY protocol. A dtach reattach fires WINCH (`-r winch`) against
     /// a blank physical screen while ratatui's buffer still says everything is
@@ -7284,6 +7290,8 @@ impl App {
             problems_badge_cell: None,
             inline_protocol: crate::iterm2_inline::detect_inline_image_protocol(),
             sixel_supported: false,
+            pointer_shapes: false,
+            pointer_shape: crate::pointer_shape::PointerShape::Arrow,
             resize_repaint_needed: false,
             minimap_visible: layout_prefs.minimap,
             minimap_side: MinimapSide::Right,
@@ -20954,6 +20962,48 @@ impl App {
     /// capped. Peeks without clearing; `drain_terminals_dirty` resets it.
     pub fn peek_terminals_pending_bytes(&self) -> usize {
         self.terminals.iter().map(|t| t.peek_pending_bytes()).sum()
+    }
+
+    /// The pointer shape for the cell `(col, row)`: the I-beam over text the
+    /// user edits (the editor's text, a terminal pane, the Remote view), the
+    /// arrow over everything else, and over any menu or modal on top.
+    fn pointer_shape_at(&self, col: u16, row: u16) -> crate::pointer_shape::PointerShape {
+        use crate::pointer_shape::PointerShape;
+        if self.modal_overlay_open() || self.context_menu.is_some() {
+            return PointerShape::Arrow;
+        }
+        let over_text = self.terminal_at_pos(col, row).is_some()
+            || (self.sidebar_view == SidebarView::Remote
+                && rect_contains(self.remote.last_area, col, row))
+            || (self.editor_is_text() && self.editor.text_hit(col, row))
+            || self.editor_layout.inactive_groups().iter().any(|g| {
+                !g.has_non_text_view() && g.markdown_preview.is_none() && g.text_hit(col, row)
+            });
+        if over_text {
+            PointerShape::Text
+        } else {
+            PointerShape::Arrow
+        }
+    }
+
+    /// Ask the terminal for the pointer shape that belongs under `(col, row)`,
+    /// when it has changed and the terminal said it can draw one (OSC 22).
+    fn sync_pointer_shape(&mut self, col: u16, row: u16) {
+        if !self.pointer_shapes {
+            return;
+        }
+        let want = self.pointer_shape_at(col, row);
+        if want == self.pointer_shape {
+            return;
+        }
+        self.pointer_shape = want;
+        // Not under test: the suite must not write escapes to the runner's tty.
+        if !cfg!(test) {
+            use std::io::Write;
+            let mut out = std::io::stdout();
+            let _ = out.write_all(&want.set_sequence());
+            let _ = out.flush();
+        }
     }
 
     fn terminal_at_pos(&self, col: u16, row: u16) -> Option<usize> {
@@ -62224,6 +62274,7 @@ impl App {
     }
 
     fn handle_mouse(&mut self, m: MouseEvent) {
+        self.sync_pointer_shape(m.column, m.row);
         self.editor.sync_occurrence_word_sel();
         if self.screencast.is_on()
             && let MouseEventKind::Down(button) = m.kind
@@ -82881,6 +82932,7 @@ pub fn run(
                 .store(app.sixel_supported, std::sync::atomic::Ordering::Relaxed);
         }
         app.legacy_ctrl_punct = host.answered && !host.kitty_keyboard;
+        app.pointer_shapes = host.pointer_shapes;
     }
     crate::startup_trace::mark("host terminal answered");
     let mut out = stdout();
@@ -82972,6 +83024,11 @@ pub fn run(
         use std::io::Write;
         let mut out = stdout();
         out.write_all(&set_title_seq("")).ok();
+        // Hand the pointer back as the arrow it was before croft.
+        if app.pointer_shapes {
+            out.write_all(&crate::pointer_shape::PointerShape::Arrow.set_sequence())
+                .ok();
+        }
         // Revert the host terminal's default colors (OSC 110/111, plus the
         // iTerm2 sRGB override where present) so the user's shell after
         // croft exits doesn't keep our forced theme colours.

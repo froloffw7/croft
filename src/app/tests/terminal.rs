@@ -8035,3 +8035,18 @@ fn a_command_with_no_output_keeps_the_panes_problems() {
     assert!(!app.apply_build_scan(pane, Some(&cwd), "tsc --watch", "a.c:1:1: error: old\n"));
     assert!(app.apply_build_scan(pane, Some(&cwd), "make", "b.c:1:1: error: new\n"));
 }
+
+/// OSC 22: the pointer is an I-beam over a terminal pane.
+#[test]
+fn the_pointer_is_an_i_beam_over_a_terminal_pane() {
+    use crate::pointer_shape::PointerShape::{Arrow, Text};
+    let tmp = tempfile::tempdir().unwrap();
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+    term.draw(|f| app.render(f)).unwrap();
+    let area = app.terminals[app.active_terminal].last_area;
+    assert!(area.width > 2 && area.height > 2, "the pane is on screen");
+    let (col, row) = (area.x + area.width / 2, area.y + area.height / 2);
+    assert_eq!(app.pointer_shape_at(col, row), Text);
+    assert_eq!(app.pointer_shape_at(0, 0), Arrow, "the title row is chrome");
+}

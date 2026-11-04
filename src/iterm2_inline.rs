@@ -507,13 +507,19 @@ pub struct HostProbe {
     /// protocol pushed it reports Ctrl+/ and Ctrl+7 apart; without it both
     /// are the byte 0x1F (#1007).
     pub kitty_keyboard: bool,
+    /// It answered `OSC 22 ; ?pointer ST` with `1`: it draws the pointer
+    /// shape croft asks for (see [`crate::pointer_shape`]).
+    pub pointer_shapes: bool,
 }
 
 impl HostProbe {
     /// Read the replies in `reply`, ignoring bytes around them.
     pub fn parse(reply: &[u8]) -> Self {
         let text = String::from_utf8_lossy(reply);
-        let mut probe = HostProbe::default();
+        let mut probe = HostProbe {
+            pointer_shapes: crate::pointer_shape::reply_says_supported(reply),
+            ..HostProbe::default()
+        };
         for (at, _) in text.match_indices("\x1b[?") {
             let tail = &text[at + 3..];
             let params = tail
@@ -571,7 +577,12 @@ pub fn ask_host() -> PendingHostProbe {
     use std::io::Write;
     let mut out = std::io::stdout();
     PendingHostProbe {
-        sent: out.write_all(b"\x1b[?u\x1b[c").is_ok() && out.flush().is_ok(),
+        // The OSC 22 query sits before DA1, so a terminal that answers it
+        // does so ahead of DA1's `c` that ends the read.
+        sent: out.write_all(b"\x1b[?u").is_ok()
+            && out.write_all(crate::pointer_shape::QUERY_SEQUENCE).is_ok()
+            && out.write_all(b"\x1b[c").is_ok()
+            && out.flush().is_ok(),
     }
 }
 
@@ -2201,6 +2212,7 @@ mod tests {
                 answered: true,
                 sixel: false,
                 kitty_keyboard: true,
+                pointer_shapes: false,
             }
         );
         let xterm = HostProbe::parse(b"\x1b[?63;1;2;4;6;9;15;22c");
@@ -2209,6 +2221,11 @@ mod tests {
         let flagged = HostProbe::parse(b"x\x1b[?15u\x1b[?4;6c");
         assert!(flagged.kitty_keyboard && flagged.sixel);
         assert_eq!(HostProbe::parse(b""), HostProbe::default());
+        // OSC 22 pointer-shape answer: `1` has it, `0` or silence does not.
+        let shaped = HostProbe::parse(b"\x1b]22;1\x1b\\\x1b[?62;4c");
+        assert!(shaped.pointer_shapes && shaped.answered && shaped.sixel);
+        assert!(!HostProbe::parse(b"\x1b]22;0\x1b\\\x1b[?62;4c").pointer_shapes);
+        assert!(!HostProbe::parse(b"\x1b[?62;4c").pointer_shapes);
         // A lone kitty reply without DA1 is not "answered".
         assert!(!HostProbe::parse(b"\x1b[?1u").answered);
     }

@@ -82,6 +82,7 @@ src/
 ├── pair/local.rs         the navigator's local-model transport: one Anthropic-compatible `/v1/messages` streaming call per turn (Ollama, LM Studio, llama.cpp, vLLM), deliberately not the claude CLI; selected by `croft pair --provider ollama [--base-url <url>] --model <m>`
 ├── pair/proactive.rs     the proactive-look detector (pure text-in/row-out): tree-sitter judges that the driver completed a new construct since the navigator's last look; `App::tick_proactive_navigator` owns the gates and hands the seat a comment-only yield turn
 ├── pair_host.rs          the resident navigator's in-process host: the App spawns the pilot from the workspace's `<hash>.pair.json` record, drains `PairEvent`s per tick, and drives ask / yield turns
+├── pointer_shape.rs     mouse pointer shape over OSC 22: an I-beam over editor text, terminal panes and the Remote view, the arrow elsewhere; set only after the launch query (`OSC 22 ; ?pointer`) is answered `1`
 ├── session_state.rs     captures open tabs / layout so a self-update re-exec can restore them
 ├── sheet.rs             CSV / TSV / XLSX / XLS / XLSB / ODS parsing via the csv and calamine crates
 ├── shell_integration.rs  OSC 133 / 7 / 9 shell integration: `OscSniffer` intercepts the marks alacritty drops (and OSC 7501 status reports), plus the per-shell rc shims that emit them
