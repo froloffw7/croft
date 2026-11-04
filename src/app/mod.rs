@@ -70600,10 +70600,8 @@ impl App {
             }
             MenuAction::ToggleBookmarkAt { line } => {
                 self.focus_pane(Pane::Editor);
-                // `toggle_bookmark` acts on the cursor, so seat it on the
-                // clicked line first; `line` is 1-based, the editor 0-based.
-                self.editor.goto_line_centered(line.saturating_sub(1));
-                self.toggle_bookmark();
+                // `line` is 1-based, like the bookmark set.
+                self.toggle_bookmark_at(line);
             }
             MenuAction::NextBookmark => {
                 self.focus_pane(Pane::Editor);
