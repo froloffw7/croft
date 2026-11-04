@@ -15392,6 +15392,25 @@ impl Editor {
         self.scroll_col = self.scroll_col.saturating_add(n);
     }
 
+    /// Whether the cell `(col, row)` lies over the text itself: inside the
+    /// pane, right of the gutter and off the scrollbar. Where the pointer is
+    /// an I-beam.
+    pub fn text_hit(&self, col: u16, row: u16) -> bool {
+        let inner = self.last_inner;
+        let text_x = inner.x.saturating_add(self.last_gutter_width + 1);
+        col >= text_x
+            && col < inner.x.saturating_add(inner.width)
+            && row >= inner.y
+            && row < inner.y.saturating_add(inner.height)
+            && !(self.last_scrollbar.width > 0
+                && col >= self.last_scrollbar.x
+                && col
+                    < self
+                        .last_scrollbar
+                        .x
+                        .saturating_add(self.last_scrollbar.width))
+    }
+
     /// Recompute the visible text width from `last_inner` / `last_gutter_width`
     /// (set during the most recent render) and use it to decide whether the
     /// current cursor column is on-screen. This is the same arithmetic the
