@@ -43257,6 +43257,17 @@ impl App {
                     );
                 }
             }
+            ListPurpose::Bookmark => {
+                if let Some((line, path)) = row.id.split_once('\t')
+                    && let Ok(line) = line.parse::<usize>()
+                {
+                    let path = PathBuf::from(path);
+                    match self.open_at(&path, line.saturating_sub(1), 0) {
+                        Ok(()) => self.status = format!("Bookmark at line {line}"),
+                        Err(e) => self.status = format!("Cannot open bookmark: {e}"),
+                    }
+                }
+            }
             ListPurpose::OutputChannel => {
                 self.output.sync();
                 self.output.select_by_name(&row.id);
@@ -48194,7 +48205,31 @@ impl App {
             sidebar_width: self.sidebar_width,
             terminal_height: self.terminal_height,
             focus_editor: self.focus == Pane::Editor,
+            bookmarks: self.all_bookmarks(),
         }
+    }
+
+    /// The bookmarks of every open tab, keyed by file. Each tab is an editor
+    /// with its own marks, so the active one's map alone would miss the rest.
+    fn all_bookmarks(
+        &self,
+    ) -> std::collections::HashMap<PathBuf, std::collections::BTreeSet<usize>> {
+        let mut all = std::collections::HashMap::new();
+        // A tab's own file first: its marks are the live ones.
+        for ed in &self.editor.editors {
+            if let Some(path) = &ed.path
+                && let Some(set) = ed.bookmarks.get(path)
+            {
+                all.insert(path.clone(), set.clone());
+            }
+        }
+        // Then files the tab showed earlier, whose marks it still holds.
+        for ed in &self.editor.editors {
+            for (path, set) in &ed.bookmarks {
+                all.entry(path.clone()).or_insert_with(|| set.clone());
+            }
+        }
+        all
     }
 
     /// Returns the xlsx cells (#1593) it could not put back, as the tabs
@@ -48217,6 +48252,11 @@ impl App {
                 kept.sheet_cells = unapplied;
                 left.push(kept);
             }
+        }
+        // Every tab is its own editor with its own marks: hand each the saved
+        // set once its file is open, trimmed to the lines the file still has.
+        for ed in self.editor.editors.iter_mut() {
+            ed.restore_bookmarks(&state.bookmarks);
         }
         if state.active_tab < self.editor.tab_count() {
             self.editor.select(state.active_tab);
@@ -48811,6 +48851,48 @@ impl App {
             }
             None => String::from("No bookmarks in this file (Cmd+Opt+Shift+K sets one)"),
         };
+    }
+
+    /// Bookmarks: Go to Bookmark…: a filterable list of every bookmark in
+    /// the open tabs (`file:line  text of the line`), Enter jumps to it.
+    fn open_bookmark_picker(&mut self) {
+        use crate::widgets::list_picker::{ListPicker, ListPurpose, ListRow};
+        let root = self.tree.root.clone();
+        let all = self.all_bookmarks();
+        let mut paths: Vec<&PathBuf> = all.keys().collect();
+        paths.sort();
+        let mut rows = Vec::new();
+        for path in paths {
+            let open = self
+                .editor
+                .editors
+                .iter()
+                .find(|e| e.path.as_ref() == Some(path));
+            let on_disk: Vec<String>;
+            let lines: &[String] = match open {
+                Some(e) => &e.lines,
+                None => {
+                    on_disk = std::fs::read_to_string(path)
+                        .map(|t| t.lines().map(str::to_string).collect())
+                        .unwrap_or_default();
+                    &on_disk
+                }
+            };
+            let shown = path.strip_prefix(&root).unwrap_or(path).display();
+            // A mark past the last line is no target (see `bookmarked_lines`).
+            for &line in all[path]
+                .iter()
+                .filter(|&&l| (1..=lines.len()).contains(&l))
+            {
+                let text: String = lines[line - 1].trim().chars().take(80).collect();
+                rows.push(ListRow {
+                    id: format!("{line}\t{}", path.display()),
+                    label: format!("{shown}:{line}  {text}"),
+                });
+            }
+        }
+        let picker = ListPicker::new(ListPurpose::Bookmark, "Go to Bookmark", rows);
+        self.open_list_picker(picker, "No bookmarks (Cmd+Opt+Shift+K sets one)");
     }
 
     /// Clear every bookmark in the open file, reporting how many went.
@@ -57973,6 +58055,7 @@ impl App {
             Cmd::NextBookmark => self.goto_bookmark(true),
             Cmd::PreviousBookmark => self.goto_bookmark(false),
             Cmd::ClearBookmarks => self.clear_bookmarks(),
+            Cmd::GoToBookmark => self.open_bookmark_picker(),
             Cmd::SaveFile => self.save(),
             Cmd::SaveAs => self.open_save_as_prompt(),
             Cmd::SaveWithSudo => self.save_with_sudo(),
@@ -59751,6 +59834,8 @@ impl App {
                     picker.select_next();
                 }
             }
+            (KeyCode::Home, _) => picker.select_first(),
+            (KeyCode::End, _) => picker.select_last(),
             (KeyCode::Left, _) => picker.move_cursor_left(),
             (KeyCode::Right, _) => picker.move_cursor_right(),
             (KeyCode::Backspace, _) => picker.pop_char(),
@@ -70827,9 +70912,9 @@ impl App {
     /// than
     /// [`crate::hot_exit::UNREADABLE_KEPT_FOR`]. Called once, at a normal
     /// launch.
-    pub fn restore_hot_exit(&mut self) {
+    pub fn restore_hot_exit(&mut self) -> bool {
         let Some(dir) = self.hot_exit_dir.clone() else {
-            return;
+            return false;
         };
         let root = self.workspace_root().to_path_buf();
         let mut restored = 0usize;
@@ -70867,7 +70952,7 @@ impl App {
                         "Hot exit is off for this session: a backup is at its own path, {}, and could not be moved aside",
                         own.display()
                     );
-                    return;
+                    return false;
                 }
             }
         }
@@ -71023,6 +71108,7 @@ impl App {
         if !notes.is_empty() {
             self.status = notes.join("; ");
         }
+        restored > 0
     }
 
     /// Write what an unsaved-changes prompt (#862) asked about: the focused
@@ -82110,14 +82196,24 @@ pub fn run(
             app.add_workspace_folder(folder);
         }
     }
-    // Restore the tabs / layout carried across a self-update re-exec, then
-    // delete the handoff file so a later normal launch starts clean.
-    if let Some(session_path) = restore_session.as_ref() {
-        match crate::session_state::SessionState::load(session_path) {
+    // Determine which session file to restore from, if any:
+    //   * a self-update re-exec names one explicitly;
+    //   * otherwise hot exit is tried first, and ".session" (saved at the
+    //     previous clean exit) is the fallback when hot exit had nothing.
+    let session_path: Option<std::path::PathBuf> = if let Some(path) = restore_session {
+        Some(path.clone())
+    } else if !app.restore_hot_exit() {
+        Some(std::path::PathBuf::from(".session"))
+    } else {
+        None
+    };
+    // Restore the tabs / layout
+    if let Some(session_path) = session_path {
+        match crate::session_state::SessionState::load(&session_path) {
             Ok(state) => {
                 let left = app.apply_session_state(&state);
                 if app.hold_unrestored_tabs(left) {
-                    let _ = std::fs::remove_file(session_path);
+                    let _ = std::fs::remove_file(&session_path);
                 } else {
                     // Kept: it holds the only copy of cells not put back.
                     app.status = format!(
@@ -82137,10 +82233,6 @@ pub fn run(
                 );
             }
         }
-    } else {
-        // A normal launch brings back what hot exit kept of this workspace
-        // when croft last ended without a clean quit (#862).
-        app.restore_hot_exit();
     }
     crate::startup_trace::mark("session restored");
     // `--zen`: hide the Explorer sidebar and terminal so the editor fills the
@@ -82401,6 +82493,15 @@ pub fn run(
             crate::remote::RemoteOutcome::Exited => return Ok(()),
         }
     }
+
+    let state = app.capture_session_state();
+    let file_name = ".session";
+    // let state_path = crate::session_state::persistent_session_path(&root);
+    let state_path = std::path::Path::new(&file_name);
+    if let Err(e) = state.save(state_path) {
+        eprintln!("croft: failed to save session: {e}");
+    }
+
     Ok(())
 }
 
