@@ -3,7 +3,8 @@
 //! A terminal that speaks the sequence (kitty's pointer-shape protocol, and
 //! any emulator that implements the same OSC 22) draws the named cursor over
 //! its window. croft asks for an I-beam over text it edits (the editor, a
-//! terminal pane, the Remote view) and the plain arrow everywhere else.
+//! terminal pane, the Remote view), a double arrow over the seams that resize
+//! a split, and the plain arrow everywhere else.
 //!
 //! The names are X11 cursor-font names (`xterm` is `XC_xterm`, `left_ptr` is
 //! `XC_left_ptr`), which a terminal resolves through its cursor theme.
@@ -20,6 +21,10 @@ pub enum PointerShape {
     Arrow,
     /// `XC_xterm`: the I-beam, over text.
     Text,
+    /// `XC_sb_h_double_arrow`: left and right, over a vertical seam.
+    ResizeCols,
+    /// `XC_sb_v_double_arrow`: up and down, over a horizontal seam.
+    ResizeRows,
 }
 
 impl PointerShape {
@@ -28,6 +33,8 @@ impl PointerShape {
         match self {
             PointerShape::Arrow => "left_ptr",
             PointerShape::Text => "xterm",
+            PointerShape::ResizeCols => "sb_h_double_arrow",
+            PointerShape::ResizeRows => "sb_v_double_arrow",
         }
     }
 
@@ -67,6 +74,14 @@ mod tests {
             b"\x1b]22;left_ptr\x1b\\"
         );
         assert_eq!(PointerShape::Text.set_sequence(), b"\x1b]22;xterm\x1b\\");
+        assert_eq!(
+            PointerShape::ResizeCols.set_sequence(),
+            b"\x1b]22;sb_h_double_arrow\x1b\\"
+        );
+        assert_eq!(
+            PointerShape::ResizeRows.set_sequence(),
+            b"\x1b]22;sb_v_double_arrow\x1b\\"
+        );
     }
 
     #[test]

@@ -8049,3 +8049,27 @@ fn the_pointer_is_an_i_beam_over_a_terminal_pane() {
     assert_eq!(app.pointer_shape_at(col, row), Text);
     assert_eq!(app.pointer_shape_at(0, 0), Arrow, "the title row is chrome");
 }
+
+#[test]
+fn the_pointer_is_a_double_arrow_over_the_seams_that_resize_a_split() {
+    use crate::pointer_shape::PointerShape::{Arrow, ResizeCols, ResizeRows};
+    let tmp = tempfile::tempdir().unwrap();
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    app.show_terminal = true;
+    let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+    term.draw(|f| app.render(f)).unwrap();
+    let x = app.sidebar_splitter_x.expect("the sidebar seam is drawn");
+    let y = app.terminal_splitter_y.expect("the terminal seam is drawn");
+    // Sidebar | editor: a vertical line, dragged left and right. Either of
+    // the two columns that grab it shows the arrow.
+    assert_eq!(app.pointer_shape_at(x, 5), ResizeCols);
+    assert_eq!(app.pointer_shape_at(x - 1, 5), ResizeCols);
+    // Editor / terminal: a horizontal line, dragged up and down.
+    assert_eq!(app.pointer_shape_at(x + 10, y), ResizeRows);
+    assert_eq!(app.pointer_shape_at(x + 10, y - 1), ResizeRows);
+    // Inside the sidebar on the seam's row it is chrome again.
+    assert_eq!(app.pointer_shape_at(2, y), Arrow);
+    // A drag in progress keeps its arrow wherever the pointer strays.
+    app.splitter_drag = Some(SplitterDrag::Sidebar);
+    assert_eq!(app.pointer_shape_at(x + 30, 3), ResizeCols);
+}
