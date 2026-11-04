@@ -60,3 +60,5 @@ preview*.svg
 /CLAUDE.md.*
 
 /patches
+.session*
+*.diff
