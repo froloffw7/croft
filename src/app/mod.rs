@@ -6148,6 +6148,22 @@ enum SplitterDrag {
     EditorSeam(editor_layout::Seam),
 }
 
+/// Where the single-line `Prompt` popup sits on a screen of `area`: centred,
+/// a row taller when it carries an error.
+fn prompt_rect(area: Rect, has_error: bool) -> Rect {
+    let width = area.width.saturating_sub(8).clamp(40, 80).min(area.width);
+    let height = if has_error { 6 } else { 5 };
+    let x = (area.width.saturating_sub(width)) / 2 + area.x;
+    let y = (area.height.saturating_sub(height)) / 2 + area.y;
+    Rect {
+        x,
+        y,
+        width,
+        height,
+    }
+    .intersection(area)
+}
+
 /// The resize pointer for an editor seam: a vertical line between side-by-side
 /// groups drags left and right.
 fn seam_shape(dir: editor_layout::SplitDir) -> crate::pointer_shape::PointerShape {
@@ -20557,8 +20573,38 @@ impl App {
         self.sidebar_splitter_x.is_none_or(|x| col >= x) && (row == y || row == y.saturating_sub(1))
     }
 
+    /// Whether `(col, row)` is over a single-line input the user types into:
+    /// the value row of the prompt popups or a Search view field.
+    fn input_field_at(&self, col: u16, row: u16) -> bool {
+        let field_row = |popup: Rect| Rect {
+            x: popup.x + 2,
+            y: popup.y + 1,
+            width: popup.width.saturating_sub(4),
+            height: 1,
+        };
+        if let Some(p) = &self.prompt {
+            return rect_contains(
+                field_row(prompt_rect(self.last_frame_area, p.error.is_some())),
+                col,
+                row,
+            );
+        }
+        if let Some(p) = &self.input_prompt {
+            return !p.confirm && rect_contains(field_row(p.last_rect), col, row);
+        }
+        if self.modal_overlay_open() || self.context_menu.is_some() {
+            return false;
+        }
+        self.sidebar_view == SidebarView::Search && self.search.field_at(col, row).is_some()
+    }
+
     fn pointer_shape_at(&self, col: u16, row: u16) -> crate::pointer_shape::PointerShape {
         use crate::pointer_shape::PointerShape;
+        // A text field takes the I-beam: the popups' value rows and the
+        // Search view's inputs.
+        if self.input_field_at(col, row) {
+            return PointerShape::Text;
+        }
         if self.modal_overlay_open() || self.context_menu.is_some() {
             return PointerShape::Arrow;
         }
@@ -25671,17 +25717,7 @@ impl App {
     fn render_prompt(&self, frame: &mut ratatui::Frame) {
         let Some(p) = &self.prompt else { return };
         let area = frame.area();
-        let width = area.width.saturating_sub(8).clamp(40, 80).min(area.width);
-        let height = if p.error.is_some() { 6 } else { 5 };
-        let x = (area.width.saturating_sub(width)) / 2 + area.x;
-        let y = (area.height.saturating_sub(height)) / 2 + area.y;
-        let rect = Rect {
-            x,
-            y,
-            width,
-            height,
-        };
-        let rect = rect.intersection(area);
+        let rect = prompt_rect(area, p.error.is_some());
         let grad = self.popup_gradient();
         let cursor_fg = if grad {
             rgb_color(GRAD_TL)
