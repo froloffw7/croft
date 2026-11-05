@@ -20529,9 +20529,6 @@ impl App {
         self.terminals.iter().map(|t| t.peek_pending_bytes()).sum()
     }
 
-    /// The pointer shape for the cell `(col, row)`: the I-beam over text the
-    /// user edits (the editor's text, a terminal pane, the Remote view), the
-    /// arrow over everything else, and over any menu or modal on top.
     /// Whether `(col, row)` grabs the seam between the sidebar and the editor.
     ///
     /// Two columns count: the seam itself (`x`, the editor's left edge) and
@@ -20598,6 +20595,9 @@ impl App {
         self.sidebar_view == SidebarView::Search && self.search.field_at(col, row).is_some()
     }
 
+    /// The pointer shape for the cell `(col, row)`: the I-beam over text the
+    /// user edits (the editor's text, a terminal pane, the Remote view), the
+    /// arrow over everything else, and over any menu or modal on top.
     fn pointer_shape_at(&self, col: u16, row: u16) -> crate::pointer_shape::PointerShape {
         use crate::pointer_shape::PointerShape;
         // A text field takes the I-beam: the popups' value rows and the
