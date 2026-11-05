@@ -3404,3 +3404,20 @@ fn a_longer_whole_query_puts_the_find_caret_at_its_end() {
     assert_eq!(st.query, "abcdef");
     assert_eq!(st.caret(), 6);
 }
+
+
+#[test]
+fn the_pointer_is_an_i_beam_over_a_find_bar_input_row() {
+    use crate::pointer_shape::PointerShape::{Arrow, Text};
+    let tmp = tempfile::tempdir().unwrap();
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    let mut find = crate::widgets::editor_find::EditorFind::new(
+        String::from("needle"),
+        crate::widgets::search::SearchOpts::default(),
+    );
+    find.last_rect = ratatui::layout::Rect::new(10, 2, 48, 3);
+    app.editor_find = Some(find);
+    assert_eq!(app.pointer_shape_at(15, 3), Text);
+    assert_eq!(app.pointer_shape_at(10, 3), Arrow, "the left border");
+    assert_eq!(app.pointer_shape_at(15, 2), Arrow, "the title row");
+}
