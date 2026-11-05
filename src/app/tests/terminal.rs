@@ -8047,6 +8047,11 @@ fn the_pointer_is_an_i_beam_over_a_terminal_pane() {
     assert!(area.width > 2 && area.height > 2, "the pane is on screen");
     let (col, row) = (area.x + area.width / 2, area.y + area.height / 2);
     assert_eq!(app.pointer_shape_at(col, row), Text);
+    assert_eq!(
+        app.pointer_shape_at(area.x + area.width - 1, row),
+        Arrow,
+        "the pane's border is not text"
+    );
     assert_eq!(app.pointer_shape_at(0, 0), Arrow, "the title row is chrome");
 }
 
@@ -8065,8 +8070,14 @@ fn the_pointer_is_a_double_arrow_over_the_seams_that_resize_a_split() {
     assert_eq!(app.pointer_shape_at(x, 5), ResizeCols);
     assert_eq!(app.pointer_shape_at(x - 1, 5), ResizeCols);
     // Editor / terminal: a horizontal line, dragged up and down.
-    assert_eq!(app.pointer_shape_at(x + 10, y), ResizeRows);
-    assert_eq!(app.pointer_shape_at(x + 10, y - 1), ResizeRows);
+    // The panel header's tabs and buttons sit on that seam and act on a
+    // click, so they keep the arrow; the free cells between them resize.
+    let tab = app.terminal_tab_rect;
+    assert!(tab.width > 0, "the TERMINAL tab is drawn");
+    assert_eq!(app.pointer_shape_at(tab.x, tab.y), Arrow, "a panel tab");
+    let free = (x..100).find(|&c| app.pointer_shape_at(c, y) == ResizeRows);
+    assert!(free.is_some(), "some header cell still resizes");
+    assert_eq!(app.pointer_shape_at(free.unwrap(), y - 1), ResizeRows);
     // Inside the sidebar on the seam's row it is chrome again.
     assert_eq!(app.pointer_shape_at(2, y), Arrow);
     // A drag in progress keeps its arrow wherever the pointer strays.

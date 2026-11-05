@@ -20595,6 +20595,33 @@ impl App {
         self.sidebar_view == SidebarView::Search && self.search.field_at(col, row).is_some()
     }
 
+    /// [`Self::terminal_splitter_hit`] minus the panel header's own controls:
+    /// the PROBLEMS / OUTPUT / TERMINAL / PORTS / CAPTURES tabs and the
+    /// maximize and focus buttons sit on the seam's rows and act on a click,
+    /// so over them the pointer is not a resize arrow.
+    fn panel_splitter_hit(&self, col: u16, row: u16) -> bool {
+        self.terminal_splitter_hit(col, row)
+            && ![
+                self.panel_maximize_button,
+                self.terminal_focus_button,
+                self.problems_tab_rect,
+                self.output_tab_rect,
+                self.terminal_tab_rect,
+                self.ports_tab_rect,
+                self.captures_tab_rect,
+            ]
+            .iter()
+            .any(|r| rect_contains(*r, col, row))
+    }
+
+    /// The terminal pane whose text area (inside its border) holds
+    /// `(col, row)`.
+    fn terminal_inner_at_pos(&self, col: u16, row: u16) -> Option<usize> {
+        self.terminals
+            .iter()
+            .position(|t| rect_contains(t.last_inner, col, row))
+    }
+
     /// The pointer shape for the cell `(col, row)`: the I-beam over text the
     /// user edits (the editor's text, a terminal pane, the Remote view), the
     /// arrow over everything else, and over any menu or modal on top.
@@ -20614,13 +20641,13 @@ impl App {
             Some(SplitterDrag::Terminal) => Some(PointerShape::ResizeRows),
             Some(SplitterDrag::EditorSeam(ref seam)) => Some(seam_shape(seam.dir)),
             None if self.sidebar_splitter_hit(col, row) => Some(PointerShape::ResizeCols),
-            None if self.terminal_splitter_hit(col, row) => Some(PointerShape::ResizeRows),
+            None if self.panel_splitter_hit(col, row) => Some(PointerShape::ResizeRows),
             None => self.seam_at(col, row).map(|seam| seam_shape(seam.dir)),
         };
         if let Some(shape) = seam {
             return shape;
         }
-        let over_text = self.terminal_at_pos(col, row).is_some()
+        let over_text = self.terminal_inner_at_pos(col, row).is_some()
             || (self.sidebar_view == SidebarView::Remote
                 && rect_contains(self.remote.last_area, col, row))
             || (self.editor_is_text() && self.editor.text_hit(col, row))
