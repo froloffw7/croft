@@ -156,6 +156,8 @@ pub struct Theme {
     high_contrast: bool,
     /// Layered surfaces instead of boxed panes: see [`Theme::surfaces`].
     surfaces: Option<Surfaces>,
+    /// A focused terminal pane's border is thick, not plain.
+    term_thick: bool,
 }
 
 impl Theme {
@@ -185,6 +187,7 @@ impl Theme {
         tab_pill: (0x3c, 0x8a, 0x7e),
         high_contrast: false,
         surfaces: None,
+        term_thick: true,
     };
 
     /// Croft Loch — the default: Croft Black's canvas and teal drawn as
@@ -216,6 +219,7 @@ impl Theme {
             hairline: (0x23, 0x28, 0x2a),
             muted: (0x7d, 0x87, 0x86),
         }),
+        term_thick: false,
     };
 
     /// Croft Dark (Blue) — the historical look. Const mirror of the manifest,
@@ -242,6 +246,7 @@ impl Theme {
         tab_pill: (0x4e, 0x9a, 0xff),
         high_contrast: false,
         surfaces: None,
+        term_thick: true,
     };
 
     /// Every available theme in pick-list order, loaded once from the bundled +
@@ -322,6 +327,7 @@ impl Theme {
             high_contrast: d.high_contrast,
             surfaces: d.surfaces.then(|| surfaces_from_decl(d)),
             gradient: d.gradient,
+            term_thick: d.term_thick,
             osk_key: parse_hex(&d.osk_key),
             osk_special: parse_hex(&d.osk_special),
             osk_armed: parse_hex(&d.osk_armed),
@@ -411,6 +417,11 @@ impl Theme {
     /// label or faint border survives into a theme picked to be readable.
     pub fn high_contrast(self) -> bool {
         self.high_contrast
+    }
+
+    /// Whether a focused terminal pane draws a thick border.
+    pub fn term_thick(self) -> bool {
+        self.term_thick
     }
 
     /// The layered surfaces this theme paints instead of boxed panes (Croft

@@ -61704,7 +61704,8 @@ impl App {
     }
 
     fn jump_editor_to_match(&mut self, m: crate::widgets::editor_find::MatchPos) {
-        self.editor.cursor_row = m.row;
+        // Centre the match's line, as a Search hit does.
+        self.editor.goto_line_centered(m.row);
         self.editor.cursor_col = m.col_chars;
         self.editor.active_search_match = Some((m.row, m.col_chars, m.len_chars));
         let viewport = self.editor.last_inner.height as usize;

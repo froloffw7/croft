@@ -5908,7 +5908,7 @@ impl Widget for &mut PtyTerminal {
         } else {
             Block::default()
                 .borders(Borders::ALL)
-                .border_type(if self.focused {
+                .border_type(if self.focused && self.theme.term_thick() {
                     ratatui::widgets::BorderType::Thick
                 } else {
                     ratatui::widgets::BorderType::Plain

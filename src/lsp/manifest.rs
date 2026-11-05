@@ -293,6 +293,10 @@ pub struct ThemeDecl {
     /// border, popup gradient, brand accents) vs the flat-accent look.
     #[serde(default)]
     pub gradient: bool,
+    /// Whether a focused terminal pane gets a thick border (the default) or
+    /// keeps the plain one.
+    #[serde(default = "default_true")]
+    pub term_thick: bool,
     /// On-screen-keyboard normal key cap fill (Termux).
     pub osk_key: String,
     /// On-screen-keyboard special key cap fill (Termux).
@@ -366,6 +370,10 @@ pub struct ThemeDecl {
     pub hairline: String,
     #[serde(default)]
     pub fg_muted: String,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// One `[[languages]]` entry: a language identity contributed by an extension.

@@ -147,6 +147,7 @@ selection = "#49483e"
 search = "#1e1f1c"
 button = "#75715e"
 gradient = false
+term_thick = false
 osk_key = "#49483e"
 osk_special = "#1e1f1c"
 osk_armed = "#a6e22e"
