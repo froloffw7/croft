@@ -21057,7 +21057,8 @@ impl App {
     }
 
     /// Whether `(col, row)` is over a single-line input the user types into:
-    /// the value row of the prompt popups or a Search view field.
+    /// the value row of the prompt popups, an editor or terminal find bar, or a
+    /// Search view field.
     fn input_field_at(&self, col: u16, row: u16) -> bool {
         let field_row = |popup: Rect| Rect {
             x: popup.x + 2,
@@ -21078,7 +21079,15 @@ impl App {
         if self.modal_overlay_open() || self.context_menu.is_some() {
             return false;
         }
-        self.sidebar_view == SidebarView::Search && self.search.field_at(col, row).is_some()
+        self.editor_find
+            .as_ref()
+            .is_some_and(|f| f.field_at(col, row).is_some())
+            || self
+                .terminal_find
+                .as_ref()
+                .is_some_and(|f| f.field_at(col, row).is_some())
+            || (self.sidebar_view == SidebarView::Search
+                && self.search.field_at(col, row).is_some())
     }
 
     /// The pointer shape for the cell `(col, row)`: the I-beam over text the

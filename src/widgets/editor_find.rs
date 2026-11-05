@@ -124,27 +124,43 @@ impl EditorFind {
         crate::widgets::line_edit::clamp(&self.query, self.caret)
     }
 
+    /// Whether `(col, row)` is on the bar, border included.
+    pub fn contains(&self, col: u16, row: u16) -> bool {
+        let r = self.last_rect;
+        r.width >= 3
+            && r.height >= 3
+            && col >= r.x
+            && col < r.x + r.width
+            && row >= r.y
+            && row < r.y + r.height
+    }
+
+    /// The input row under `(col, row)`: the query row, or the replace row
+    /// when it is shown. The border has no field.
+    pub fn field_at(&self, col: u16, row: u16) -> Option<FindField> {
+        let r = self.last_rect;
+        if !self.contains(col, row) || col == r.x || col + 1 == r.x + r.width {
+            return None;
+        }
+        match row.checked_sub(r.y + 1) {
+            Some(0) => Some(FindField::Query),
+            Some(1) if self.replace_visible => Some(FindField::Replace),
+            _ => None,
+        }
+    }
+
     /// A left click at `(col, row)`. True when it landed on the bar, which
     /// then owns it: a click on an input row focuses that row and puts its
     /// caret under the pointer, the way the row was last drawn (the origin
     /// and scroll come from the same geometry the renderer uses).
     pub fn click_at(&mut self, col: u16, row: u16) -> bool {
-        let r = self.last_rect;
-        if r.width < 3
-            || r.height < 3
-            || col < r.x
-            || col >= r.x + r.width
-            || row < r.y
-            || row >= r.y + r.height
-        {
+        if !self.contains(col, row) {
             return false;
         }
-        let inner_y = r.y + 1;
-        let field = match row.checked_sub(inner_y) {
-            Some(0) => FindField::Query,
-            Some(1) if self.replace_visible => FindField::Replace,
-            _ => return true,
+        let Some(field) = self.field_at(col, row) else {
+            return true;
         };
+        let r = self.last_rect;
         let text_x = r.x + 1 + FIND_MARKER_CELLS;
         let avail = find_row_avail(r.width.saturating_sub(2));
         let cell = usize::from(col.saturating_sub(text_x));
