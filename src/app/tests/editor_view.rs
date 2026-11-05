@@ -2341,3 +2341,43 @@ fn the_pointer_shape_is_tracked_only_for_a_terminal_that_answered() {
     app.sync_pointer_shape(0, row);
     assert_eq!(app.pointer_shape, Arrow);
 }
+
+#[test]
+fn the_pointer_is_an_i_beam_over_a_popup_value_row_and_a_search_field() {
+    use crate::pointer_shape::PointerShape::{Arrow, Text};
+    use crate::widgets::input_prompt::{InputPrompt, InputPurpose};
+    let tmp = tempfile::tempdir().unwrap();
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+
+    // New File: the value row is the popup's first inner row.
+    app.open_create_prompt(CreateKind::File, tmp.path().to_path_buf());
+    term.draw(|f| app.render(f)).unwrap();
+    let rect = super::super::prompt_rect(ratatui::layout::Rect::new(0, 0, 100, 30), false);
+    assert_eq!(app.pointer_shape_at(rect.x + 5, rect.y + 1), Text);
+    assert_eq!(
+        app.pointer_shape_at(rect.x + 5, rect.y + 3),
+        Arrow,
+        "the hint row"
+    );
+    app.prompt = None;
+
+    // An input prompt: the same row, from the rect it last drew.
+    app.open_input_prompt(InputPrompt::new(
+        InputPurpose::FleetCommand,
+        "Fleet command",
+        "command",
+    ));
+    term.draw(|f| app.render(f)).unwrap();
+    let r = app.input_prompt.as_ref().unwrap().last_rect;
+    assert_eq!(app.pointer_shape_at(r.x + 4, r.y + 1), Text);
+    assert_eq!(app.pointer_shape_at(r.x, r.y + 1), Arrow, "the border");
+    app.input_prompt = None;
+
+    // The Search view's query box.
+    app.set_sidebar_view(SidebarView::Search);
+    term.draw(|f| app.render(f)).unwrap();
+    let q = app.search.query_input_rect;
+    assert!(q.width > 0, "the query box is on screen");
+    assert_eq!(app.pointer_shape_at(q.x + 1, q.y), Text);
+}
