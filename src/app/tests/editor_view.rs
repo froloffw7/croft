@@ -2397,6 +2397,7 @@ fn the_pointer_is_an_i_beam_over_a_popup_value_row_and_a_search_field() {
     assert_eq!(app.pointer_shape_at(q.x + 1, q.y), Text);
 }
 
+#[test]
 fn a_crowded_tab_strip_offers_a_list_of_all_open_tabs() {
     use crate::widgets::list_picker::ListPurpose;
     let tmp = tempfile::tempdir().unwrap();
