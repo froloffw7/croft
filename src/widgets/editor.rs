@@ -15507,6 +15507,32 @@ impl Editor {
         self.scroll_col = self.scroll_col.saturating_add(n);
     }
 
+    /// Whether the cell `(col, row)` lies over the text itself: inside the
+    /// pane, right of the gutter and off the scrollbars. Where the pointer is
+    /// an I-beam.
+    pub fn text_hit(&self, col: u16, row: u16) -> bool {
+        let inner = self.last_inner;
+        let text_x = inner.x.saturating_add(self.last_gutter_width + 1);
+        col >= text_x
+            && col < inner.x.saturating_add(inner.width)
+            && row >= inner.y
+            && row < inner.y.saturating_add(inner.height)
+            && !(self.last_scrollbar.width > 0
+                && col >= self.last_scrollbar.x
+                && col
+                    < self
+                        .last_scrollbar
+                        .x
+                        .saturating_add(self.last_scrollbar.width))
+            && !(self.last_hscrollbar.height > 0
+                && row >= self.last_hscrollbar.y
+                && row
+                    < self
+                        .last_hscrollbar
+                        .y
+                        .saturating_add(self.last_hscrollbar.height))
+    }
+
     /// Recompute the visible text width from `last_inner` / `last_gutter_width`
     /// (set during the most recent render) and use it to decide whether the
     /// current cursor column is on-screen. This is the same arithmetic the
@@ -36805,6 +36831,21 @@ mod tests {
         // Click the far-left end → scroll back to 0.
         assert!(e.scroll_to_bar_x(e.last_hscrollbar.x));
         assert_eq!(e.scroll_col, 0);
+    }
+
+    #[test]
+    fn text_hit_stops_at_the_horizontal_scrollbar() {
+        let mut e = editor_with("a".repeat(500).as_str());
+        render_at(&mut e, 30, 6);
+        let bar = e.last_hscrollbar;
+        assert!(bar.width > 0 && bar.height > 0, "a long line shows the bar");
+        let col = e.last_inner.x + e.last_gutter_width + 2;
+        assert!(
+            e.text_hit(col, e.last_inner.y),
+            "the first text row is text"
+        );
+        assert!(!e.text_hit(col, bar.y), "the bar row keeps the arrow");
+        assert!(!e.text_hit(bar.x + 1, bar.y));
     }
 
     fn md_editor(text: &str) -> Editor {

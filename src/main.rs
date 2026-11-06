@@ -90,6 +90,7 @@ mod paths;
 mod pdf;
 mod permalink;
 mod plot;
+mod pointer_shape;
 mod port_detect;
 mod pr_review;
 mod prefs;

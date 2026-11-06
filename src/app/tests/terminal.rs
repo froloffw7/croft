@@ -8048,3 +8048,53 @@ fn a_bracketed_paste_into_the_terminal_find_bar_lands_at_the_caret() {
     assert_eq!(find.query, "abc");
     assert_eq!(find.caret(), 2, "the caret stays after what was pasted");
 }
+
+/// OSC 22: the pointer is an I-beam over a terminal pane.
+#[test]
+fn the_pointer_is_an_i_beam_over_a_terminal_pane() {
+    use crate::pointer_shape::PointerShape::{Arrow, Text};
+    let tmp = tempfile::tempdir().unwrap();
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+    term.draw(|f| app.render(f)).unwrap();
+    let area = app.terminals[app.active_terminal].last_area;
+    assert!(area.width > 2 && area.height > 2, "the pane is on screen");
+    let (col, row) = (area.x + area.width / 2, area.y + area.height / 2);
+    assert_eq!(app.pointer_shape_at(col, row), Text);
+    assert_eq!(
+        app.pointer_shape_at(area.x + area.width - 1, row),
+        Arrow,
+        "the pane's border is not text"
+    );
+    assert_eq!(app.pointer_shape_at(0, 0), Arrow, "the title row is chrome");
+}
+
+#[test]
+fn the_pointer_is_a_double_arrow_over_the_seams_that_resize_a_split() {
+    use crate::pointer_shape::PointerShape::{Arrow, ResizeCols, ResizeRows};
+    let tmp = tempfile::tempdir().unwrap();
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    app.show_terminal = true;
+    let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+    term.draw(|f| app.render(f)).unwrap();
+    let x = app.sidebar_splitter_x.expect("the sidebar seam is drawn");
+    let y = app.terminal_splitter_y.expect("the terminal seam is drawn");
+    // Sidebar | editor: a vertical line, dragged left and right. Either of
+    // the two columns that grab it shows the arrow.
+    assert_eq!(app.pointer_shape_at(x, 5), ResizeCols);
+    assert_eq!(app.pointer_shape_at(x - 1, 5), ResizeCols);
+    // Editor / terminal: a horizontal line, dragged up and down.
+    // The panel header's tabs and buttons sit on that seam and act on a
+    // click, so they keep the arrow; the free cells between them resize.
+    let tab = app.terminal_tab_rect;
+    assert!(tab.width > 0, "the TERMINAL tab is drawn");
+    assert_eq!(app.pointer_shape_at(tab.x, tab.y), Arrow, "a panel tab");
+    let free = (x..100).find(|&c| app.pointer_shape_at(c, y) == ResizeRows);
+    assert!(free.is_some(), "some header cell still resizes");
+    assert_eq!(app.pointer_shape_at(free.unwrap(), y - 1), ResizeRows);
+    // Inside the sidebar on the seam's row it is chrome again.
+    assert_eq!(app.pointer_shape_at(2, y), Arrow);
+    // A drag in progress keeps its arrow wherever the pointer strays.
+    app.splitter_drag = Some(SplitterDrag::Sidebar);
+    assert_eq!(app.pointer_shape_at(x + 30, 3), ResizeCols);
+}

@@ -545,6 +545,12 @@ pub struct Prefs {
     /// switch the guard off.
     #[serde(default)]
     pub terminal_multiline_paste_warning: MultilinePasteWarning,
+    /// Which names the mouse pointer's shapes are asked for by (OSC 22):
+    /// `x11` (the default; `xterm`, `left_ptr`, ...) or `css` (kitty's
+    /// specification: `text`, `default`, `ew-resize`, ...). User layers
+    /// only.
+    #[serde(default)]
+    pub pointer_shape_names: crate::pointer_shape::PointerShapeNames,
     /// What exported navigator comments start with (#368), marking them as
     /// AI-authored on GitHub. Unset means `[AI, croft navigator] `; an
     /// empty string turns the marker off.
