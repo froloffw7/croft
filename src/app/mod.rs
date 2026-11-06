@@ -23450,7 +23450,7 @@ impl App {
                     rects[active_idx] = ed_rect;
                 }
                 let active_area = rects[active_idx];
-                self.editor.tab_reserved_right = reserve(active_area);
+                self.editor.set_tab_reserved_right(reserve(active_area));
                 frame.render_widget(&mut self.editor, active_area);
                 let inactive_rects: Vec<Rect> = rects
                     .iter()
@@ -23465,7 +23465,7 @@ impl App {
                     .zip(inactive_rects)
                 {
                     group.hover_pointer = pointer;
-                    group.tab_reserved_right = reserve(rect);
+                    group.set_tab_reserved_right(reserve(rect));
                     frame.render_widget(group, rect);
                 }
                 // Every boundary in the grid is a draggable seam (one per
@@ -23493,7 +23493,7 @@ impl App {
                         .style(Style::default().bg(self.theme.editor_bg())),
                     full_strip,
                 );
-                self.editor.tab_reserved_right = reserve(ed_rect);
+                self.editor.set_tab_reserved_right(reserve(ed_rect));
                 frame.render_widget(&mut self.editor, ed_rect);
                 self.editor_seams.clear();
                 self.update_editor_image_overlay(0, ed_rect);
@@ -23501,7 +23501,7 @@ impl App {
                 self.paint_minimap(frame, img_rect);
                 ed_rect
             } else {
-                self.editor.tab_reserved_right = reserve(editor_area);
+                self.editor.set_tab_reserved_right(reserve(editor_area));
                 frame.render_widget(&mut self.editor, editor_area);
                 self.editor_seams.clear();
                 self.update_editor_image_overlay(0, editor_area);
@@ -43469,6 +43469,26 @@ impl App {
         )
     }
 
+    /// The "all open tabs" list: every tab of the active group by its strip
+    /// label, the current one selected. Picking one activates it, scrolling the
+    /// strip to it.
+    fn open_tab_picker(&mut self) {
+        use crate::widgets::list_picker::{ListPicker, ListPurpose, ListRow};
+        let rows: Vec<ListRow> = self
+            .editor
+            .tab_display_labels()
+            .into_iter()
+            .enumerate()
+            .map(|(i, label)| ListRow {
+                id: i.to_string(),
+                label,
+            })
+            .collect();
+        let mut picker = ListPicker::new(ListPurpose::OpenTab, "Open Tabs", rows);
+        picker.selected = self.editor.active_index();
+        self.open_list_picker(picker, "No open tabs");
+    }
+
     /// Act on the row chosen in the list picker.
     fn confirm_list_picker(&mut self) {
         use crate::widgets::list_picker::ListPurpose;
@@ -43866,6 +43886,13 @@ impl App {
                 }
             }
             ListPurpose::NotebookKernel => self.choose_notebook_kernel(&row.id),
+            ListPurpose::OpenTab => {
+                if self.editor.select(index) {
+                    self.sync_open_file_poll_mtime();
+                }
+                self.focus_pane(Pane::Editor);
+                self.poke_cursor();
+            }
             ListPurpose::HttpEnvironment => {
                 self.status = if row.id.is_empty() {
                     String::from("HTTP: no environment")
@@ -62497,7 +62524,7 @@ impl App {
                 std::iter::once(&mut self.editor).chain(self.editor_layout.inactive_groups_mut())
             {
                 if g.tab_strip_contains(m.column, m.row) {
-                    g.scroll_tabs(delta);
+                    g.scroll_tabs_wheel(delta);
                     scrolled = true;
                     break;
                 }
@@ -64819,6 +64846,9 @@ impl App {
                             self.go_to_definition(path, line, col);
                         }
                         self.poke_cursor();
+                    } else if self.editor.tab_list_button_at(m.column, m.row) {
+                        self.focus_pane(Pane::Editor);
+                        self.open_tab_picker();
                     } else if let Some(idx) = self.editor.close_at(m.column, m.row) {
                         // The close cell of a pinned tab is an unpin button (it
                         // shows a thumb-tack, not the close cross), matching VS

@@ -2381,3 +2381,43 @@ fn the_pointer_is_an_i_beam_over_a_popup_value_row_and_a_search_field() {
     assert!(q.width > 0, "the query box is on screen");
     assert_eq!(app.pointer_shape_at(q.x + 1, q.y), Text);
 }
+
+#[test]
+fn a_crowded_tab_strip_offers_a_list_of_all_open_tabs() {
+    use crate::widgets::list_picker::ListPurpose;
+    let tmp = tempfile::tempdir().unwrap();
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    for i in 0..14 {
+        let f = tmp.path().join(format!("a_rather_long_name_{i:02}.txt"));
+        std::fs::write(&f, "x\n").unwrap();
+        app.editor.open_pinned(&f).unwrap();
+    }
+    let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+    term.draw(|f| app.render(f)).unwrap();
+    let y = app.editor.tab_strip_y_for_test();
+    let col = (0..100)
+        .find(|&c| app.editor.tab_list_button_at(c, y))
+        .expect("the tabs overflow, so the strip draws the list button");
+    app.handle_mouse(mouse(
+        crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        col,
+        y,
+    ));
+    let picker = app.list_picker.as_ref().expect("the button opens the list");
+    assert_eq!(picker.purpose, ListPurpose::OpenTab);
+    assert_eq!(picker.rows.len(), 14);
+    assert_eq!(picker.selected, 13, "the active tab is the selected row");
+    // Picking the first row activates that tab and scrolls the strip to it.
+    for _ in 0..13 {
+        app.handle_key(key(KeyCode::Up, KeyModifiers::NONE))
+            .unwrap();
+    }
+    app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(app.editor.active_index(), 0);
+    term.draw(|f| app.render(f)).unwrap();
+    assert!(
+        app.editor.tab_screen_x(0).is_some_and(|(_, w)| w > 0),
+        "the picked tab is on screen"
+    );
+}
