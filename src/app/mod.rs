@@ -4514,6 +4514,8 @@ pub struct App {
     /// The host terminal draws the pointer shapes croft asks for (OSC 22,
     /// answered `1` to the launch probe). Off until it says so.
     pointer_shapes: bool,
+    /// The `pointer_shape_names` setting: which names the shapes go by.
+    pointer_shape_names: crate::pointer_shape::PointerShapeNames,
     /// The shape last requested of the terminal, so one is sent only when it
     /// changes.
     pointer_shape: crate::pointer_shape::PointerShape,
@@ -7341,6 +7343,7 @@ impl App {
             inline_protocol: crate::iterm2_inline::detect_inline_image_protocol(),
             sixel_supported: false,
             pointer_shapes: false,
+            pointer_shape_names: loaded_prefs.pointer_shape_names,
             pointer_shape: crate::pointer_shape::PointerShape::Arrow,
             resize_repaint_needed: false,
             minimap_visible: layout_prefs.minimap,
@@ -21184,7 +21187,7 @@ impl App {
         if !cfg!(test) {
             use std::io::Write;
             let mut out = std::io::stdout();
-            let _ = out.write_all(&want.set_sequence());
+            let _ = out.write_all(&want.set_sequence(self.pointer_shape_names));
             let _ = out.flush();
         }
     }
@@ -68971,6 +68974,7 @@ impl App {
         self.fleet_groups = p.fleet_groups.clone();
         self.code_scanning = p.code_scanning;
         self.multiline_paste_warning = p.terminal_multiline_paste_warning;
+        self.pointer_shape_names = p.pointer_shape_names;
         let was_excluded = std::mem::replace(
             &mut self.remote_offer_excluded,
             p.remote_offer_excluded_hosts.clone(),
@@ -83192,8 +83196,10 @@ pub fn run(
         out.write_all(&set_title_seq("")).ok();
         // Hand the pointer back as the arrow it was before croft.
         if app.pointer_shapes {
-            out.write_all(&crate::pointer_shape::PointerShape::Arrow.set_sequence())
-                .ok();
+            out.write_all(
+                &crate::pointer_shape::PointerShape::Arrow.set_sequence(app.pointer_shape_names),
+            )
+            .ok();
         }
         // Revert the host terminal's default colors (OSC 110/111, plus the
         // iTerm2 sRGB override where present) so the user's shell after
