@@ -108,7 +108,7 @@ allowlist — appearance and editor/terminal behavior:
 per-language editor keys; see below), `files_encoding`.
 
 Everything else — `disabled_extensions`, `mcp_consented`, `disable_remote_offer`, `remote_offer_excluded_hosts`, `config_sync_excluded_hosts`, `config_sync_excluded_files`, `fleet_groups`, `code_scanning`, `lane_agent`,
-`mcp_tool_fingerprints`, `host_accents`, `notifications`, `screen_reader`, `screen_reader_command`, `codeql_cli_path`, `locale`, `terminal_multiline_paste_warning`, and any future key not explicitly
+`mcp_tool_fingerprints`, `host_accents`, `notifications`, `screen_reader`, `screen_reader_command`, `codeql_cli_path`, `locale`, `terminal_multiline_paste_warning`, `pointer_shape_names`, and any future key not explicitly
 allowlisted — is ignored from workspace layers with a visible warning.
 Extending the allowlist is a deliberate review decision, not a default.
 
@@ -383,6 +383,26 @@ it runs until you press Enter.
 `"auto"` (the default) asks only in that case, `"always"` asks before every
 multi-line paste, and `"never"` never asks. User config only: a cloned repo
 cannot turn the warning off.
+
+## Mouse pointer shape names
+
+In a terminal that answers the OSC 22 launch query, croft draws an I-beam over
+text, a double arrow over the seams that resize a split, and an arrow
+elsewhere. Terminals disagree on what the shapes are called, so the names are
+a setting:
+
+```json
+{
+  "pointer_shape_names": "x11"
+}
+```
+
+`"x11"` (the default) asks by X11 cursor-font name (`xterm`, `left_ptr`,
+`sb_h_double_arrow`, `sb_v_double_arrow`), as xterm's original proposal does.
+`"css"` asks by the CSS cursor names of [kitty's pointer-shapes
+specification](https://sw.kovidgoyal.net/kitty/pointer-shapes/) (`text`,
+`default`, `ew-resize`, `ns-resize`). User config only. Takes effect without a
+restart.
 
 ## Notification sinks
 
