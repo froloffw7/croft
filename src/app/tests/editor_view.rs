@@ -2342,6 +2342,21 @@ fn the_pointer_shape_is_tracked_only_for_a_terminal_that_answered() {
     assert_eq!(app.pointer_shape, Arrow);
 }
 
+/// A key that moves the layout under a still mouse sends no mouse event: the
+/// shape is decided again after the redraw, from where the pointer last was.
+#[test]
+fn the_pointer_shape_follows_a_layout_change_under_a_still_mouse() {
+    use crate::pointer_shape::PointerShape::{Arrow, Text};
+    let (mut app, _tmp, col, row) = app_with_open_file_and_editor_cell();
+    app.pointer_shapes = true;
+    app.sync_pointer_shape(col, row);
+    assert_eq!(app.pointer_shape, Text);
+    // The editor grows: its horizontal scrollbar now sits under the pointer.
+    app.editor.last_hscrollbar = ratatui::layout::Rect::new(col, row, 5, 1);
+    app.resync_pointer_shape();
+    assert_eq!(app.pointer_shape, Arrow, "the bar keeps the arrow");
+}
+
 #[test]
 fn the_pointer_is_an_i_beam_over_a_popup_value_row_and_a_search_field() {
     use crate::pointer_shape::PointerShape::{Arrow, Text};
