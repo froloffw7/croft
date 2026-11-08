@@ -21243,6 +21243,12 @@ impl App {
     /// The terminal pane whose text area (inside its border) holds
     /// `(col, row)`.
     fn terminal_inner_at_pos(&self, col: u16, row: u16) -> Option<usize> {
+        // A pane that is not drawn keeps the rect of its last frame: with the
+        // panel hidden (`Ctrl+J`) or on another tab, that rect would still
+        // claim the cells the editor now occupies.
+        if !self.show_terminal || self.bottom_panel_tab != BottomPanelTab::Terminal {
+            return None;
+        }
         self.terminals
             .iter()
             .position(|t| rect_contains(t.last_inner, col, row))
