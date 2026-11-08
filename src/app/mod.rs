@@ -3602,6 +3602,9 @@ pub struct App {
     /// `None` everywhere else, so a keyboard invocation of the same command
     /// can never act on a stale click.
     last_mouse_pos: Option<(u16, u16)>,
+    /// Where the mouse pointer last was, for re-deciding its shape after a
+    /// redraw that moved things under it with no mouse event (`Ctrl+J`).
+    pointer_pos: Option<(u16, u16)>,
     /// The tab a tab-strip mouse binding was clicked on (#1427), set only
     /// for that dispatch and taken by `run_command` as it starts, so only
     /// the directly bound command sees it: a command it runs in turn (an
@@ -6766,6 +6769,7 @@ impl App {
             // reported once, in OUTPUT · Keybindings.
             keymap: loaded_keymap,
             last_mouse_pos: None,
+            pointer_pos: None,
             tab_click_target: None,
             macro_recording: None,
             macro_last: None,
@@ -20667,6 +20671,7 @@ impl App {
     /// Ask the terminal for the pointer shape that belongs under `(col, row)`,
     /// when it has changed and the terminal said it can draw one (OSC 22).
     fn sync_pointer_shape(&mut self, col: u16, row: u16) {
+        self.pointer_pos = Some((col, row));
         if !self.pointer_shapes {
             return;
         }
@@ -20681,6 +20686,16 @@ impl App {
             let mut out = std::io::stdout();
             let _ = out.write_all(&want.set_sequence(self.pointer_shape_names));
             let _ = out.flush();
+        }
+    }
+
+    /// Decide the pointer shape again where the pointer last was. A key
+    /// that moves the layout under a still mouse (`Ctrl+J` hiding the panel,
+    /// so the editor's scrollbar slides under the I-beam) sends no mouse
+    /// event, and the shape would stay stale until the next move.
+    fn resync_pointer_shape(&mut self) {
+        if let Some((col, row)) = self.pointer_pos {
+            self.sync_pointer_shape(col, row);
         }
     }
 
@@ -82959,6 +82974,7 @@ fn main_loop(app: &mut App, terminal: &mut CroftTerminal) -> Result<()> {
             }
             let draw_start = std::time::Instant::now();
             let drawn = terminal.draw(|f| app.render_for_terminal(f))?;
+            app.resync_pointer_shape();
             let mut underlays = app.image_underlays(drawn.buffer);
             app.drawn_buffer = Some(drawn.buffer.clone());
             // Record render+flush time and the bytes ratatui shipped this
