@@ -2358,6 +2358,31 @@ fn the_pointer_shape_follows_a_layout_change_under_a_still_mouse() {
 }
 
 #[test]
+fn a_hidden_panel_leaves_the_editor_scrollbar_its_arrow() {
+    // The panel's last rect must not claim cells the editor now occupies.
+    use crate::pointer_shape::PointerShape::Arrow;
+    let tmp = tempfile::tempdir().unwrap();
+    let f = tmp.path().join("long.txt");
+    std::fs::write(&f, format!("{}\nshort\n", "x".repeat(400))).unwrap();
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    app.editor.open(&f).unwrap();
+    let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+    for hidden in [false, true] {
+        app.show_terminal = !hidden;
+        term.draw(|fr| app.render(fr)).unwrap();
+        let bar = app.editor.last_hscrollbar;
+        assert!(bar.width > 0, "the long line shows the bar");
+        for x in bar.x..bar.x + bar.width {
+            assert_eq!(
+                app.pointer_shape_at(x, bar.y),
+                Arrow,
+                "hidden={hidden} x={x}"
+            );
+        }
+    }
+}
+
+#[test]
 fn the_pointer_is_an_i_beam_over_a_popup_value_row_and_a_search_field() {
     use crate::pointer_shape::PointerShape::{Arrow, Text};
     use crate::widgets::input_prompt::{InputPrompt, InputPurpose};
