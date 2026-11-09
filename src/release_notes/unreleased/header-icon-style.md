@@ -1,0 +1,1 @@
+fix: The SEARCH header's refresh and clear icons are drawn by the shared header pill like the other view headers (bold), and every header icon lifts its glyph to the accent blue on hover instead of growing a navy chip.

@@ -871,14 +871,14 @@ mod tests {
         let mut buf = Buffer::empty(area);
         (&mut p).render(area, &mut buf);
         assert_eq!(
-            buf[(add.x, add.y)].bg,
-            crate::widgets::header_pill::HEADER_BTN_HOVER_BG,
-            "the + pill lifts to the hover navy under the pointer"
+            buf[(add.x, add.y)].fg,
+            p.theme.ui(crate::widgets::header_pill::HEADER_BTN_HOVER_FG),
+            "the + icon lifts to the accent under the pointer"
         );
-        assert_eq!(
-            buf[(refresh.x, refresh.y)].bg,
-            crate::widgets::header_pill::HEADER_BTN_BG,
-            "the un-hovered refresh pill keeps the rest navy"
+        assert_ne!(
+            buf[(refresh.x, refresh.y)].fg,
+            p.theme.ui(crate::widgets::header_pill::HEADER_BTN_HOVER_FG),
+            "the un-hovered refresh icon keeps its rest colour"
         );
     }
 
