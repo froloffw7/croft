@@ -590,8 +590,8 @@ fn terminal_header_probe(app: &mut App) -> Rect {
 }
 
 #[test]
-fn black_theme_terminal_buttons_are_teal_icons_not_navy_chips() {
-    use crate::gradient::{INNER_ACCENT, rgb_color};
+fn black_theme_terminal_buttons_are_light_icons_not_navy_chips() {
+    use crate::gradient::{PANEL_TITLE_FG, rgb_color};
     let tmp = tempfile::tempdir().unwrap();
     let mut app = App::new(tmp.path().to_path_buf()).unwrap();
     let add = terminal_header_probe(&mut app);
@@ -601,7 +601,7 @@ fn black_theme_terminal_buttons_are_teal_icons_not_navy_chips() {
     let buf = term.backend().buffer();
     let plus = (add.x + 1, add.y);
     assert_eq!(buf[plus].symbol(), "+");
-    assert_eq!(buf[plus].fg, rgb_color(INNER_ACCENT));
+    assert_eq!(buf[plus].fg, rgb_color(PANEL_TITLE_FG));
     assert_ne!(
         buf[plus].bg,
         Color::Rgb(0x1e, 0x3a, 0x6e),
@@ -610,8 +610,7 @@ fn black_theme_terminal_buttons_are_teal_icons_not_navy_chips() {
 }
 
 #[test]
-fn black_theme_terminal_button_hover_paints_teal_pill() {
-    use crate::gradient::{POPUP_SEL_BG, rgb_color};
+fn black_theme_terminal_button_hover_lifts_the_icon_to_the_theme_accent() {
     let tmp = tempfile::tempdir().unwrap();
     let mut app = App::new(tmp.path().to_path_buf()).unwrap();
     let add = terminal_header_probe(&mut app);
@@ -627,11 +626,15 @@ fn black_theme_terminal_button_hover_paints_teal_pill() {
     let buf = term.backend().buffer();
     let plus = (add.x + 1, add.y);
     assert_eq!(
-        buf[plus].bg,
-        rgb_color(POPUP_SEL_BG),
-        "hovered button wears the teal pill"
+        buf[plus].fg,
+        app.theme.accent(),
+        "the hovered button takes the theme's own accent"
     );
-    assert_eq!(buf[plus].fg, Color::White);
+    assert_ne!(
+        buf[plus].bg,
+        Color::Rgb(0x1e, 0x3a, 0x6e),
+        "and still no navy chip behind it"
+    );
 }
 
 #[test]

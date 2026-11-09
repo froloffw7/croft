@@ -14,12 +14,6 @@ use ratatui::{
 /// target, not a naked single glyph. Matches the chip behind the view title.
 pub const HEADER_BTN_BG: Color = Color::Rgb(0x27, 0x28, 0x22);
 const HEADER_BTN_FG: Color = Color::Rgb(0xe6, 0xed, 0xf5);
-/// Colour a Croft Dark header icon takes while the pointer rests on it. The
-/// icon itself lifts to this accent instead of growing a chip, so every
-/// interactive icon highlights the same way. The Black theme instead grows a
-/// faint teal pill from nothing, so it has no use for it.
-pub const HEADER_BTN_HOVER_FG: Color = Color::Rgb(0x4e, 0x9a, 0xff);
-
 /// Codicon `cod-refresh` — the circular-arrow glyph VS Code paints on a view's
 /// refresh affordance. Verified against the Nerd Font cmap.
 pub const REFRESH_GLYPH: char = '\u{eb37}';
@@ -67,23 +61,28 @@ pub fn render(
     theme: crate::theme::Theme,
     hovered: bool,
 ) {
-    let brand = theme.gradient();
-    let mut style = Style::default().add_modifier(Modifier::BOLD);
-    if brand && hovered {
-        style = style.bg(crate::gradient::rgb_color(crate::gradient::POPUP_SEL_BG));
-    }
     // VS Code paints view-action icons in a light `icon.foreground`, not an
-    // accent hue. The Black theme previously used the brand teal here, which
-    // read as an out-of-place dark green; use the same near-white the panel
-    // title wears so the icons sit quietly on the header.
-    style = if brand {
-        style.fg(crate::gradient::rgb_color(crate::gradient::PANEL_TITLE_FG))
-    } else if hovered {
-        style.fg(theme.ui(HEADER_BTN_HOVER_FG))
+    // accent hue; on hover [`hover::icon_style`] takes over, in the active
+    // theme's own accent.
+    let rest = Style::default()
+        .add_modifier(Modifier::BOLD)
+        .fg(icon_rest_fg(theme));
+    buf.set_string(
+        x,
+        y,
+        glyph.to_string(),
+        crate::widgets::hover::icon_style(theme, rest, hovered),
+    );
+}
+
+/// The resting colour of a header icon: the near-white the panel title wears
+/// under the Black theme, `icon.foreground` on the others.
+fn icon_rest_fg(theme: crate::theme::Theme) -> Color {
+    if theme.gradient() {
+        crate::gradient::rgb_color(crate::gradient::PANEL_TITLE_FG)
     } else {
-        style.fg(theme.ui(HEADER_BTN_FG))
-    };
-    buf.set_string(x, y, glyph.to_string(), style);
+        theme.ui(HEADER_BTN_FG)
+    }
 }
 
 /// The shared style for a header *action* pill — the space-padded `" + "` /
@@ -92,25 +91,21 @@ pub fn render(
 /// draw from, so the two can never drift apart again:
 ///
 /// * Croft Dark (`!brand`): white-on-navy chip, bold (the historical look).
-/// * Black idle (`brand`, not hovered): a chipless teal icon in the VS Code
-///   toolbar spirit (`icon.foreground`), no bold.
-/// * Black hover: white on the muted teal `POPUP_SEL_BG` pill standing in for
-///   `toolbar.hoverBackground`.
+/// * Black (`brand`): a chipless light icon in the VS Code toolbar spirit
+///   (`icon.foreground`), no bold.
+/// * Hovered: [`crate::widgets::hover::icon_style`], the same highlight every
+///   interactive icon gets (the theme's accent and/or the toolbar pill, per the
+///   `hover_icon` setting).
 pub fn action_style(theme: crate::theme::Theme, hovered: bool) -> Style {
-    let brand = theme.gradient();
-    if !brand {
-        return Style::default()
+    let rest = if theme.gradient() {
+        Style::default().fg(icon_rest_fg(theme))
+    } else {
+        Style::default()
             .fg(theme.ui(Color::White))
             .bg(theme.ui(HEADER_BTN_BG))
-            .add_modifier(Modifier::BOLD);
-    }
-    if hovered {
-        Style::default()
-            .fg(Color::White)
-            .bg(crate::gradient::rgb_color(crate::gradient::POPUP_SEL_BG))
-    } else {
-        Style::default().fg(crate::gradient::rgb_color(crate::gradient::INNER_ACCENT))
-    }
+            .add_modifier(Modifier::BOLD)
+    };
+    crate::widgets::hover::icon_style(theme, rest, hovered)
 }
 
 /// Paint a space-padded action label (e.g. `" ⋯ "`) as a header pill whose top
@@ -150,55 +145,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn croft_dark_icon_is_chipless_and_lifts_its_glyph_on_hover() {
+    fn a_header_icon_is_bold_light_and_lifts_in_the_theme_accent_on_hover() {
         let area = Rect {
             x: 0,
             y: 0,
             width: 6,
             height: 1,
         };
-        let theme = crate::theme::Theme::DARK_BLUE;
-        let mut buf = Buffer::empty(area);
-        render(&mut buf, 2, 0, REFRESH_GLYPH, theme, false);
-        assert_eq!(buf[(2, 0)].symbol().chars().next(), Some(REFRESH_GLYPH));
-        assert_eq!(buf[(2, 0)].bg, Color::Reset, "no chip behind the glyph");
-        assert_eq!(buf[(2, 0)].fg, theme.ui(HEADER_BTN_FG));
-        assert!(buf[(2, 0)].modifier.contains(Modifier::BOLD));
-        let mut buf = Buffer::empty(area);
-        render(&mut buf, 2, 0, REFRESH_GLYPH, theme, true);
-        assert_eq!(
-            buf[(2, 0)].fg,
-            theme.ui(HEADER_BTN_HOVER_FG),
-            "accent on hover"
-        );
-        assert_eq!(buf[(2, 0)].bg, Color::Reset, "still no chip");
-        // Only the glyph's own cell is painted.
-        assert_eq!(buf[(1, 0)].fg, Color::Reset);
-        assert_eq!(buf[(3, 0)].fg, Color::Reset);
-    }
-
-    #[test]
-    fn black_theme_idle_pill_is_chipless() {
-        let area = Rect {
-            x: 0,
-            y: 0,
-            width: 6,
-            height: 1,
-        };
-        let mut buf = Buffer::empty(area);
-        // Black theme (brand = true), not hovered: a chipless teal glyph.
-        render(
-            &mut buf,
-            2,
-            0,
-            REFRESH_GLYPH,
-            crate::theme::Theme::BLACK,
-            false,
-        );
-        assert_eq!(
-            buf[(2, 0)].bg,
-            Color::Reset,
-            "the idle Black-theme pill grows its teal fill only on hover"
-        );
+        for theme in [crate::theme::Theme::DARK_BLUE, crate::theme::Theme::BLACK] {
+            let mut buf = Buffer::empty(area);
+            render(&mut buf, 2, 0, REFRESH_GLYPH, theme, false);
+            assert_eq!(buf[(2, 0)].symbol().chars().next(), Some(REFRESH_GLYPH));
+            assert_eq!(buf[(2, 0)].bg, Color::Reset, "no chip at rest");
+            assert!(buf[(2, 0)].modifier.contains(Modifier::BOLD));
+            let rest_fg = buf[(2, 0)].fg;
+            let mut buf = Buffer::empty(area);
+            render(&mut buf, 2, 0, REFRESH_GLYPH, theme, true);
+            assert_eq!(buf[(2, 0)].fg, theme.accent(), "the theme's own accent");
+            assert_ne!(buf[(2, 0)].fg, rest_fg);
+            // Only the glyph's own cell is painted.
+            assert_eq!(buf[(1, 0)].fg, Color::Reset);
+            assert_eq!(buf[(3, 0)].fg, Color::Reset);
+        }
     }
 }

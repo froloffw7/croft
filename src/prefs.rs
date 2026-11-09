@@ -400,6 +400,17 @@ pub struct Prefs {
     /// first non-blank character and column 0.
     #[serde(default)]
     pub home_walks_wrapped_rows: bool,
+    /// How a hovered heading (a panel tab such as PROBLEMS) shows the pointer:
+    /// "color" (the default, also what an empty string means), "bold" or
+    /// "pill". Parsed by `HeadingHover::from_pref`.
+    #[serde(default)]
+    pub hover_heading: String,
+    /// How a hovered icon (header icons, the open-tabs button, the layout
+    /// toggles, `+` / `-` / `⋯`) shows the pointer: "accent" (the default, also
+    /// what an empty string means), "accent_pill" or "pill". Parsed by
+    /// `IconHover::from_pref`.
+    #[serde(default)]
+    pub hover_icon: String,
     /// Gutter line numbers (#1576, VS Code's `editor.lineNumbers`): "on"
     /// (also what the empty string an older config deserializes to means),
     /// "relative", "interval" or "off". Parsed by `LineNumbers::from_pref`.

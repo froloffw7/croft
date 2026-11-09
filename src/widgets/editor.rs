@@ -23842,14 +23842,11 @@ impl Widget for &mut EditorTabs {
             let hovered = self.hover_pointer.is_some_and(|(px, py)| {
                 py == strip.y && px >= strip_right && px < strip_right + TAB_LIST_W
             });
-            // As the layout icons beside it: the glyph goes from grey to the
-            // accent on hover, the cell keeps the strip's own background.
-            let fg = if hovered {
-                theme.ui(Color::Rgb(0x4e, 0x9a, 0xff))
-            } else {
-                theme.ui(Color::Rgb(0xcc, 0xcc, 0xcc))
-            };
-            let style = Style::default().fg(fg).bg(theme.tab_strip_bg());
+            // As the layout icons beside it (`hover_icon`).
+            let rest = Style::default()
+                .fg(theme.ui(Color::Rgb(0xcc, 0xcc, 0xcc)))
+                .bg(theme.tab_strip_bg());
+            let style = crate::widgets::hover::icon_style(theme, rest, hovered);
             buf.set_string(strip_right, strip.y, " \u{2261} ", style);
         }
         let avail = usize::from(strip_right.saturating_sub(strip.x));
