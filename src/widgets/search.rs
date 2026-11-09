@@ -2666,8 +2666,9 @@ impl Widget for &mut SearchPanel {
         );
 
         // Header action icons, laid out from the right edge: clear (rightmost)
-        // then refresh, each a single-cell click target that lifts to the accent
-        // on hover. Only drawn when the panel is wide enough to clear the label.
+        // then refresh, each a single-cell click target drawn by the shared
+        // header pill (bold, lifting on hover) like the other view headers. Only
+        // drawn when the panel is wide enough to clear the label.
         self.refresh_x = 0;
         self.refresh_y = inner.y;
         self.clear_x = 0;
@@ -2682,12 +2683,7 @@ impl Widget for &mut SearchPanel {
                 let hot = self
                     .hover_pointer
                     .is_some_and(|(px, py)| py == inner.y && px == x);
-                let color = if hot {
-                    accent
-                } else {
-                    self.theme.ui(Color::Rgb(0x8b, 0x94, 0xa4))
-                };
-                buf.set_string(x, inner.y, glyph.to_string(), Style::default().fg(color));
+                crate::widgets::header_pill::render(buf, x, inner.y, glyph, self.theme, hot);
             }
             self.refresh_x = refresh_x;
             self.clear_x = clear_x;
