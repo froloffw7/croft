@@ -19044,15 +19044,14 @@ impl App {
         // VS Code; colour brightens to the accent on hover. Glyphs sit centred
         // in the 4-wide slot.
         let base = self.theme.ui(Color::Rgb(0xcc, 0xcc, 0xcc));
-        let accent = self.theme.ui(Color::Rgb(0x4e, 0x9a, 0xff));
+        let theme = self.theme;
         let mut paint = |x: u16, glyph: char| {
             let hovered = pointer.is_some_and(|(px, py)| py == y && px >= x && px < x + w);
-            let color = if hovered { accent } else { base };
             frame.buffer_mut().set_string(
                 x + w / 2,
                 y,
                 glyph.to_string(),
-                Style::default().fg(color),
+                crate::widgets::hover::icon_style(theme, Style::default().fg(base), hovered),
             );
         };
         let side_glyph = if self.show_tree {
@@ -22400,10 +22399,14 @@ impl App {
                     .fg(active_fg)
                     .bg(strip_bg)
                     .add_modifier(Modifier::BOLD)
-            } else if crate::widgets::hover::row_hover_bg(*rect, pointer, self.theme).is_some() {
-                Style::default().fg(active_fg).bg(strip_bg)
             } else {
-                Style::default().fg(inactive_fg).bg(strip_bg)
+                // The same highlight every heading gets (`hover_heading`).
+                crate::widgets::hover::heading_style(
+                    self.theme,
+                    Style::default().fg(inactive_fg).bg(strip_bg),
+                    active_fg,
+                    crate::widgets::hover::contains(*rect, pointer),
+                )
             };
             if rect.x < right {
                 buf.set_stringn(
@@ -69724,6 +69727,10 @@ impl App {
         self.indent_guides_enabled = !p.disable_indent_guides;
         self.editor.show_indent_guides = self.indent_guides_enabled;
         self.home_walks_rows = p.home_walks_wrapped_rows;
+        crate::widgets::hover::set_modes(
+            crate::widgets::hover::HeadingHover::from_pref(&p.hover_heading),
+            crate::widgets::hover::IconHover::from_pref(&p.hover_icon),
+        );
         self.bracket_colors_enabled = !p.disable_bracket_colors;
         self.editor.show_bracket_colors = self.bracket_colors_enabled;
         self.whitespace_mode =

@@ -446,6 +446,15 @@ Profiles live in `~/.config/croft/profiles/<name>/`. History, macros and session
 
 All three are user-config only.
 
+## Hover highlight
+
+Every interactive icon and heading highlights under the pointer the same way, in the active theme's own accent.
+
+* `"hover_icon"` sets it for icons (the header icons of Explorer, Search, Source Control and the like, the open-tabs button, the layout toggles, the `+` / `-` / `⋯` buttons): `"accent"` (the default) turns the glyph to the theme's accent, `"accent_pill"` adds a pill behind it, `"pill"` keeps the glyph's colour and shows only the pill.
+* `"hover_heading"` sets it for headings such as the PROBLEMS, OUTPUT and TERMINAL tabs of the panel: `"color"` (the default) brightens the text, `"bold"` also makes it bold, `"pill"` adds a pill behind it.
+
+Both are user-config only.
+
 ## Terminal colour depth
 
 Themes are written in 24-bit colour. On a terminal that only understands 256 or 16 colours, croft converts every colour to the nearest one the terminal can show, so the screen stays readable instead of turning into stray escape codes or wrong colours.

@@ -872,12 +872,12 @@ mod tests {
         (&mut p).render(area, &mut buf);
         assert_eq!(
             buf[(add.x, add.y)].fg,
-            p.theme.ui(crate::widgets::header_pill::HEADER_BTN_HOVER_FG),
+            p.theme.accent(),
             "the + icon lifts to the accent under the pointer"
         );
         assert_ne!(
             buf[(refresh.x, refresh.y)].fg,
-            p.theme.ui(crate::widgets::header_pill::HEADER_BTN_HOVER_FG),
+            p.theme.accent(),
             "the un-hovered refresh icon keeps its rest colour"
         );
     }
