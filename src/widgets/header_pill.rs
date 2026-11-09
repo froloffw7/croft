@@ -1,18 +1,25 @@
-//! Shared section-header pill button (the small chip-backed codicon affordances
-//! VS Code paints at the right of a view's title row). Used by both the Remote
-//! Explorer header (`+` / refresh) and the Source Control header (refresh), so
-//! the navy-chip / brand-teal theming stays defined in exactly one place.
+//! Shared section-header pill button (the small codicon affordances VS Code
+//! paints at the right of a view's title row). Used by the Explorer, Open
+//! Editors, Source Control, Remote Explorer and Search headers, so the look of
+//! an interactive header icon (bold glyph, blue on hover, brand-teal pill under
+//! the Black theme) stays defined in exactly one place.
 
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Color, Modifier, Style},
 };
+
 /// Background colour painted under a header pill button so it reads as a touch
 /// target, not a naked single glyph. Matches the chip behind the view title.
 pub const HEADER_BTN_BG: Color = Color::Rgb(0x27, 0x28, 0x22);
-pub const HEADER_BTN_FG: Color = Color::Rgb(0xe6, 0xed, 0xf5);
+const HEADER_BTN_FG: Color = Color::Rgb(0xe6, 0xed, 0xf5);
+/// Colour a Croft Dark header icon takes while the pointer rests on it. The
+/// icon itself lifts to this accent instead of growing a chip, so every
+/// interactive icon highlights the same way. The Black theme instead grows a
+/// faint teal pill from nothing, so it has no use for it.
 pub const HEADER_BTN_HOVER_FG: Color = Color::Rgb(0x4e, 0x9a, 0xff);
+
 /// Codicon `cod-refresh` — the circular-arrow glyph VS Code paints on a view's
 /// refresh affordance. Verified against the Nerd Font cmap.
 pub const REFRESH_GLYPH: char = '\u{eb37}';
@@ -43,16 +50,15 @@ pub const COLLAPSE_ALL_GLYPH: char = '\u{eac5}';
 /// no-codicon-dependency reasoning behind the U+2715 close glyph.
 pub const MORE_LABEL: &str = " \u{22ef} ";
 
-/// Paint a header pill button at cell `(x, y)`. `brand` is true under the
-/// Black theme: a chipless teal icon in the VS Code toolbar spirit that grows
-/// a faint teal pill only while hovered. Croft Dark keeps the navy pill and
-/// brightens it on hover (`toolbar.hoverBackground`).
+/// Paint a header pill button at cell `(x, y)`. Under the Black theme (`brand`)
+/// it is a chipless light icon that grows a faint teal pill only while hovered.
+/// Croft Dark paints no chip either: the bold glyph is light at rest and lifts
+/// to the accent blue on hover.
 ///
-/// The painted footprint is exactly **one cell** — it wraps the single-width
-/// codicon so the chip and the glyph coincide perfectly. A wider chip around a
-/// 1-cell glyph always left a bare highlight cell beside the icon, which read
-/// as a misalignment. Callers keep a wider hit-test rect for a forgiving click
-/// target; only the visible highlight is snug.
+/// The painted footprint is exactly **one cell** — the single-width codicon.
+/// A wider highlight around a 1-cell glyph always left a bare cell beside the
+/// icon, which read as a misalignment. Callers keep a wider hit-test rect for a
+/// forgiving click target; only the visible highlight is snug.
 pub fn render(
     buf: &mut Buffer,
     x: u16,
@@ -61,23 +67,22 @@ pub fn render(
     theme: crate::theme::Theme,
     hovered: bool,
 ) {
-    let mut style = Style::default().add_modifier(Modifier::BOLD);
     let brand = theme.gradient();
+    let mut style = Style::default().add_modifier(Modifier::BOLD);
+    if brand && hovered {
+        style = style.bg(crate::gradient::rgb_color(crate::gradient::POPUP_SEL_BG));
+    }
     // VS Code paints view-action icons in a light `icon.foreground`, not an
     // accent hue. The Black theme previously used the brand teal here, which
     // read as an out-of-place dark green; use the same near-white the panel
     // title wears so the icons sit quietly on the header.
-    if brand && hovered {
-        style = style.bg(crate::gradient::rgb_color(crate::gradient::POPUP_SEL_BG));
-    }
-    style = style.fg(if brand {
-        crate::gradient::rgb_color(crate::gradient::PANEL_TITLE_FG)
+    style = if brand {
+        style.fg(crate::gradient::rgb_color(crate::gradient::PANEL_TITLE_FG))
     } else if hovered {
-        theme.ui(HEADER_BTN_HOVER_FG)
+        style.fg(theme.ui(HEADER_BTN_HOVER_FG))
     } else {
-        theme.ui(HEADER_BTN_FG)
-    });
-
+        style.fg(theme.ui(HEADER_BTN_FG))
+    };
     buf.set_string(x, y, glyph.to_string(), style);
 }
 
@@ -145,41 +150,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn croft_dark_highlight_wraps_exactly_the_glyph_cell() {
+    fn croft_dark_icon_is_chipless_and_lifts_its_glyph_on_hover() {
         let area = Rect {
             x: 0,
             y: 0,
             width: 6,
             height: 1,
         };
+        let theme = crate::theme::Theme::DARK_BLUE;
         let mut buf = Buffer::empty(area);
-        // Croft Dark (brand = false) always paints the navy chip. Render at x=2.
-        render(
-            &mut buf,
-            2,
-            0,
-            REFRESH_GLYPH,
-            crate::theme::Theme::DARK_BLUE,
-            false,
-        );
-        assert_eq!(
-            buf[(2, 0)].bg,
-            HEADER_BTN_BG,
-            "the glyph cell wears the navy chip"
-        );
+        render(&mut buf, 2, 0, REFRESH_GLYPH, theme, false);
         assert_eq!(buf[(2, 0)].symbol().chars().next(), Some(REFRESH_GLYPH));
-        // The whole point of the fix: no bare highlight cell beside the glyph,
-        // so the chip and the single-width glyph coincide perfectly.
+        assert_eq!(buf[(2, 0)].bg, Color::Reset, "no chip behind the glyph");
+        assert_eq!(buf[(2, 0)].fg, theme.ui(HEADER_BTN_FG));
+        assert!(buf[(2, 0)].modifier.contains(Modifier::BOLD));
+        let mut buf = Buffer::empty(area);
+        render(&mut buf, 2, 0, REFRESH_GLYPH, theme, true);
         assert_eq!(
-            buf[(1, 0)].bg,
-            Color::Reset,
-            "no bare highlight cell left of the glyph"
+            buf[(2, 0)].fg,
+            theme.ui(HEADER_BTN_HOVER_FG),
+            "accent on hover"
         );
-        assert_eq!(
-            buf[(3, 0)].bg,
-            Color::Reset,
-            "no bare highlight cell right of the glyph"
-        );
+        assert_eq!(buf[(2, 0)].bg, Color::Reset, "still no chip");
+        // Only the glyph's own cell is painted.
+        assert_eq!(buf[(1, 0)].fg, Color::Reset);
+        assert_eq!(buf[(3, 0)].fg, Color::Reset);
     }
 
     #[test]
