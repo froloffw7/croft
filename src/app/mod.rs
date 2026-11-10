@@ -19021,6 +19021,13 @@ impl App {
         let theme = self.theme;
         let mut paint = |x: u16, glyph: char| {
             let hovered = pointer.is_some_and(|(px, py)| py == y && px >= x && px < x + w);
+            // The pill spans the whole slot, the click target.
+            crate::widgets::hover::icon_backdrop(
+                frame.buffer_mut(),
+                Rect::new(x, y, w, 1),
+                theme,
+                hovered,
+            );
             frame.buffer_mut().set_string(
                 x + w / 2,
                 y,

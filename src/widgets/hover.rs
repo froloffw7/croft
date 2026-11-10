@@ -192,6 +192,37 @@ pub fn icon_style_in(
     }
 }
 
+/// Paint the pill behind a hovered icon across `area` (the icon's whole click
+/// target, so the fill is as wide as the icon is hittable, not just its one
+/// glyph cell), when `mode` has a pill. Cells outside the buffer are skipped.
+pub fn icon_backdrop_in(
+    mode: IconHover,
+    buf: &mut ratatui::buffer::Buffer,
+    area: Rect,
+    theme: crate::theme::Theme,
+    hovered: bool,
+) {
+    if !hovered || mode == IconHover::Accent {
+        return;
+    }
+    let area = area.intersection(buf.area);
+    for y in area.top()..area.bottom() {
+        for x in area.left()..area.right() {
+            buf[(x, y)].set_bg(pill_bg(theme));
+        }
+    }
+}
+
+/// [`icon_backdrop_in`] under the `hover_icon` setting.
+pub fn icon_backdrop(
+    buf: &mut ratatui::buffer::Buffer,
+    area: Rect,
+    theme: crate::theme::Theme,
+    hovered: bool,
+) {
+    icon_backdrop_in(icon_mode(), buf, area, theme, hovered);
+}
+
 /// [`icon_style_in`] under the `hover_icon` setting.
 pub fn icon_style(theme: crate::theme::Theme, rest: Style, hovered: bool) -> Style {
     icon_style_in(icon_mode(), theme, rest, hovered)
@@ -265,6 +296,33 @@ mod tests {
             icon_hover_fg(Theme::DARK_BLUE),
             icon_hover_fg(Theme::BLACK),
             "each theme highlights in its own accent"
+        );
+    }
+
+    #[test]
+    fn the_pill_fills_the_whole_click_target_and_stays_inside_the_buffer() {
+        use crate::theme::Theme;
+        let theme = Theme::DARK_BLUE;
+        let area = Rect::new(0, 0, 6, 1);
+        let target = Rect::new(0, 0, 4, 1); // a glyph with a cell either side
+        let bg = |buf: &ratatui::buffer::Buffer, x| buf[(x, 0)].bg;
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        icon_backdrop_in(IconHover::Pill, &mut buf, target, theme, true);
+        for x in 0..4 {
+            assert_eq!(bg(&buf, x), pill_bg(theme), "cell {x}");
+        }
+        assert_ne!(bg(&buf, 4), pill_bg(theme));
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        icon_backdrop_in(IconHover::Accent, &mut buf, target, theme, true);
+        icon_backdrop_in(IconHover::Pill, &mut buf, target, theme, false);
+        assert_ne!(bg(&buf, 0), pill_bg(theme), "no pill unhovered / in accent");
+        // A target that sticks out of the buffer is clipped, not a panic.
+        icon_backdrop_in(
+            IconHover::Pill,
+            &mut buf,
+            Rect::new(4, 0, 9, 3),
+            theme,
+            true,
         );
     }
 
