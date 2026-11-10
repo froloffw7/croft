@@ -54,6 +54,8 @@ pub fn choices(key: &str) -> Option<Vec<String>> {
         "build_column_unit" => &["display", "byte", "char"],
         "diff_ignore_whitespace" => &["off", "leading", "all"],
         "render_whitespace" => &["selection", "all", "none"],
+        "hover_icon" => &["accent", "accent_pill", "pill"],
+        "hover_heading" => &["color", "bold", "pill"],
         "line_numbers" => &["on", "relative", "interval", "off"],
         "word_based_suggestions" => &[
             "matchingDocuments",
@@ -481,6 +483,23 @@ mod tests {
         // An empty or unknown value is the first choice, so Enter moves on.
         assert_eq!(next_value(&row("p", json!(""), c)), Some(json!("on")));
         assert_eq!(next_value(&row("n", json!(3), Kind::Number)), None);
+    }
+
+    #[test]
+    fn the_hover_settings_are_choices_the_editor_steps_with_enter() {
+        assert_eq!(
+            choices("hover_icon").unwrap(),
+            ["accent", "accent_pill", "pill"]
+        );
+        assert_eq!(choices("hover_heading").unwrap(), ["color", "bold", "pill"]);
+        // Each choice is what the setting parses, so none is ignored.
+        for c in choices("hover_icon").unwrap() {
+            let mode = crate::widgets::hover::IconHover::from_pref(&c);
+            assert_eq!(
+                c == "accent",
+                mode == crate::widgets::hover::IconHover::Accent
+            );
+        }
     }
 
     #[test]
