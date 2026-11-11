@@ -24265,16 +24265,17 @@ impl Widget for &mut EditorTabs {
             // Overpaint the close/pin cell with its hover pill so the user sees
             // exactly which glyph their click will land on.
             if on_close {
+                // The same highlight every icon gets (`hover_icon`); the pill
+                // mode keeps its legible cross on the pill.
                 let pill_bg = theme.tab_close_pill_bg();
-                buf.set_string(
-                    close_x,
-                    strip.y,
-                    close_glyph,
-                    Style::default()
-                        .fg(close_pill_fg(theme, pill_bg))
-                        .bg(pill_bg)
-                        .add_modifier(Modifier::BOLD),
-                );
+                let rest = Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD);
+                let lit = crate::widgets::hover::icon_style(theme, rest, true);
+                let lit = if lit.bg == rest.bg {
+                    lit
+                } else {
+                    lit.fg(close_pill_fg(theme, pill_bg))
+                };
+                buf.set_string(close_x, strip.y, close_glyph, lit);
             }
             self.tab_screen_ranges.push((cursor_x, width));
             self.tab_close_x.push(close_x);
@@ -38449,6 +38450,10 @@ mod tests {
     #[test]
     fn hovering_the_close_cross_paints_a_pill_on_that_cell() {
         use ratatui::buffer::Buffer;
+        crate::widgets::hover::set_modes(
+            crate::widgets::hover::HeadingHover::Color,
+            crate::widgets::hover::IconHover::Pill,
+        );
         let mut t = EditorTabs::new();
         t.editors[0].path = Some(std::path::PathBuf::from("/foo.rs"));
         t.add_tab_with_path(std::path::PathBuf::from("/bar.rs"));
@@ -38550,6 +38555,10 @@ mod tests {
     #[test]
     fn high_contrast_close_pill_glyph_contrasts_with_the_pill() {
         use ratatui::buffer::Buffer;
+        crate::widgets::hover::set_modes(
+            crate::widgets::hover::HeadingHover::Color,
+            crate::widgets::hover::IconHover::Pill,
+        );
         for (id, want) in [
             ("hc-black", Color::Black),
             ("hc-light", Color::White),
@@ -38577,9 +38586,46 @@ mod tests {
         }
     }
 
+    /// The close cross highlights like every other icon (`hover_icon`): the
+    /// theme's accent by default, white for `color`, no pill but in `pill`.
+    #[test]
+    fn the_close_cross_hover_follows_the_icon_setting() {
+        use crate::widgets::hover::{HeadingHover, IconHover, set_modes, text_hover_fg};
+        use ratatui::buffer::Buffer;
+        let theme = crate::theme::Theme::default();
+        for (mode, fg, pill) in [
+            (IconHover::Accent, theme.accent(), false),
+            (IconHover::Color, text_hover_fg(theme), false),
+            (IconHover::Pill, Color::White, true),
+        ] {
+            set_modes(HeadingHover::Color, mode);
+            let mut t = EditorTabs::new();
+            t.editors[0].path = Some(std::path::PathBuf::from("/foo.rs"));
+            let area = Rect::new(0, 0, 80, 10);
+            let mut buf = Buffer::empty(area);
+            (&mut t).render(area, &mut buf);
+            let cx = t.close_screen_x(t.active).expect("a close cross");
+            t.hover_pointer = Some((cx, area.y));
+            let mut buf = Buffer::empty(area);
+            (&mut t).render(area, &mut buf);
+            let cell = &buf[(cx, area.y)];
+            assert_eq!(cell.symbol(), "\u{2715}", "{mode:?}");
+            assert_eq!(cell.fg, fg, "{mode:?}: the cross's ink");
+            assert_eq!(
+                cell.bg == theme.tab_close_pill_bg(),
+                pill,
+                "{mode:?}: the pill"
+            );
+        }
+    }
+
     #[test]
     fn black_theme_close_pill_is_distinct_from_the_active_tab_bg() {
         use ratatui::buffer::Buffer;
+        crate::widgets::hover::set_modes(
+            crate::widgets::hover::HeadingHover::Color,
+            crate::widgets::hover::IconHover::Pill,
+        );
         let mut t = EditorTabs::new();
         t.editors[0].path = Some(std::path::PathBuf::from("/foo.rs"));
         t.editors[0].theme = crate::theme::Theme::BLACK;

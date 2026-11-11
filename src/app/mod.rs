@@ -22693,12 +22693,7 @@ impl App {
         let surfaces = self.theme.surfaces();
         let strip_bg = surfaces.map_or(self.theme.editor_bg(), |s| s.chrome());
         frame.render_widget(Block::default().style(Style::default().bg(strip_bg)), strip);
-        let brand = self.theme.gradient();
-        let active_fg = if brand {
-            crate::gradient::rgb_color(crate::gradient::PANEL_TITLE_FG)
-        } else {
-            self.theme.ui(Color::White)
-        };
+        let active_fg = crate::widgets::hover::text_hover_fg(self.theme);
         let inactive_fg =
             surfaces.map_or(self.theme.ui(Color::Rgb(0x80, 0x88, 0x98)), |s| s.muted());
         let right = strip.x + strip.width;
