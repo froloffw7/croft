@@ -90,9 +90,10 @@ pub enum IconHover {
     /// The glyph takes the theme's accent (the default).
     #[default]
     Accent,
-    /// The accent glyph on a pill of the toolbar hover background.
-    AccentPill,
-    /// The glyph keeps its colour and gets the pill.
+    /// The glyph brightens to white, in no hue of its own.
+    Color,
+    /// The glyph keeps its colour and gets a pill of the toolbar hover
+    /// background.
     Pill,
 }
 
@@ -100,7 +101,7 @@ impl IconHover {
     /// Parse the setting; anything unknown is the default.
     pub fn from_pref(s: &str) -> Self {
         match s.trim().to_ascii_lowercase().as_str() {
-            "accent_pill" | "accent-pill" => Self::AccentPill,
+            "color" => Self::Color,
             "pill" => Self::Pill,
             _ => Self::Accent,
         }
@@ -127,7 +128,7 @@ fn heading_mode() -> HeadingHover {
 
 fn icon_mode() -> IconHover {
     match ICON_MODE.load(Ordering::Relaxed) {
-        1 => IconHover::AccentPill,
+        1 => IconHover::Color,
         2 => IconHover::Pill,
         _ => IconHover::Accent,
     }
@@ -187,7 +188,7 @@ pub fn icon_style_in(
     }
     match mode {
         IconHover::Accent => rest.fg(icon_hover_fg(theme)),
-        IconHover::AccentPill => rest.fg(icon_hover_fg(theme)).bg(pill_bg(theme)),
+        IconHover::Color => rest.fg(theme.ui(Color::White)),
         IconHover::Pill => rest.bg(pill_bg(theme)),
     }
 }
@@ -202,7 +203,7 @@ pub fn icon_backdrop_in(
     theme: crate::theme::Theme,
     hovered: bool,
 ) {
-    if !hovered || mode == IconHover::Accent {
+    if !hovered || mode != IconHover::Pill {
         return;
     }
     let area = area.intersection(buf.area);
@@ -287,8 +288,8 @@ mod tests {
             let s = icon_style_in(IconHover::Accent, theme, rest, true);
             assert_eq!((s.fg, s.bg), (Some(acc), None));
             assert!(s.add_modifier.contains(Modifier::BOLD), "bold is kept");
-            let s = icon_style_in(IconHover::AccentPill, theme, rest, true);
-            assert_eq!((s.fg, s.bg), (Some(acc), Some(pill)));
+            let s = icon_style_in(IconHover::Color, theme, rest, true);
+            assert_eq!((s.fg, s.bg), (Some(theme.ui(Color::White)), None));
             let s = icon_style_in(IconHover::Pill, theme, rest, true);
             assert_eq!((s.fg, s.bg), (Some(Color::Gray), Some(pill)));
         }
@@ -314,8 +315,13 @@ mod tests {
         assert_ne!(bg(&buf, 4), pill_bg(theme));
         let mut buf = ratatui::buffer::Buffer::empty(area);
         icon_backdrop_in(IconHover::Accent, &mut buf, target, theme, true);
+        icon_backdrop_in(IconHover::Color, &mut buf, target, theme, true);
         icon_backdrop_in(IconHover::Pill, &mut buf, target, theme, false);
-        assert_ne!(bg(&buf, 0), pill_bg(theme), "no pill unhovered / in accent");
+        assert_ne!(
+            bg(&buf, 0),
+            pill_bg(theme),
+            "no pill unhovered or off the pill mode"
+        );
         // A target that sticks out of the buffer is clipped, not a panic.
         icon_backdrop_in(
             IconHover::Pill,
@@ -352,7 +358,8 @@ mod tests {
         assert_eq!(HeadingHover::from_pref("pill"), HeadingHover::Pill);
         assert_eq!(HeadingHover::from_pref("nonsense"), HeadingHover::Color);
         assert_eq!(IconHover::from_pref(""), IconHover::Accent);
-        assert_eq!(IconHover::from_pref("accent_pill"), IconHover::AccentPill);
+        assert_eq!(IconHover::from_pref("color"), IconHover::Color);
+        assert_eq!(IconHover::from_pref("accent_pill"), IconHover::Accent);
         assert_eq!(IconHover::from_pref("pill"), IconHover::Pill);
     }
 }

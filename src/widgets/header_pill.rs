@@ -67,9 +67,9 @@ pub fn render(
     let rest = Style::default()
         .add_modifier(Modifier::BOLD)
         .fg(icon_rest_fg(theme));
-    // The click targets are wider than the glyph; the pill shows that, a cell
-    // either side of it.
-    let target = Rect::new(x.saturating_sub(1), y, 3, 1);
+    // The click targets are two cells, the glyph and the one after it; the
+    // pill shows exactly that, so neighbouring icons never share a cell.
+    let target = Rect::new(x, y, 2, 1);
     crate::widgets::hover::icon_backdrop(buf, target, theme, hovered);
     buf.set_string(
         x,
