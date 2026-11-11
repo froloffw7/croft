@@ -470,8 +470,8 @@ All three are user-config only.
 
 Every interactive icon and heading highlights under the pointer the same way, in the active theme's own accent.
 
-* `"hover_icon"` sets it for icons (the header icons of Explorer, Search, Source Control and the like, the open-tabs button, the layout toggles, the `+` / `-` / `⋯` buttons): `"accent"` (the default) turns the glyph to the theme's accent, `"color"` brightens it to white, `"pill"` keeps the glyph's colour and shows a pill behind it.
-* `"hover_heading"` sets it for headings such as the PROBLEMS, OUTPUT and TERMINAL tabs of the panel: `"color"` (the default) brightens the text, `"bold"` also makes it bold, `"pill"` adds a pill behind it.
+* `"hover_icon"` sets it for icons (the header icons of Explorer, Search, Source Control and the like, the open-tabs button, the layout toggles, the `+` / `-` / `⋯` buttons): `"accent"` (the default) turns the glyph to the theme's accent, `"color"` brightens it to white, `"bold"` makes it bold without changing its colour, `"pill"` keeps the glyph's colour and shows a pill of the accent behind it.
+* `"hover_heading"` sets it for headings such as the PROBLEMS, OUTPUT and TERMINAL tabs of the panel: `"color"` (the default) brightens the text to a soft white, `"accent"` turns it to the theme's accent, `"bold"` brightens and makes it bold, `"pill"` adds a pill of the accent behind it.
 
 Both are user-config only.
 
