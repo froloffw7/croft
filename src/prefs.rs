@@ -401,13 +401,13 @@ pub struct Prefs {
     #[serde(default)]
     pub home_walks_wrapped_rows: bool,
     /// How a hovered heading (a panel tab such as PROBLEMS) shows the pointer:
-    /// "color" (the default, also what an empty string means), "bold" or
-    /// "pill". Parsed by `HeadingHover::from_pref`.
+    /// "color" (the default, also what an empty string means), "accent",
+    /// "bold" or "pill". Parsed by `HeadingHover::from_pref`.
     #[serde(default)]
     pub hover_heading: String,
     /// How a hovered icon (header icons, the open-tabs button, the layout
     /// toggles, `+` / `-` / `⋯`) shows the pointer: "accent" (the default, also
-    /// what an empty string means), "color" or "pill". Parsed by
+    /// what an empty string means), "color", "bold" or "pill". Parsed by
     /// `IconHover::from_pref`.
     #[serde(default)]
     pub hover_icon: String,

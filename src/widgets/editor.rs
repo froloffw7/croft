@@ -24043,22 +24043,6 @@ const TAB_WHEEL_GAP: std::time::Duration = std::time::Duration::from_millis(90);
 const TAB_INACTIVE_FG: Color = Color::Rgb(0x9d, 0xa5, 0xb4);
 const TAB_ACTIVE_FG: Color = Color::White;
 
-/// Ink for the tab close/pin glyph on its hover pill: white, except that a
-/// high contrast theme (#1548) takes whichever of black or white reads
-/// better on its pill (black on High Contrast's orange).
-fn close_pill_fg(theme: crate::theme::Theme, pill: Color) -> Color {
-    match pill {
-        Color::Rgb(r, g, b)
-            if theme.high_contrast()
-                && crate::theme::contrast_ratio((r, g, b), (0, 0, 0))
-                    > crate::theme::contrast_ratio((r, g, b), (0xff, 0xff, 0xff)) =>
-        {
-            Color::Black
-        }
-        _ => Color::White,
-    }
-}
-
 impl Widget for &mut EditorTabs {
     fn render(self, area: Rect, buf: &mut Buffer) {
         self.last_full_area = area;
@@ -24265,16 +24249,9 @@ impl Widget for &mut EditorTabs {
             // Overpaint the close/pin cell with its hover pill so the user sees
             // exactly which glyph their click will land on.
             if on_close {
-                // The same highlight every icon gets (`hover_icon`); the pill
-                // mode keeps its legible cross on the pill.
-                let pill_bg = theme.tab_close_pill_bg();
+                // The same highlight every icon gets (`hover_icon`).
                 let rest = Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD);
                 let lit = crate::widgets::hover::icon_style(theme, rest, true);
-                let lit = if lit.bg == rest.bg {
-                    lit
-                } else {
-                    lit.fg(close_pill_fg(theme, pill_bg))
-                };
                 buf.set_string(close_x, strip.y, close_glyph, lit);
             }
             self.tab_screen_ranges.push((cursor_x, width));
@@ -38472,7 +38449,7 @@ mod tests {
         t.hover_pointer = Some((cx, area.y));
         let mut buf = Buffer::empty(area);
         (&mut t).render(area, &mut buf);
-        let pill = crate::theme::Theme::default().tab_close_pill_bg();
+        let pill = crate::widgets::hover::pill_bg(crate::theme::Theme::default());
         assert_eq!(
             buf[(cx, area.y)].bg,
             pill,
@@ -38581,7 +38558,11 @@ mod tests {
             let mut buf = Buffer::empty(area);
             (&mut t).render(area, &mut buf);
             let cell = &buf[(cx, area.y)];
-            assert_eq!(cell.bg, theme.tab_close_pill_bg(), "{id}: the pill shows");
+            assert_eq!(
+                cell.bg,
+                crate::widgets::hover::pill_bg(theme),
+                "{id}: the pill shows"
+            );
             assert_eq!(cell.fg, want, "{id}: the glyph's ink");
         }
     }
@@ -38612,7 +38593,7 @@ mod tests {
             assert_eq!(cell.symbol(), "\u{2715}", "{mode:?}");
             assert_eq!(cell.fg, fg, "{mode:?}: the cross's ink");
             assert_eq!(
-                cell.bg == theme.tab_close_pill_bg(),
+                cell.bg == crate::widgets::hover::pill_bg(theme),
                 pill,
                 "{mode:?}: the pill"
             );
@@ -38654,8 +38635,8 @@ mod tests {
         );
         assert_eq!(
             buf[(cx, area.y)].bg,
-            black.tab_close_pill_bg(),
-            "the Black-theme close pill uses the brighter teal"
+            crate::widgets::hover::pill_bg(black),
+            "the Black-theme close pill is the accent teal"
         );
         assert_ne!(
             buf[(cx, area.y)].bg,

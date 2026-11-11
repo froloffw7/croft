@@ -64,6 +64,8 @@ pub enum HeadingHover {
     /// The text takes its hover colour (the default).
     #[default]
     Color,
+    /// The theme's accent.
+    Accent,
     /// The hover colour, and bold.
     Bold,
     /// The hover colour on a pill of the toolbar hover background.
@@ -75,6 +77,7 @@ impl HeadingHover {
     /// string) is the default.
     pub fn from_pref(s: &str) -> Self {
         match s.trim().to_ascii_lowercase().as_str() {
+            "accent" => Self::Accent,
             "bold" => Self::Bold,
             "pill" => Self::Pill,
             _ => Self::Color,
@@ -92,6 +95,8 @@ pub enum IconHover {
     Accent,
     /// The glyph brightens to white, in no hue of its own.
     Color,
+    /// The glyph keeps its colour and turns bold.
+    Bold,
     /// The glyph keeps its colour and gets a pill of the toolbar hover
     /// background.
     Pill,
@@ -102,6 +107,7 @@ impl IconHover {
     pub fn from_pref(s: &str) -> Self {
         match s.trim().to_ascii_lowercase().as_str() {
             "color" => Self::Color,
+            "bold" => Self::Bold,
             "pill" => Self::Pill,
             _ => Self::Accent,
         }
@@ -144,10 +150,27 @@ pub fn icon_hover_fg(theme: crate::theme::Theme) -> Color {
     theme.accent()
 }
 
-/// The pill under a hovered heading or icon (VS Code
-/// `toolbar.hoverBackground`), from the active theme.
+/// The pill under a hovered heading or icon: the active theme's accent, the
+/// same hue the `accent` modes colour the glyph with.
 pub fn pill_bg(theme: crate::theme::Theme) -> Color {
-    theme.tab_close_pill_bg()
+    theme.accent()
+}
+
+/// `fg` as it is drawn on the hover pill. A high contrast theme (#1548) takes
+/// whichever of black or white reads better on its pill (black on High
+/// Contrast's orange); the other themes keep their own ink.
+fn ink_on_pill(theme: crate::theme::Theme, fg: Color, pill: Color) -> Color {
+    match pill {
+        Color::Rgb(r, g, b)
+            if theme.high_contrast()
+                && crate::theme::contrast_ratio((r, g, b), (0, 0, 0))
+                    > crate::theme::contrast_ratio((r, g, b), (0xff, 0xff, 0xff)) =>
+        {
+            Color::Black
+        }
+        _ if theme.high_contrast() => Color::White,
+        _ => fg,
+    }
 }
 
 /// `rest` for a heading as drawn while hovered per `mode`; `hover_fg` is the
@@ -165,8 +188,12 @@ pub fn heading_style_in(
     let lit = rest.fg(hover_fg);
     match mode {
         HeadingHover::Color => lit,
+        HeadingHover::Accent => rest.fg(icon_hover_fg(theme)),
         HeadingHover::Bold => lit.add_modifier(Modifier::BOLD),
-        HeadingHover::Pill => lit.bg(pill_bg(theme)),
+        HeadingHover::Pill => {
+            let pill = pill_bg(theme);
+            lit.fg(ink_on_pill(theme, hover_fg, pill)).bg(pill)
+        }
     }
 }
 
@@ -193,7 +220,14 @@ pub fn icon_style_in(
     match mode {
         IconHover::Accent => rest.fg(icon_hover_fg(theme)),
         IconHover::Color => rest.fg(text_hover_fg(theme)),
-        IconHover::Pill => rest.bg(pill_bg(theme)),
+        IconHover::Bold => rest.add_modifier(Modifier::BOLD),
+        IconHover::Pill => {
+            let pill = pill_bg(theme);
+            let fg = rest
+                .fg
+                .map_or(Color::White, |c| ink_on_pill(theme, c, pill));
+            rest.fg(fg).bg(pill)
+        }
     }
 }
 
@@ -287,13 +321,18 @@ mod tests {
             .add_modifier(Modifier::BOLD);
         for theme in [Theme::DARK_BLUE, Theme::BLACK] {
             let acc = theme.accent();
-            let pill = theme.tab_close_pill_bg();
+            let pill = pill_bg(theme);
+            assert_eq!(pill, acc, "the pill is the accent too");
             assert_eq!(icon_style_in(IconHover::Accent, theme, rest, false), rest);
             let s = icon_style_in(IconHover::Accent, theme, rest, true);
             assert_eq!((s.fg, s.bg), (Some(acc), None));
             assert!(s.add_modifier.contains(Modifier::BOLD), "bold is kept");
             let s = icon_style_in(IconHover::Color, theme, rest, true);
             assert_eq!((s.fg, s.bg), (Some(text_hover_fg(theme)), None));
+            let plain = Style::default().fg(Color::Gray);
+            let s = icon_style_in(IconHover::Bold, theme, plain, true);
+            assert_eq!((s.fg, s.bg), (Some(Color::Gray), None));
+            assert!(s.add_modifier.contains(Modifier::BOLD), "bold on hover");
             let s = icon_style_in(IconHover::Pill, theme, rest, true);
             assert_eq!((s.fg, s.bg), (Some(Color::Gray), Some(pill)));
         }
@@ -320,6 +359,7 @@ mod tests {
         let mut buf = ratatui::buffer::Buffer::empty(area);
         icon_backdrop_in(IconHover::Accent, &mut buf, target, theme, true);
         icon_backdrop_in(IconHover::Color, &mut buf, target, theme, true);
+        icon_backdrop_in(IconHover::Bold, &mut buf, target, theme, true);
         icon_backdrop_in(IconHover::Pill, &mut buf, target, theme, false);
         assert_ne!(
             bg(&buf, 0),
@@ -352,7 +392,9 @@ mod tests {
         let s = heading_style_in(HeadingHover::Bold, theme, rest, up, true);
         assert!(s.add_modifier.contains(Modifier::BOLD));
         let s = heading_style_in(HeadingHover::Pill, theme, rest, up, true);
-        assert_eq!(s.bg, Some(theme.tab_close_pill_bg()));
+        assert_eq!((s.fg, s.bg), (Some(up), Some(theme.accent())));
+        let s = heading_style_in(HeadingHover::Accent, theme, rest, up, true);
+        assert_eq!((s.fg, s.bg), (Some(theme.accent()), None));
     }
 
     #[test]
@@ -360,9 +402,11 @@ mod tests {
         assert_eq!(HeadingHover::from_pref(""), HeadingHover::Color);
         assert_eq!(HeadingHover::from_pref("Bold"), HeadingHover::Bold);
         assert_eq!(HeadingHover::from_pref("pill"), HeadingHover::Pill);
+        assert_eq!(HeadingHover::from_pref("accent"), HeadingHover::Accent);
         assert_eq!(HeadingHover::from_pref("nonsense"), HeadingHover::Color);
         assert_eq!(IconHover::from_pref(""), IconHover::Accent);
         assert_eq!(IconHover::from_pref("color"), IconHover::Color);
+        assert_eq!(IconHover::from_pref("bold"), IconHover::Bold);
         assert_eq!(IconHover::from_pref("accent_pill"), IconHover::Accent);
         assert_eq!(IconHover::from_pref("pill"), IconHover::Pill);
     }
