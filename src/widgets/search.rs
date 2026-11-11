@@ -1960,12 +1960,14 @@ impl SearchPanel {
 
     /// True when `(col, row)` lands on the header "Refresh" action icon.
     pub fn refresh_at(&self, col: u16, row: u16) -> bool {
-        self.refresh_x != 0 && row == self.refresh_y && col == self.refresh_x
+        self.refresh_x != 0
+            && row == self.refresh_y
+            && (self.refresh_x..self.refresh_x + 2).contains(&col)
     }
 
     /// True when `(col, row)` lands on the header "Clear Search Results" icon.
     pub fn clear_at(&self, col: u16, row: u16) -> bool {
-        self.clear_x != 0 && row == self.clear_y && col == self.clear_x
+        self.clear_x != 0 && row == self.clear_y && (self.clear_x..self.clear_x + 2).contains(&col)
     }
 
     /// The hover-tooltip label for whatever actionable control sits under
@@ -2666,7 +2668,7 @@ impl Widget for &mut SearchPanel {
         );
 
         // Header action icons, laid out from the right edge: clear (rightmost)
-        // then refresh, each a single-cell click target drawn by the shared
+        // then refresh, each a two-cell click target drawn by the shared
         // header pill (bold, lifting on hover) like the other view headers. Only
         // drawn when the panel is wide enough to clear the label.
         self.refresh_x = 0;
@@ -2674,6 +2676,8 @@ impl Widget for &mut SearchPanel {
         self.clear_x = 0;
         self.clear_y = inner.y;
         if inner.width > 16 {
+            // Each icon owns two cells (the glyph and the one after it, as in
+            // the other headers); a cell apart, one in from the panel's edge.
             let clear_x = inner.x + inner.width - 3;
             let refresh_x = clear_x - 3;
             for (x, glyph) in [
@@ -2682,7 +2686,7 @@ impl Widget for &mut SearchPanel {
             ] {
                 let hot = self
                     .hover_pointer
-                    .is_some_and(|(px, py)| py == inner.y && px == x);
+                    .is_some_and(|(px, py)| py == inner.y && (x..x + 2).contains(&px));
                 crate::widgets::header_pill::render(buf, x, inner.y, glyph, self.theme, hot);
             }
             self.refresh_x = refresh_x;
