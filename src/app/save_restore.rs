@@ -104,6 +104,13 @@ impl LossySave {
     }
 }
 
+/// The backup of a saved session file: its path with a `~` appended.
+fn session_backup_path(file: &std::path::Path) -> std::path::PathBuf {
+    let mut name = file.as_os_str().to_os_string();
+    name.push("~");
+    std::path::PathBuf::from(name)
+}
+
 impl App {
     /// Count of open editors with unsaved edits, across the active group and any
     /// split groups, deduped by path (a file open in two splits is one unsaved
@@ -592,7 +599,10 @@ impl App {
         state
             .bookmark_text
             .retain(|path, _| state.bookmarks.contains_key(path));
-        state.save(&file)
+        state.save(&file)?;
+        // The clean save is the new truth: the launch's backup is spent.
+        let _ = std::fs::remove_file(session_backup_path(&file));
+        Ok(())
     }
 
     /// Read the session the last clean exit saved on a thread of its own,
@@ -608,6 +618,12 @@ impl App {
         let root = self.workspace_root().to_path_buf();
         let (tx, rx) = std::sync::mpsc::channel();
         crate::startup_gate::spawn_after_first_frame(move || {
+            // A copy at `<file>~` for this run: if it ends without a clean
+            // exit, the session it started from is still there. A missing
+            // file (the first launch) is nothing to copy.
+            if path.exists() {
+                let _ = std::fs::copy(&path, session_backup_path(&path));
+            }
             if let Ok(mut state) = crate::session_state::SessionState::load(&path)
                 && state.is_of(&root)
             {
