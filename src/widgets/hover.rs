@@ -11,7 +11,7 @@
 
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::cell::Cell;
 
 /// VS Code `list.hoverBackground`, fitted to each croft theme. Deliberately
 /// subtler than any selection fill so a hovered-but-unselected row never reads
@@ -108,29 +108,33 @@ impl IconHover {
     }
 }
 
-static HEADING_MODE: AtomicU8 = AtomicU8::new(0);
-static ICON_MODE: AtomicU8 = AtomicU8::new(0);
+thread_local! {
+    static MODES: Cell<(HeadingHover, IconHover)> =
+        const { Cell::new((HeadingHover::Color, IconHover::Accent)) };
+}
 
-/// Apply the `hover_heading` and `hover_icon` settings. A process-wide switch,
-/// like the Tab Size, so the hundreds of draw sites need no extra argument.
+/// Apply the `hover_heading` and `hover_icon` settings. Held per thread (the
+/// UI's), like the Tab Size, so the hundreds of draw sites need no extra
+/// argument and a test that picks a mode cannot disturb another.
 pub fn set_modes(heading: HeadingHover, icon: IconHover) {
-    HEADING_MODE.store(heading as u8, Ordering::Relaxed);
-    ICON_MODE.store(icon as u8, Ordering::Relaxed);
+    MODES.with(|m| m.set((heading, icon)));
 }
 
 fn heading_mode() -> HeadingHover {
-    match HEADING_MODE.load(Ordering::Relaxed) {
-        1 => HeadingHover::Bold,
-        2 => HeadingHover::Pill,
-        _ => HeadingHover::Color,
-    }
+    MODES.with(|m| m.get().0)
 }
 
 fn icon_mode() -> IconHover {
-    match ICON_MODE.load(Ordering::Relaxed) {
-        1 => IconHover::Color,
-        2 => IconHover::Pill,
-        _ => IconHover::Accent,
+    MODES.with(|m| m.get().1)
+}
+
+/// The text colour a hovered heading takes and the `color` icon hover shares:
+/// white, softer than any accent (the Black theme's own panel-title tone there).
+pub fn text_hover_fg(theme: crate::theme::Theme) -> Color {
+    if theme.gradient() {
+        crate::gradient::rgb_color(crate::gradient::PANEL_TITLE_FG)
+    } else {
+        theme.ui(Color::White)
     }
 }
 
@@ -188,7 +192,7 @@ pub fn icon_style_in(
     }
     match mode {
         IconHover::Accent => rest.fg(icon_hover_fg(theme)),
-        IconHover::Color => rest.fg(theme.ui(Color::White)),
+        IconHover::Color => rest.fg(text_hover_fg(theme)),
         IconHover::Pill => rest.bg(pill_bg(theme)),
     }
 }
@@ -289,7 +293,7 @@ mod tests {
             assert_eq!((s.fg, s.bg), (Some(acc), None));
             assert!(s.add_modifier.contains(Modifier::BOLD), "bold is kept");
             let s = icon_style_in(IconHover::Color, theme, rest, true);
-            assert_eq!((s.fg, s.bg), (Some(theme.ui(Color::White)), None));
+            assert_eq!((s.fg, s.bg), (Some(text_hover_fg(theme)), None));
             let s = icon_style_in(IconHover::Pill, theme, rest, true);
             assert_eq!((s.fg, s.bg), (Some(Color::Gray), Some(pill)));
         }
