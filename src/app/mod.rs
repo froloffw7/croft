@@ -69262,10 +69262,12 @@ impl App {
         self.editor.show_indent_guides = self.indent_guides_enabled;
         self.home_walks_rows = p.home_walks_wrapped_rows;
         self.editor.home_walks_rows = self.home_walks_rows;
-        crate::widgets::hover::set_modes(
-            crate::widgets::hover::HeadingHover::from_pref(&p.hover_heading),
-            crate::widgets::hover::IconHover::from_pref(&p.hover_icon),
-        );
+        crate::widgets::hover::set_settings(crate::widgets::hover::HoverSettings::from_prefs(
+            &p.hover_heading,
+            &p.hover_icon,
+            &p.hover_heading_color,
+            &p.hover_icon_color,
+        ));
         self.bracket_colors_enabled = !p.disable_bracket_colors;
         self.editor.show_bracket_colors = self.bracket_colors_enabled;
         self.whitespace_mode =

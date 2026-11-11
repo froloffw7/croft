@@ -37836,7 +37836,7 @@ mod tests {
     fn hovering_the_close_cross_paints_a_pill_on_that_cell() {
         use ratatui::buffer::Buffer;
         crate::widgets::hover::set_modes(
-            crate::widgets::hover::HeadingHover::Color,
+            crate::widgets::hover::HeadingHover::Soft,
             crate::widgets::hover::IconHover::Pill,
         );
         let mut t = EditorTabs::new();
@@ -37941,7 +37941,7 @@ mod tests {
     fn high_contrast_close_pill_glyph_contrasts_with_the_pill() {
         use ratatui::buffer::Buffer;
         crate::widgets::hover::set_modes(
-            crate::widgets::hover::HeadingHover::Color,
+            crate::widgets::hover::HeadingHover::Soft,
             crate::widgets::hover::IconHover::Pill,
         );
         for (id, want) in [
@@ -37976,18 +37976,23 @@ mod tests {
     }
 
     /// The close cross highlights like every other icon (`hover_icon`): the
-    /// theme's accent by default, white for `color`, no pill but in `pill`.
+    /// theme's accent by default, the chosen colour for `color`, no pill but
+    /// in `pill`.
     #[test]
     fn the_close_cross_hover_follows_the_icon_setting() {
-        use crate::widgets::hover::{HeadingHover, IconHover, set_modes, text_hover_fg};
+        use crate::widgets::hover::{HoverColor, HoverSettings, IconHover, set_settings};
         use ratatui::buffer::Buffer;
         let theme = crate::theme::Theme::default();
         for (mode, fg, pill) in [
             (IconHover::Accent, theme.accent(), false),
-            (IconHover::Color, text_hover_fg(theme), false),
+            (IconHover::Color, HoverColor::Ansi(1).resolve(theme), false),
             (IconHover::Pill, Color::White, true),
         ] {
-            set_modes(HeadingHover::Color, mode);
+            set_settings(HoverSettings {
+                icon: mode,
+                icon_color: Some(HoverColor::Ansi(1)),
+                ..HoverSettings::default()
+            });
             let mut t = EditorTabs::new();
             t.editors[0].path = Some(std::path::PathBuf::from("/foo.rs"));
             let area = Rect::new(0, 0, 80, 10);
@@ -38012,7 +38017,7 @@ mod tests {
     fn black_theme_close_pill_is_distinct_from_the_active_tab_bg() {
         use ratatui::buffer::Buffer;
         crate::widgets::hover::set_modes(
-            crate::widgets::hover::HeadingHover::Color,
+            crate::widgets::hover::HeadingHover::Soft,
             crate::widgets::hover::IconHover::Pill,
         );
         let mut t = EditorTabs::new();

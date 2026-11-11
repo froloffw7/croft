@@ -401,16 +401,26 @@ pub struct Prefs {
     #[serde(default)]
     pub home_walks_wrapped_rows: bool,
     /// How a hovered heading (a panel tab such as PROBLEMS) shows the pointer:
-    /// "color" (the default, also what an empty string means), "accent",
-    /// "bold" or "pill". Parsed by `HeadingHover::from_pref`.
+    /// "soft" (the default, also what an empty string means; a soft white),
+    /// "color" (`hover_heading_color`), "accent" or "pill". Parsed by
+    /// `HeadingHover::from_pref`.
     #[serde(default)]
     pub hover_heading: String,
+    /// The colour of a hovered heading in the "color" mode: an ANSI colour
+    /// name of the active theme (`red`, `bright_cyan`, ...) or `#rrggbb`. The
+    /// theme's accent when empty or unknown.
+    #[serde(default)]
+    pub hover_heading_color: String,
     /// How a hovered icon (header icons, the open-tabs button, the layout
     /// toggles, `+` / `-` / `⋯`) shows the pointer: "accent" (the default, also
-    /// what an empty string means), "color", "bold" or "pill". Parsed by
-    /// `IconHover::from_pref`.
+    /// what an empty string means), "color" (`hover_icon_color`) or "pill".
+    /// Parsed by `IconHover::from_pref`.
     #[serde(default)]
     pub hover_icon: String,
+    /// The colour of a hovered icon in the "color" mode, as
+    /// `hover_heading_color`.
+    #[serde(default)]
+    pub hover_icon_color: String,
     /// Gutter line numbers (#1576, VS Code's `editor.lineNumbers`): "on"
     /// (also what the empty string an older config deserializes to means),
     /// "relative", "interval" or "off". Parsed by `LineNumbers::from_pref`.

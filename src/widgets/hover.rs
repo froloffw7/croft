@@ -10,7 +10,7 @@
 //! `EditorTabs`) and asks these helpers what to paint.
 
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Color, Style};
 use std::cell::Cell;
 
 /// VS Code `list.hoverBackground`, fitted to each croft theme. Deliberately
@@ -61,14 +61,14 @@ pub fn hover_bg(theme: crate::theme::Theme) -> Color {
 /// shows the pointer: the `hover_heading` setting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum HeadingHover {
-    /// The text takes its hover colour (the default).
+    /// The text brightens to a soft white (the default).
     #[default]
+    Soft,
+    /// The text takes the colour of `hover_heading_color`.
     Color,
-    /// The theme's accent.
+    /// The text takes the theme's accent.
     Accent,
-    /// The hover colour, and bold.
-    Bold,
-    /// The hover colour on a pill of the toolbar hover background.
+    /// The soft white on a pill of the theme's accent.
     Pill,
 }
 
@@ -77,28 +77,25 @@ impl HeadingHover {
     /// string) is the default.
     pub fn from_pref(s: &str) -> Self {
         match s.trim().to_ascii_lowercase().as_str() {
+            "color" => Self::Color,
             "accent" => Self::Accent,
-            "bold" => Self::Bold,
             "pill" => Self::Pill,
-            _ => Self::Color,
+            _ => Self::Soft,
         }
     }
 }
 
 /// How a hovered *icon* (header pill glyphs, the open-tabs list button, the
-/// layout toggles, `+` / `-` / `⋯`) shows the pointer: the `hover_icon`
-/// setting.
+/// tab close cross, the layout toggles, `+` / `-` / `⋯`) shows the pointer:
+/// the `hover_icon` setting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum IconHover {
     /// The glyph takes the theme's accent (the default).
     #[default]
     Accent,
-    /// The glyph brightens to white, in no hue of its own.
+    /// The glyph takes the colour of `hover_icon_color`.
     Color,
-    /// The glyph keeps its colour and turns bold.
-    Bold,
-    /// The glyph keeps its colour and gets a pill of the toolbar hover
-    /// background.
+    /// The glyph keeps its colour and gets a pill of the theme's accent.
     Pill,
 }
 
@@ -107,35 +104,126 @@ impl IconHover {
     pub fn from_pref(s: &str) -> Self {
         match s.trim().to_ascii_lowercase().as_str() {
             "color" => Self::Color,
-            "bold" => Self::Bold,
             "pill" => Self::Pill,
             _ => Self::Accent,
         }
     }
 }
 
+/// A colour the user picks for the `color` hover modes: one of the active
+/// theme's 16 terminal colours by name, or a fixed `#rrggbb`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HoverColor {
+    /// An index into [`crate::theme::Theme::ansi`].
+    Ansi(usize),
+    Rgb(u8, u8, u8),
+}
+
+/// The names `hover_heading_color` / `hover_icon_color` take, in ANSI order.
+pub const ANSI_NAMES: [&str; 16] = [
+    "black",
+    "red",
+    "green",
+    "yellow",
+    "blue",
+    "magenta",
+    "cyan",
+    "white",
+    "bright_black",
+    "bright_red",
+    "bright_green",
+    "bright_yellow",
+    "bright_blue",
+    "bright_magenta",
+    "bright_cyan",
+    "bright_white",
+];
+
+impl HoverColor {
+    /// Parse the setting: an ANSI name (`bright_cyan`; `gray` is
+    /// `bright_black`) or `#rrggbb`. Anything else, an empty string included,
+    /// is none, and the mode falls back to the accent.
+    pub fn parse(s: &str) -> Option<Self> {
+        let t = s.trim().to_ascii_lowercase().replace(['-', ' '], "_");
+        if let Some(hex) = t.strip_prefix('#')
+            && hex.len() == 6
+            && let Ok(v) = u32::from_str_radix(hex, 16)
+        {
+            return Some(Self::Rgb((v >> 16) as u8, (v >> 8) as u8, v as u8));
+        }
+        if t == "gray" || t == "grey" {
+            return Some(Self::Ansi(8));
+        }
+        ANSI_NAMES.iter().position(|n| *n == t).map(Self::Ansi)
+    }
+
+    /// The colour under `theme`, whose own palette the names index.
+    pub fn resolve(self, theme: crate::theme::Theme) -> Color {
+        match self {
+            Self::Ansi(i) => {
+                let (r, g, b) = theme.ansi()[i.min(15)];
+                Color::Rgb(r, g, b)
+            }
+            Self::Rgb(r, g, b) => Color::Rgb(r, g, b),
+        }
+    }
+}
+
+/// The hover settings as the draw code reads them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct HoverSettings {
+    pub heading: HeadingHover,
+    pub icon: IconHover,
+    pub heading_color: Option<HoverColor>,
+    pub icon_color: Option<HoverColor>,
+}
+
+impl HoverSettings {
+    /// From the four string settings.
+    pub fn from_prefs(heading: &str, icon: &str, heading_color: &str, icon_color: &str) -> Self {
+        Self {
+            heading: HeadingHover::from_pref(heading),
+            icon: IconHover::from_pref(icon),
+            heading_color: HoverColor::parse(heading_color),
+            icon_color: HoverColor::parse(icon_color),
+        }
+    }
+}
+
 thread_local! {
-    static MODES: Cell<(HeadingHover, IconHover)> =
-        const { Cell::new((HeadingHover::Color, IconHover::Accent)) };
+    static SETTINGS: Cell<HoverSettings> = const {
+        Cell::new(HoverSettings {
+            heading: HeadingHover::Soft,
+            icon: IconHover::Accent,
+            heading_color: None,
+            icon_color: None,
+        })
+    };
 }
 
-/// Apply the `hover_heading` and `hover_icon` settings. Held per thread (the
-/// UI's), like the Tab Size, so the hundreds of draw sites need no extra
-/// argument and a test that picks a mode cannot disturb another.
+/// Apply the hover settings. Held per thread (the UI's), like the Tab Size, so
+/// the hundreds of draw sites need no extra argument and a test that picks a
+/// mode cannot disturb another.
+pub fn set_settings(s: HoverSettings) {
+    SETTINGS.with(|c| c.set(s));
+}
+
+/// Pick the two modes, leaving both colours unset (the accent).
+#[cfg(test)]
 pub fn set_modes(heading: HeadingHover, icon: IconHover) {
-    MODES.with(|m| m.set((heading, icon)));
+    set_settings(HoverSettings {
+        heading,
+        icon,
+        ..HoverSettings::default()
+    });
 }
 
-fn heading_mode() -> HeadingHover {
-    MODES.with(|m| m.get().0)
+fn settings() -> HoverSettings {
+    SETTINGS.with(Cell::get)
 }
 
-fn icon_mode() -> IconHover {
-    MODES.with(|m| m.get().1)
-}
-
-/// The text colour a hovered heading takes and the `color` icon hover shares:
-/// white, softer than any accent (the Black theme's own panel-title tone there).
+/// The soft white a hovered heading takes by default (the Black theme's own
+/// panel-title tone there), softer than any accent.
 pub fn text_hover_fg(theme: crate::theme::Theme) -> Color {
     if theme.gradient() {
         crate::gradient::rgb_color(crate::gradient::PANEL_TITLE_FG)
@@ -156,6 +244,11 @@ pub fn pill_bg(theme: crate::theme::Theme) -> Color {
     theme.accent()
 }
 
+/// The user's colour for a `color` mode, the accent when none is set.
+fn custom_fg(theme: crate::theme::Theme, custom: Option<HoverColor>) -> Color {
+    custom.map_or_else(|| icon_hover_fg(theme), |c| c.resolve(theme))
+}
+
 /// `fg` as it is drawn on the hover pill. A high contrast theme (#1548) takes
 /// whichever of black or white reads better on its pill (black on High
 /// Contrast's orange); the other themes keep their own ink.
@@ -174,9 +267,10 @@ fn ink_on_pill(theme: crate::theme::Theme, fg: Color, pill: Color) -> Color {
 }
 
 /// `rest` for a heading as drawn while hovered per `mode`; `hover_fg` is the
-/// heading's brighter text colour.
+/// heading's soft hover colour and `custom` the user's `color`.
 pub fn heading_style_in(
     mode: HeadingHover,
+    custom: Option<HoverColor>,
     theme: crate::theme::Theme,
     rest: Style,
     hover_fg: Color,
@@ -185,31 +279,33 @@ pub fn heading_style_in(
     if !hovered {
         return rest;
     }
-    let lit = rest.fg(hover_fg);
     match mode {
-        HeadingHover::Color => lit,
+        HeadingHover::Soft => rest.fg(hover_fg),
+        HeadingHover::Color => rest.fg(custom_fg(theme, custom)),
         HeadingHover::Accent => rest.fg(icon_hover_fg(theme)),
-        HeadingHover::Bold => lit.add_modifier(Modifier::BOLD),
         HeadingHover::Pill => {
             let pill = pill_bg(theme);
-            lit.fg(ink_on_pill(theme, hover_fg, pill)).bg(pill)
+            rest.fg(ink_on_pill(theme, hover_fg, pill)).bg(pill)
         }
     }
 }
 
-/// [`heading_style_in`] under the `hover_heading` setting.
+/// [`heading_style_in`] under the hover settings.
 pub fn heading_style(
     theme: crate::theme::Theme,
     rest: Style,
     hover_fg: Color,
     hovered: bool,
 ) -> Style {
-    heading_style_in(heading_mode(), theme, rest, hover_fg, hovered)
+    let s = settings();
+    heading_style_in(s.heading, s.heading_color, theme, rest, hover_fg, hovered)
 }
 
-/// `rest` for an icon as drawn while hovered per `mode`.
+/// `rest` for an icon as drawn while hovered per `mode`; `custom` is the
+/// user's `color`.
 pub fn icon_style_in(
     mode: IconHover,
+    custom: Option<HoverColor>,
     theme: crate::theme::Theme,
     rest: Style,
     hovered: bool,
@@ -219,8 +315,7 @@ pub fn icon_style_in(
     }
     match mode {
         IconHover::Accent => rest.fg(icon_hover_fg(theme)),
-        IconHover::Color => rest.fg(text_hover_fg(theme)),
-        IconHover::Bold => rest.add_modifier(Modifier::BOLD),
+        IconHover::Color => rest.fg(custom_fg(theme, custom)),
         IconHover::Pill => {
             let pill = pill_bg(theme);
             let fg = rest
@@ -259,17 +354,19 @@ pub fn icon_backdrop(
     theme: crate::theme::Theme,
     hovered: bool,
 ) {
-    icon_backdrop_in(icon_mode(), buf, area, theme, hovered);
+    icon_backdrop_in(settings().icon, buf, area, theme, hovered);
 }
 
 /// [`icon_style_in`] under the `hover_icon` setting.
 pub fn icon_style(theme: crate::theme::Theme, rest: Style, hovered: bool) -> Style {
-    icon_style_in(icon_mode(), theme, rest, hovered)
+    let s = settings();
+    icon_style_in(s.icon, s.icon_color, theme, rest, hovered)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::style::Modifier;
 
     fn rect(x: u16, y: u16, w: u16, h: u16) -> Rect {
         Rect {
@@ -323,17 +420,20 @@ mod tests {
             let acc = theme.accent();
             let pill = pill_bg(theme);
             assert_eq!(pill, acc, "the pill is the accent too");
-            assert_eq!(icon_style_in(IconHover::Accent, theme, rest, false), rest);
-            let s = icon_style_in(IconHover::Accent, theme, rest, true);
+            assert_eq!(
+                icon_style_in(IconHover::Accent, None, theme, rest, false),
+                rest
+            );
+            let s = icon_style_in(IconHover::Accent, None, theme, rest, true);
             assert_eq!((s.fg, s.bg), (Some(acc), None));
             assert!(s.add_modifier.contains(Modifier::BOLD), "bold is kept");
-            let s = icon_style_in(IconHover::Color, theme, rest, true);
-            assert_eq!((s.fg, s.bg), (Some(text_hover_fg(theme)), None));
-            let plain = Style::default().fg(Color::Gray);
-            let s = icon_style_in(IconHover::Bold, theme, plain, true);
-            assert_eq!((s.fg, s.bg), (Some(Color::Gray), None));
-            assert!(s.add_modifier.contains(Modifier::BOLD), "bold on hover");
-            let s = icon_style_in(IconHover::Pill, theme, rest, true);
+            // `color` without a colour falls back to the accent.
+            let s = icon_style_in(IconHover::Color, None, theme, rest, true);
+            assert_eq!((s.fg, s.bg), (Some(acc), None));
+            let red = HoverColor::parse("red");
+            let s = icon_style_in(IconHover::Color, red, theme, rest, true);
+            assert_eq!(s.fg, Some(red.unwrap().resolve(theme)));
+            let s = icon_style_in(IconHover::Pill, None, theme, rest, true);
             assert_eq!((s.fg, s.bg), (Some(Color::Gray), Some(pill)));
         }
         assert_ne!(
@@ -359,7 +459,6 @@ mod tests {
         let mut buf = ratatui::buffer::Buffer::empty(area);
         icon_backdrop_in(IconHover::Accent, &mut buf, target, theme, true);
         icon_backdrop_in(IconHover::Color, &mut buf, target, theme, true);
-        icon_backdrop_in(IconHover::Bold, &mut buf, target, theme, true);
         icon_backdrop_in(IconHover::Pill, &mut buf, target, theme, false);
         assert_ne!(
             bg(&buf, 0),
@@ -377,37 +476,69 @@ mod tests {
     }
 
     #[test]
-    fn a_hovered_heading_takes_its_text_hover_colour_bold_or_a_pill() {
+    fn a_hovered_heading_takes_soft_white_a_colour_the_accent_or_a_pill() {
         use crate::theme::Theme;
         let theme = Theme::DARK_BLUE;
         let rest = Style::default().fg(Color::DarkGray);
         let up = Color::White;
+        let cyan = HoverColor::parse("bright_cyan");
         assert_eq!(
-            heading_style_in(HeadingHover::Bold, theme, rest, up, false),
+            heading_style_in(HeadingHover::Soft, None, theme, rest, up, false),
             rest
         );
-        let s = heading_style_in(HeadingHover::Color, theme, rest, up, true);
-        assert_eq!((s.fg, s.bg), (Some(up), None));
-        assert!(!s.add_modifier.contains(Modifier::BOLD));
-        let s = heading_style_in(HeadingHover::Bold, theme, rest, up, true);
-        assert!(s.add_modifier.contains(Modifier::BOLD));
-        let s = heading_style_in(HeadingHover::Pill, theme, rest, up, true);
+        let s = heading_style_in(HeadingHover::Soft, cyan, theme, rest, up, true);
+        assert_eq!((s.fg, s.bg), (Some(up), None), "soft ignores the colour");
+        let s = heading_style_in(HeadingHover::Color, cyan, theme, rest, up, true);
+        assert_eq!((s.fg, s.bg), (Some(cyan.unwrap().resolve(theme)), None));
+        let s = heading_style_in(HeadingHover::Color, None, theme, rest, up, true);
+        assert_eq!(s.fg, Some(theme.accent()), "unset falls back to accent");
+        let s = heading_style_in(HeadingHover::Pill, None, theme, rest, up, true);
         assert_eq!((s.fg, s.bg), (Some(up), Some(theme.accent())));
-        let s = heading_style_in(HeadingHover::Accent, theme, rest, up, true);
+        let s = heading_style_in(HeadingHover::Accent, None, theme, rest, up, true);
         assert_eq!((s.fg, s.bg), (Some(theme.accent()), None));
     }
 
     #[test]
     fn the_hover_settings_parse_and_fall_back_to_the_default() {
-        assert_eq!(HeadingHover::from_pref(""), HeadingHover::Color);
-        assert_eq!(HeadingHover::from_pref("Bold"), HeadingHover::Bold);
+        assert_eq!(HeadingHover::from_pref(""), HeadingHover::Soft);
+        assert_eq!(HeadingHover::from_pref("Color"), HeadingHover::Color);
         assert_eq!(HeadingHover::from_pref("pill"), HeadingHover::Pill);
         assert_eq!(HeadingHover::from_pref("accent"), HeadingHover::Accent);
-        assert_eq!(HeadingHover::from_pref("nonsense"), HeadingHover::Color);
+        assert_eq!(HeadingHover::from_pref("bold"), HeadingHover::Soft);
         assert_eq!(IconHover::from_pref(""), IconHover::Accent);
         assert_eq!(IconHover::from_pref("color"), IconHover::Color);
-        assert_eq!(IconHover::from_pref("bold"), IconHover::Bold);
-        assert_eq!(IconHover::from_pref("accent_pill"), IconHover::Accent);
         assert_eq!(IconHover::from_pref("pill"), IconHover::Pill);
+        assert_eq!(IconHover::from_pref("bold"), IconHover::Accent);
+    }
+
+    #[test]
+    fn a_hover_colour_is_an_ansi_name_of_the_theme_or_a_hex_value() {
+        use crate::theme::Theme;
+        assert_eq!(HoverColor::parse("red"), Some(HoverColor::Ansi(1)));
+        assert_eq!(
+            HoverColor::parse(" Bright-Cyan "),
+            Some(HoverColor::Ansi(14))
+        );
+        assert_eq!(HoverColor::parse("gray"), Some(HoverColor::Ansi(8)));
+        assert_eq!(
+            HoverColor::parse("#ff8000"),
+            Some(HoverColor::Rgb(255, 128, 0))
+        );
+        for bad in ["", "#fff", "#gggggg", "teal"] {
+            assert_eq!(HoverColor::parse(bad), None, "{bad:?}");
+        }
+        for (i, n) in ANSI_NAMES.iter().enumerate() {
+            assert_eq!(HoverColor::parse(n), Some(HoverColor::Ansi(i)));
+        }
+        let (r, g, b) = Theme::BLACK.ansi()[2];
+        assert_eq!(
+            HoverColor::Ansi(2).resolve(Theme::BLACK),
+            Color::Rgb(r, g, b)
+        );
+        let s = HoverSettings::from_prefs("pill", "color", "red", "#102030");
+        assert_eq!(s.heading, HeadingHover::Pill);
+        assert_eq!(s.icon, IconHover::Color);
+        assert_eq!(s.heading_color, Some(HoverColor::Ansi(1)));
+        assert_eq!(s.icon_color, Some(HoverColor::Rgb(0x10, 0x20, 0x30)));
     }
 }
