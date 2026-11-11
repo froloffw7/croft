@@ -54,8 +54,19 @@ pub fn choices(key: &str) -> Option<Vec<String>> {
         "build_column_unit" => &["display", "byte", "char"],
         "diff_ignore_whitespace" => &["off", "leading", "all"],
         "render_whitespace" => &["selection", "all", "none"],
-        "hover_icon" => &["accent", "color", "bold", "pill"],
-        "hover_heading" => &["color", "accent", "bold", "pill"],
+        "hover_icon" => &["accent", "color", "pill"],
+        "hover_heading" => &["soft", "color", "accent", "pill"],
+        "hover_icon_color" | "hover_heading_color" => {
+            return Some(
+                std::iter::once(String::new())
+                    .chain(
+                        crate::widgets::hover::ANSI_NAMES
+                            .iter()
+                            .map(|n| n.to_string()),
+                    )
+                    .collect(),
+            );
+        }
         "line_numbers" => &["on", "relative", "interval", "off"],
         "word_based_suggestions" => &[
             "matchingDocuments",
@@ -487,14 +498,19 @@ mod tests {
 
     #[test]
     fn the_hover_settings_are_choices_the_editor_steps_with_enter() {
-        assert_eq!(
-            choices("hover_icon").unwrap(),
-            ["accent", "color", "bold", "pill"]
-        );
+        assert_eq!(choices("hover_icon").unwrap(), ["accent", "color", "pill"]);
         assert_eq!(
             choices("hover_heading").unwrap(),
-            ["color", "accent", "bold", "pill"]
+            ["soft", "color", "accent", "pill"]
         );
+        // The colours: the default (empty), then the 16 names, all parsed.
+        let colours = choices("hover_icon_color").unwrap();
+        assert_eq!(colours.len(), 17);
+        assert_eq!(colours[0], "");
+        for c in &colours[1..] {
+            assert!(crate::widgets::hover::HoverColor::parse(c).is_some(), "{c}");
+        }
+        assert_eq!(choices("hover_heading_color").unwrap(), colours);
         // Each choice is what the setting parses, so none is ignored.
         for c in choices("hover_icon").unwrap() {
             let mode = crate::widgets::hover::IconHover::from_pref(&c);
