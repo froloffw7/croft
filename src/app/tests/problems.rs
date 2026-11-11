@@ -467,6 +467,56 @@ fn clicking_a_problem_row_opens_that_file_at_the_line() {
     assert_eq!(app.editor.cursor_row, 2, "and jumps to the diagnostic line");
 }
 
+/// #1523: the places a server points at to explain a diagnostic are rows
+/// under it, the file named relative to the workspace, and a click on one
+/// opens that place with its UTF-16 column converted (the emoji is two
+/// units, one character).
+#[test]
+fn clicking_a_related_location_row_opens_that_place() {
+    let tmp = tempfile::tempdir().unwrap();
+    let main = tmp.path().join("src/main.rs");
+    let lib = tmp.path().join("src/lib.rs");
+    std::fs::create_dir_all(tmp.path().join("src")).unwrap();
+    std::fs::write(&main, "fn main() {}\n").unwrap();
+    std::fs::write(&lib, "fn a() {}\nlet s = \"😀\"; let first = &v[0];\n").unwrap();
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    let wire = lsp_types::Diagnostic {
+        message: "cannot borrow `v` as mutable".into(),
+        related_information: Some(vec![lsp_types::DiagnosticRelatedInformation {
+            location: lsp_types::Location {
+                uri: lsp_types::Url::from_file_path(&lib).unwrap(),
+                range: lsp_types::Range::new(
+                    lsp_types::Position::new(1, 27),
+                    lsp_types::Position::new(1, 28),
+                ),
+            },
+            message: "immutable borrow occurs here".into(),
+        }]),
+        ..Default::default()
+    };
+    let d = crate::lsp::client::convert_diagnostic("rust-analyzer", &wire);
+    let by_server = std::collections::HashMap::from([(String::from("rust-analyzer"), vec![d])]);
+    app.lsp_diagnostics.insert(main, by_server);
+    app.rebuild_problems();
+    assert_eq!(
+        app.problems.groups()[0].items[0].related[0].rel_path,
+        "src/lib.rs"
+    );
+    app.bottom_panel_tab = BottomPanelTab::Problems;
+    let backend = ratatui::backend::TestBackend::new(140, 50);
+    let mut term = ratatui::Terminal::new(backend).unwrap();
+    term.draw(|f| app.render(f)).unwrap();
+    // Row 0 is the toolbar, 1 the file, 2 the diagnostic, 3 its related row.
+    let list = app.problems.last_area;
+    left_click(&mut app, list.x + 10, list.y + 3);
+    assert_eq!(app.editor.path.as_deref(), Some(lib.as_path()));
+    assert_eq!(
+        (app.editor.cursor_row, app.editor.cursor_col),
+        (1, 26),
+        "on the `v` the borrow takes"
+    );
+}
+
 /// #1522: unused names and unreachable code come as hints; like VS Code,
 /// the PROBLEMS list and its count leave them out, while the editor (its
 /// hover and quick fixes) still has them.
@@ -1186,6 +1236,7 @@ fn problem(
         message: message.into(),
         source: "ruff".into(),
         code: None,
+        related: Vec::new(),
     }
 }
 
@@ -1343,6 +1394,7 @@ fn seed_build_rows(app: &mut App, rows: &[(&std::path::Path, u32, u32, &str)]) {
                     message: (*msg).to_string(),
                     source: String::from("build"),
                     code: None,
+                    related: Vec::new(),
                 },
             ));
     }
@@ -1418,4 +1470,146 @@ fn go_to_next_problem_between_entries_and_with_none() {
         app.editor.cursor_row, 3,
         "before the first wraps to the last"
     );
+}
+
+/// An entry past its line's end leaves the caret clamped short of it, and
+/// entries can share a position: repeating Next Problem still walks every
+/// entry instead of picking the same one again.
+#[test]
+fn go_to_next_problem_walks_past_an_entry_beyond_its_line_and_shared_positions() {
+    use crate::widgets::command_palette::Command;
+    let tmp = tempfile::tempdir().unwrap();
+    let a = tmp.path().join("a.c");
+    std::fs::write(&a, "int a;\nint b;\nint c;\n").unwrap();
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    seed_build_rows(
+        &mut app,
+        &[
+            (&a, 0, 50, "past the end"),
+            (&a, 2, 1, "first here"),
+            (&a, 2, 1, "second here"),
+        ],
+    );
+    let next = Command::from_id("next_problem").unwrap();
+    app.run_command(next);
+    assert!(app.status.contains("past the end"), "{}", app.status);
+    assert_eq!(app.editor.cursor_row, 0);
+    app.run_command(next);
+    assert!(app.status.contains("first here"), "{}", app.status);
+    app.run_command(next);
+    assert!(app.status.contains("second here"), "{}", app.status);
+    app.run_command(next);
+    assert!(app.status.contains("past the end"), "wraps: {}", app.status);
+}
+
+/// Repeated Next Problem visits every entry once per round, whichever file
+/// is open: an LSP row's UTF-16 column and a build row's character column
+/// order differently on a line with astral characters, and the walk's order
+/// must not change when that file opens, or a step from the remembered
+/// entry passes over the rows that moved.
+#[test]
+fn go_to_next_problem_visits_every_entry_once_around_mixed_columns() {
+    use crate::lsp::manager::DiagnosticSeverity;
+    use crate::widgets::command_palette::Command;
+    let tmp = tempfile::tempdir().unwrap();
+    let a = tmp.path().join("a.c");
+    let b = tmp.path().join("b.c");
+    std::fs::write(&a, "\u{1f600}\u{1f600}abc\n").unwrap();
+    std::fs::write(&b, "int b;\n").unwrap();
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    let row = |col: u32, col_utf16: bool, msg: &str| {
+        (
+            1,
+            crate::widgets::problems::ProblemItem {
+                line: 0,
+                col,
+                col_utf16,
+                severity: DiagnosticSeverity::Warning,
+                message: msg.to_string(),
+                source: String::from("build"),
+                code: None,
+                related: Vec::new(),
+            },
+        )
+    };
+    // In a.c, `b` is character 3 and UTF-16 column 4 is character 2.
+    app.build_diagnostics
+        .entry(a.clone())
+        .or_default()
+        .extend([row(3, false, "at b"), row(4, true, "at a")]);
+    app.build_diagnostics
+        .entry(b.clone())
+        .or_default()
+        .push(row(0, false, "in b.c"));
+    app.rebuild_problems();
+    let next = Command::from_id("next_problem").unwrap();
+    let mut seen = Vec::new();
+    for _ in 0..3 {
+        app.run_command(next);
+        seen.push(app.status.clone());
+    }
+    for msg in ["at a", "at b", "in b.c"] {
+        assert_eq!(
+            seen.iter().filter(|s| s.contains(msg)).count(),
+            1,
+            "{msg} once in a round: {seen:?}"
+        );
+    }
+}
+
+/// An entry whose file no longer opens is passed over instead of holding
+/// every repeat of Next Problem on itself; when no entry opens, the failure
+/// is reported.
+#[test]
+fn go_to_next_problem_passes_over_an_entry_whose_file_is_gone() {
+    use crate::widgets::command_palette::Command;
+    let tmp = tempfile::tempdir().unwrap();
+    let gone = tmp.path().join("a_gone.c");
+    let b = tmp.path().join("b.c");
+    std::fs::write(&b, "int b;\n").unwrap();
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    seed_build_rows(&mut app, &[(&gone, 0, 1, "lost"), (&b, 0, 4, "found")]);
+    let next = Command::from_id("next_problem").unwrap();
+    app.run_command(next);
+    assert_eq!(
+        app.editor.path.as_deref(),
+        Some(b.as_path()),
+        "{}",
+        app.status
+    );
+    assert!(app.status.contains("found"), "{}", app.status);
+    std::fs::remove_file(&b).unwrap();
+    let mut alone = App::new(tmp.path().to_path_buf()).unwrap();
+    seed_build_rows(&mut alone, &[(&gone, 0, 1, "lost")]);
+    alone.run_command(next);
+    assert!(alone.status.starts_with("Open failed"), "{}", alone.status);
+}
+
+/// A watch task's batch is installed without a finished command's scan, and
+/// still gets the `build_column_unit` conversion: a gcc display column on a
+/// tabbed line lands on the character it names.
+#[test]
+fn a_watch_batch_gets_the_build_column_conversion() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("t.c"), "{\n\t\t\tint u;\n}\n").unwrap();
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    let row = crate::build_matchers::BuildDiag {
+        file: String::from("t.c"),
+        line: 1,
+        // Three tabs at stop 8 put `u` on display column 28.
+        col: 28,
+        severity: crate::lsp::manager::DiagnosticSeverity::Warning,
+        message: String::from("unused"),
+        source: String::from("build"),
+        needs_file: false,
+    };
+    app.install_build_diags(
+        7,
+        Some(tmp.path()),
+        vec![row],
+        crate::build_matchers::DEFAULT_TABSTOP,
+    );
+    let rows = &app.build_diagnostics[&tmp.path().join("t.c")];
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].1.col, 7, "display column 28 is the `u`, char 7");
 }

@@ -344,6 +344,17 @@ struct PendingSelectionRanges {
     positions: Vec<(u32, u32)>,
 }
 
+/// Where a row of Bookmarks: View Bookmarks points: the tab holding the
+/// mark (its editor group by depth-first index, then its index in that
+/// group), the file it shows and the 1-based line.
+#[derive(Clone, Debug)]
+struct BookmarkTarget {
+    group: usize,
+    tab: usize,
+    path: PathBuf,
+    line: usize,
+}
+
 /// Pre-Zen visibility snapshot, restored verbatim when Zen Mode is toggled
 /// off so the workspace returns to exactly the chrome it had before.
 #[derive(Clone, Copy, Debug)]
@@ -975,94 +986,224 @@ struct WelcomeBakeKey {
 /// Single source of truth for the application's user-facing name.
 pub const APP_NAME: &str = "cr<>ft";
 
-/// Agnoster-style status colours: clean working tree is green, any dirtiness
-/// (modified, staged, or untracked) flips the pill to yellow/orange.
-const GIT_CLEAN_COLOR: Color = Color::Rgb(0xa3, 0xbe, 0x8c);
+/// The amber a status-bar item takes when it wants attention: the
+/// uncommitted-changes dot beside the branch, and the operation git stopped
+/// in (`main | MERGING`).
 const GIT_DIRTY_COLOR: Color = Color::Rgb(0xeb, 0xcb, 0x8b);
 
-/// Build the status-bar spans for the git pill: branch glyph, branch name,
-/// optional ahead/behind counts.  Colour alone carries clean/dirty state, in
-/// the spirit of the Agnoster zsh theme.  Returns an empty vec outside a git
-/// repo so the bar shows nothing.
-fn git_status_spans<'a>(status: &'a crate::git::GitStatus) -> Vec<Span<'a>> {
+/// The dot after the branch name while the working tree has uncommitted
+/// changes (VS Code's `main*`): the branch itself keeps its quiet colour, so
+/// a dirty tree reads as one small mark rather than a recoloured segment.
+const GIT_DIRTY_DOT: &str = "\u{2022}";
+
+/// Powerline half circles, the rounded ends of a status-bar pill (as on the
+/// update pill, the PROBLEMS badge and the Extensions switches).
+const PILL_CAP_L: &str = "\u{e0b6}";
+const PILL_CAP_R: &str = "\u{e0b4}";
+
+/// The terminal cells `s` paints in, as ratatui lays it out. A wide
+/// character (`项`, an emoji) takes two, so a click target measured in
+/// `char`s would sit left of the text it belongs to.
+fn status_cells(s: &str) -> u16 {
+    unicode_width::UnicodeWidthStr::width(s) as u16
+}
+
+/// Cells left blank after the status bar's last right-hand segment: none,
+/// since the language pill's rounded end already reads as an edge.
+const STATUS_RIGHT_MARGIN: u16 = 0;
+
+/// The status bar's three text tones, so hierarchy comes from brightness
+/// rather than from dividers or a colour per item: `text` for the values you
+/// read (branch, line and column, language), `muted` for settings and
+/// commentary, and `dim` for labels and for counts that are zero.
+#[derive(Clone, Copy)]
+struct StatusTones {
+    text: Color,
+    muted: Color,
+    dim: Color,
+}
+
+impl StatusTones {
+    fn new(theme: crate::theme::Theme, bar: Color) -> Self {
+        // The theme's own foreground is already chosen for its background,
+        // light or dark; `theme.ui` would adapt it a second time (on a light
+        // theme, flipping dark text to near-white).
+        let (r, g, b) = theme.syntax().fg;
+        let text = Color::Rgb(r, g, b);
+        let muted = match theme.surfaces() {
+            Some(s) => s.muted(),
+            None => theme.ui(Color::Rgb(0x9a, 0xa4, 0xb8)),
+        };
+        // A high contrast theme resolves chrome greys to full strength on
+        // purpose (#1548); blending toward the bar would undo that.
+        let dim = if theme.high_contrast() {
+            muted
+        } else {
+            mix_color(muted, bar, 0.6)
+        };
+        StatusTones { text, muted, dim }
+    }
+}
+
+/// `a` blended toward `b` by `t` (0.0 keeps `a`); a non-RGB colour is kept.
+fn mix_color(a: Color, b: Color, t: f32) -> Color {
+    match (a, b) {
+        (Color::Rgb(ar, ag, ab), Color::Rgb(br, bg, bb)) => {
+            let m = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
+            Color::Rgb(m(ar, br), m(ag, bg), m(ab, bb))
+        }
+        _ => a,
+    }
+}
+
+/// The status bar's background: Croft Loch's chrome surface, a near-black
+/// seam on the gradient (OLED) themes, the navy band elsewhere.
+fn status_bar_bg(theme: crate::theme::Theme) -> Color {
+    if let Some(s) = theme.surfaces() {
+        s.chrome()
+    } else if theme.gradient() {
+        theme.ui(Color::Rgb(0x18, 0x18, 0x18))
+    } else {
+        theme.ui(Color::Rgb(0x1e, 0x3a, 0x6e))
+    }
+}
+
+/// Build the status-bar spans for the git segment: the branch glyph in the
+/// theme accent, the branch name in the bar's text tone, an amber dot while
+/// the tree is dirty, and quiet ahead/behind counts. Returns an empty vec
+/// outside a git repo so the bar shows nothing.
+fn git_status_spans<'a>(
+    status: &'a crate::git::GitStatus,
+    theme: crate::theme::Theme,
+) -> Vec<Span<'a>> {
     if !status.in_repo {
         return Vec::new();
     }
-    let pill_color = if status.dirty {
-        GIT_DIRTY_COLOR
-    } else {
-        GIT_CLEAN_COLOR
-    };
-    let mut spans: Vec<Span> = Vec::with_capacity(6);
+    let tones = StatusTones::new(theme, status_bar_bg(theme));
+    let mut spans: Vec<Span> = Vec::with_capacity(7);
     spans.push(Span::raw("  "));
     // Codicon `cod-source-control` (U+EA68): the Y-fork that matches the
     // activity-bar Source Control icon, so the status-bar branch indicator
     // and the SCM panel share the same visual mark.
-    spans.push(Span::styled("\u{ea68} ", Style::default().fg(pill_color)));
-    let label = status.head_label();
     spans.push(Span::styled(
-        label,
-        Style::default().fg(pill_color).add_modifier(Modifier::BOLD),
+        "\u{ea68} ",
+        Style::default().fg(theme.accent()),
     ));
-    // The operation git stopped in (#1356), as `main | MERGING`.
+    spans.push(Span::styled(
+        status.head_label(),
+        Style::default().fg(tones.text),
+    ));
+    // The operation git stopped in (#1356), as `main | MERGING`, read as one
+    // phrase: the dirty dot comes after it.
     if let Some(op) = status.operation {
         spans.push(Span::styled(
             format!(" | {}", op.label()),
             Style::default()
-                .fg(GIT_DIRTY_COLOR)
+                .fg(theme.ui(GIT_DIRTY_COLOR))
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    if status.dirty {
+        spans.push(Span::styled(
+            format!(" {GIT_DIRTY_DOT}"),
+            Style::default()
+                .fg(theme.ui(GIT_DIRTY_COLOR))
                 .add_modifier(Modifier::BOLD),
         ));
     }
     if status.ahead > 0 {
         spans.push(Span::styled(
             format!(" \u{2191}{}", status.ahead),
-            Style::default().fg(GIT_CLEAN_COLOR),
+            Style::default().fg(tones.muted),
         ));
     }
     if status.behind > 0 {
         spans.push(Span::styled(
             format!(" \u{2193}{}", status.behind),
-            Style::default().fg(GIT_DIRTY_COLOR),
+            Style::default().fg(tones.muted),
         ));
     }
     spans
 }
 
-/// Spans for the "cr<>ft" wordmark at the left of the status bar, styled to
-/// mirror the app logo: white letters with the `<>` (the stylised "o") in the
-/// brand orange, sitting on the bar's own background rather than a pill.
-fn brand_spans(theme: crate::theme::Theme) -> Vec<Span<'static>> {
-    let letter = Style::default()
-        .fg(theme.ui(Color::White))
-        .add_modifier(Modifier::BOLD);
+/// The longest workspace name the status bar's cap shows before it elides.
+const WORKSPACE_CAP_MAX: usize = 24;
+
+/// Spans for the cap at the left edge of the status bar: the logo's `<>` in
+/// the brand orange and the workspace folder's name, on the theme's
+/// selection tint with a rounded right end. It anchors the bar the way VS
+/// Code's remote indicator does, and says which workspace this window is.
+fn workspace_cap_spans(theme: crate::theme::Theme, name: &str) -> Vec<Span<'static>> {
+    let fill = theme.selection();
+    let tones = StatusTones::new(theme, status_bar_bg(theme));
+    // Measured in terminal cells, not chars: a wide name (`项目`) paints
+    // twice its char count, and every offset after the cap counts cells.
+    let name: String = if status_cells(name) as usize > WORKSPACE_CAP_MAX {
+        use unicode_width::UnicodeWidthChar;
+        let mut s = String::new();
+        let mut used = 0;
+        for c in name.chars() {
+            let w = c.width().unwrap_or(0);
+            if used + w > WORKSPACE_CAP_MAX - 1 {
+                break;
+            }
+            used += w;
+            s.push(c);
+        }
+        s.push('\u{2026}');
+        s
+    } else {
+        name.to_string()
+    };
     vec![
-        Span::styled(" cr", letter),
+        Span::styled(" ", Style::default().bg(fill)),
         Span::styled(
             "<>",
             Style::default()
                 .fg(BRAND_ORANGE)
+                .bg(fill)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled("ft ", letter),
+        Span::styled(
+            format!(" {name} "),
+            Style::default()
+                .fg(tones.text)
+                .bg(fill)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(PILL_CAP_R, Style::default().fg(fill)),
     ]
 }
 
-/// The typing-mode glyph that follows the wordmark in the status bar: the
-/// insertion symbol (⎀) while typing inserts, the continuous-underline symbol
-/// (⎁) in overwrite mode, lit in the brand orange so a switched mode is hard
-/// to miss. It sits on the left, away from the clickable position, encoding
-/// and language segments on the right.
-fn typing_mode_span(overwrite: bool) -> Span<'static> {
-    if overwrite {
+/// A status-bar badge (a recording, vim's mode, an attention flag) as a
+/// rounded pill: `label` padded by a cell each side, between half-circle
+/// caps in `fill`.
+fn status_pill(label: &str, fill: Color, fg: Color) -> [Span<'static>; 3] {
+    [
+        Span::styled(PILL_CAP_L, Style::default().fg(fill)),
         Span::styled(
-            "\u{2381}",
+            format!(" {label} "),
             Style::default()
-                .fg(BRAND_ORANGE)
+                .fg(fg)
+                .bg(fill)
                 .add_modifier(Modifier::BOLD),
-        )
-    } else {
-        Span::styled("\u{2380}", Style::default().fg(Color::Gray))
-    }
+        ),
+        Span::styled(PILL_CAP_R, Style::default().fg(fill)),
+    ]
+}
+
+/// The Overwrite badge that follows the workspace cap in the status bar: the
+/// continuous-underline symbol (⎁) in the brand orange, so a switched mode is
+/// hard to miss. Insert, the default, shows nothing, as in VS Code, and keeps
+/// the bar's cells for the segments after it. It sits on the left, away from
+/// the clickable position, encoding and language segments on the right.
+fn overwrite_mode_span() -> Span<'static> {
+    Span::styled(
+        "\u{2381}",
+        Style::default()
+            .fg(BRAND_ORANGE)
+            .add_modifier(Modifier::BOLD),
+    )
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -4032,6 +4173,10 @@ pub struct App {
     /// The file blame has been fetched (or is in flight) for; reset to `None`
     /// on HEAD move so the annotation refreshes after a commit / checkout.
     blame_fetched: Option<PathBuf>,
+    /// The commit whose card the pointer, resting on the inline blame, asked
+    /// for (#1556), and where `git log` sends it. Kept once the card shows,
+    /// so the card stays while the pointer moves along the annotation.
+    blame_hover: Option<(String, std::sync::mpsc::Receiver<Result<String, String>>)>,
     /// The network git operation in flight (push, pull, fetch, clone...),
     /// named for the status line, and where its finisher arrives.
     git_net_job: Option<(String, std::sync::mpsc::Receiver<GitNetDone>)>,
@@ -4120,6 +4265,13 @@ pub struct App {
     /// What gcc/clang-shaped build messages count their column in
     /// (`build_column_unit`), applied when a scan installs its rows.
     build_column_unit: crate::build_matchers::ColumnUnit,
+    /// The PROBLEMS entry Go to Next/Previous Problem last opened, as (its
+    /// file, line, column, place in the walked list) plus where that left
+    /// the caret (row, column). Repeating the command from that caret steps
+    /// from this entry, not from the caret: an entry past its line's end
+    /// leaves the caret clamped short of it, which compared as still ahead
+    /// and was picked again, and entries sharing a position were skipped.
+    last_problem_jump: Option<(PathBuf, u32, u32, usize, usize, usize)>,
     /// Signals that this workspace is too large for `auto` to run the sweep
     /// unasked (#256). Sent from the sweep's worker, since deciding it is a
     /// whole-workspace walk.
@@ -4340,6 +4492,10 @@ pub struct App {
     /// walk the caret to the clicked line, undoing the caret-preserving
     /// click. Cleared on the release and on the next press.
     breakpoint_lane_press: bool,
+    /// The line a triple-click or a line-number press selected (#1570): a
+    /// drag from it selects whole lines, from this one to the line under
+    /// the pointer. Cleared on the release and on the next press.
+    editor_line_drag: Option<usize>,
     /// A left-drag is moving the OUTLINE panel's scrollbar thumb. The outline
     /// is not a focusable `Pane`, so it gets its own drag latch rather than
     /// riding `scrollbar_drag`.
@@ -4815,6 +4971,22 @@ pub struct App {
     /// the user must still hear after croft has gone: a hot-exit backup a
     /// quit could not remove (#862).
     exit_notes: Vec<String>,
+    /// Where each clean exit saves the session for the next launch, one
+    /// file per workspace (`~/.local/state/croft/sessions`, see
+    /// [`crate::session_state::saved_path`]). `None` saves none, as under
+    /// test unless a test points it at a tempdir.
+    pub session_dir: Option<PathBuf>,
+    /// The saved session being read off the UI thread once the first frame
+    /// is up, and whether its tabs may come back (hot exit brought none) or
+    /// only its bookmarks.
+    saved_session: Option<(
+        std::sync::mpsc::Receiver<crate::session_state::SessionState>,
+        bool,
+    )>,
+    /// The bookmarks of files no tab holds marks for any more, on their
+    /// saved lines: what the last tab holding them left when it closed
+    /// (see [`Self::settle_bookmarks`]).
+    closed_bookmarks: std::collections::HashMap<PathBuf, std::collections::BTreeSet<usize>>,
     /// The tasks backing the open Run Task picker; the picker row `id`
     /// indexes into this list.
     run_tasks: Vec<crate::tasks::Task>,
@@ -4866,6 +5038,11 @@ pub struct App {
     /// (a press on a seam must not steal focus) and the seam-drag hit-test, for
     /// a grid of any depth.
     editor_seams: Vec<editor_layout::Seam>,
+    /// The whole editor area (every group) as the most recent render laid
+    /// it out: what `leaf_rects` splits into the groups' rects. The active
+    /// group's own `last_full_area` is only its share once the editor is
+    /// split, so a geometric hit-test must start from this instead.
+    editor_layout_area: Rect,
     /// Hit-test rectangles of the "[+]" buttons - one per terminal pane,
     /// indexed in lock-step with `terminals`. Empty when the pane is hidden
     /// or every pane is too narrow for the label.
@@ -5266,6 +5443,14 @@ pub struct App {
     /// the editor). Stacked above the async LSP hover reply by `compose_hover`
     /// so a squiggle's message shows even when the server returns no type info.
     hover_diagnostic: Option<String>,
+    /// Set when the keyboard asked for the hover at the caret (#1518), not
+    /// the pointer's rest: its reply is checked against the caret, and says
+    /// there is no hover only over the status line this holds, the one shown
+    /// at the request, so a newer message is not replaced.
+    hover_at_caret: Option<String>,
+    /// The tab and edit count the hover was asked about: a reply after
+    /// either changed (a paste over the word keeps its span) is dropped.
+    hover_doc: (Option<PathBuf>, u64),
     /// Separate dwell timer for the editor tab strip. Hovering a tab for
     /// `HOVER_DELAY` surfaces `tab_tooltip` with the tab's full path so
     /// same-named files can be told apart. Kept distinct from `hover`
@@ -5588,6 +5773,8 @@ pub struct App {
     agent_ledger_saved: (u64, std::time::Instant),
     /// The (agent, file) behind each row of the lane-file picker.
     pending_lane_picks: Vec<(String, PathBuf)>,
+    /// The tab and line behind each row of Bookmarks: View Bookmarks.
+    pending_bookmarks: Vec<BookmarkTarget>,
     /// When the running Fix with Navigator turn started (#374): the clock
     /// its PROBLEMS-row spinner runs on, and the flag that keeps the main
     /// loop repainting while it runs. `None` when no fix is streaming.
@@ -6730,12 +6917,64 @@ fn welcome_note_summary_width(block_w: u16) -> u16 {
     block_w.saturating_sub(WELCOME_NOTE_GUTTER).max(1)
 }
 
+/// A note's summary wrapped to the card, its inline Markdown markers already
+/// removed (#954) so the height measure and the paint wrap the same text.
 fn wrapped_welcome_note_summary(
     note: &crate::release_notes::ReleaseNote,
     block_w: u16,
 ) -> Vec<String> {
     let w = welcome_note_summary_width(block_w);
-    wrap_cells_variable_width(note.summary, w, w)
+    let (text, _) = crate::release_notes::inline_markup(note.summary);
+    wrap_cells_variable_width(&text, w, w)
+}
+
+/// The wrapped `lines` of a note as styled lines (#954): wrapping only moves
+/// and collapses whitespace, so the non-space characters of `lines` are those
+/// of the summary's text in order, and each takes its own style back.
+fn styled_welcome_note_lines(
+    note: &crate::release_notes::ReleaseNote,
+    lines: &[String],
+    plain: Style,
+    code: Style,
+) -> Vec<ratatui::text::Line<'static>> {
+    use crate::release_notes::Inline;
+    let (text, styles) = crate::release_notes::inline_markup(note.summary);
+    let mut marks = text
+        .chars()
+        .zip(styles)
+        .filter(|(c, _)| !c.is_whitespace())
+        .map(|(_, s)| s);
+    lines
+        .iter()
+        .map(|line| {
+            let mut spans: Vec<ratatui::text::Span<'static>> = Vec::new();
+            let mut run = String::new();
+            let mut run_style = plain;
+            for c in line.chars() {
+                let style = if c.is_whitespace() {
+                    plain
+                } else {
+                    match marks.next().unwrap_or(Inline::Plain) {
+                        Inline::Plain => plain,
+                        Inline::Bold => plain.add_modifier(Modifier::BOLD),
+                        Inline::Code => code,
+                    }
+                };
+                if style != run_style && !run.is_empty() {
+                    spans.push(ratatui::text::Span::styled(
+                        std::mem::take(&mut run),
+                        run_style,
+                    ));
+                }
+                run_style = style;
+                run.push(c);
+            }
+            if !run.is_empty() {
+                spans.push(ratatui::text::Span::styled(run, run_style));
+            }
+            ratatui::text::Line::from(spans)
+        })
+        .collect()
 }
 
 fn welcome_note_row_height(note: &crate::release_notes::ReleaseNote, block_w: u16) -> u16 {
@@ -7198,6 +7437,7 @@ impl App {
             build_column_unit: crate::build_matchers::ColumnUnit::from_pref(
                 &loaded_prefs.build_column_unit,
             ),
+            last_problem_jump: None,
             test_jump_rx,
             test_jump_tx,
             timeline_fetched: None,
@@ -7205,6 +7445,7 @@ impl App {
             blame_rx,
             blame_tx,
             blame_fetched: None,
+            blame_hover: None,
             git_net_job: None,
             git_view_job: None,
             vim_mode_pref: false,
@@ -7329,6 +7570,7 @@ impl App {
             scrollbar_drag: None,
             editor_hscrollbar_drag: false,
             breakpoint_lane_press: false,
+            editor_line_drag: None,
             outline_scrollbar_drag: false,
             secondary_outline: Default::default(),
             secondary_outline_scrollbar_drag: false,
@@ -7479,6 +7721,9 @@ impl App {
             hot_exit_consumed: Vec::new(),
             hot_exit_unremoved: Vec::new(),
             exit_notes: Vec::new(),
+            session_dir: data_dir.as_deref().map(|dir| dir.join("sessions")),
+            saved_session: None,
+            closed_bookmarks: std::collections::HashMap::new(),
             run_tasks: Vec::new(),
             last_task: None,
             pending_terminal_warning: false,
@@ -7490,6 +7735,7 @@ impl App {
             terminal_height: None,
             splitter_drag: None,
             editor_seams: Vec::new(),
+            editor_layout_area: Rect::default(),
             sidebar_splitter_x: None,
             terminal_splitter_y: None,
             terminal_add_buttons: Vec::new(),
@@ -7899,6 +8145,7 @@ impl App {
             agent_ledger_store: (!cfg!(test)).then(agent_ledger_store_path),
             agent_ledger_saved: (0, std::time::Instant::now()),
             pending_lane_picks: Vec::new(),
+            pending_bookmarks: Vec::new(),
             problems_fix_started: None,
             http_run: None,
             http_environment: None,
@@ -7912,6 +8159,8 @@ impl App {
             hover_anchor: None,
             hover_word: None,
             hover_diagnostic: None,
+            hover_at_caret: None,
+            hover_doc: (None, 0),
             tab_hover: HoverDwell::default(),
             tab_tooltip: None,
             tab_hover_idx: None,
@@ -10997,6 +11246,87 @@ impl App {
         changed
     }
 
+    /// The caret line's commit as the inline blame names it (#1556), full
+    /// hash and short; when it names none, the status line says why.
+    fn caret_line_commit(&mut self) -> Option<(String, String)> {
+        use crate::widgets::editor::LineBlame;
+        let line = self.editor.cursor_row + 1;
+        self.status = match self.editor.cursor_line_blame() {
+            Some(LineBlame::Commit(c)) => {
+                return Some((c.hash.clone(), c.short_hash().to_string()));
+            }
+            Some(LineBlame::Uncommitted) => format!("Line {line} has uncommitted changes"),
+            None if !self.inline_blame_enabled => {
+                String::from("Inline blame is off: Git: Toggle Inline Blame turns it on")
+            }
+            None => format!("Git has no commit for line {line}"),
+        };
+        None
+    }
+
+    /// Git: Open Commit for Line, and a click on the inline blame (#1556):
+    /// the changes the caret line's commit made to this file, in the
+    /// side-by-side diff a TIMELINE row opens (GitLens's Open Changes).
+    fn open_commit_for_line(&mut self) {
+        if let Some((hash, _)) = self.caret_line_commit()
+            && let Some(path) = self.editor.path.clone()
+        {
+            self.open_timeline_diff(path, hash);
+        }
+    }
+
+    /// The pointer rested on the inline blame naming `hash` (#1556): fetch
+    /// the commit's card off the UI thread, for [`Self::drain_blame_hover`].
+    fn hover_blame_card(&mut self, col: u16, row: u16, hash: String) {
+        let shown = self.hover_popup.is_some();
+        if shown && self.blame_hover.as_ref().is_some_and(|(h, _)| *h == hash) {
+            return;
+        }
+        // The file's own folder is in its repository, as blame's is.
+        let Some(dir) = self.editor.path.as_deref().and_then(Path::parent) else {
+            return;
+        };
+        let dir = dir.to_path_buf();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let job = hash.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(crate::git::commit_card(&dir, &job));
+        });
+        // A word's hover still in flight must not land over the card.
+        self.hover_request_id = None;
+        self.hover_word = None;
+        self.hover_anchor = Some((col, row));
+        self.blame_hover = Some((hash, rx));
+    }
+
+    /// Show the inline blame's commit card once `git log` has it, if the
+    /// pointer is still on an annotation naming that commit: a tab switch or
+    /// caret move while git ran can put another commit's there. True when
+    /// the card appeared.
+    fn drain_blame_hover(&mut self) -> bool {
+        let Some((hash, card)) = self
+            .blame_hover
+            .as_ref()
+            .and_then(|(hash, rx)| rx.try_recv().ok().map(|card| (hash.clone(), card)))
+        else {
+            return false;
+        };
+        let under = self
+            .hover
+            .cell()
+            .and_then(|(c, r)| self.editor.blame_commit_at(c, r));
+        if under != Some(hash.as_str()) {
+            self.blame_hover = None;
+            return false;
+        }
+        let card = card.unwrap_or_else(|e| format!("Could not read the commit: {e}"));
+        self.hover_popup = Some(crate::widgets::hover_popup::HoverPopup::new(
+            format!("{card}\n\nClick to open its changes (Git: Open Commit for Line)"),
+            self.hover_anchor.unwrap_or((0, 0)),
+        ));
+        true
+    }
+
     /// Drain LSP completion responses. Drops responses with stale request
     /// ids so a slow earlier reply cannot clobber a fresher popup. Returns
     /// true when the popup state changed and the next frame should redraw.
@@ -11086,6 +11416,10 @@ impl App {
                     format!("No completions match '{prefix}' ({server_count} from server)");
             }
         } else {
+            // Only now do the popup's items come from this reply: a reply
+            // that returned early above left the older items on screen, and
+            // those still shift from their own request.
+            self.completion_items_pos = self.completion_ask_pos;
             self.completion_popup = Some(popup);
         }
         true
@@ -11764,6 +12098,16 @@ impl App {
             return;
         }
         self.hover.on_move(std::time::Instant::now(), col, row);
+        // The blame card (#1556) belongs to the annotation of its commit,
+        // not to a word: it stays while the pointer moves along that and
+        // goes when the pointer leaves it.
+        if let Some((hash, _)) = &self.blame_hover {
+            if self.editor.blame_commit_at(col, row) == Some(hash.as_str()) {
+                return;
+            }
+            self.blame_hover = None;
+            self.hover_popup = None;
+        }
         if self.hover_popup.is_some() {
             let current = self
                 .editor
@@ -11800,9 +12144,54 @@ impl App {
     /// async `textDocument/hover`. Split out of `poll_hover` so the dwell
     /// timer doesn't have to be driven to test the resolution logic.
     fn hover_at_cell(&mut self, col: u16, row: u16) {
+        if let Some(hash) = self.editor.blame_commit_at(col, row) {
+            self.hover_blame_card(col, row, hash.to_string());
+            return;
+        }
         let Some((line, c)) = self.editor.buffer_pos_at(col, row) else {
             return;
         };
+        self.hover_at(line, c, (col, row), false);
+    }
+
+    /// Show or Focus Hover (#1518): the hover the pointer's rest would open,
+    /// for the caret, anchored at the caret's cell. Says so when there is
+    /// nothing to show, where the pointer's hover stays silent.
+    fn show_hover_at_caret(&mut self) {
+        self.hover_popup = None;
+        self.hover_diagnostic = None;
+        self.hover_request_id = None;
+        // A pointer that came to rest just before the command would fire its
+        // own hover next frame and take this one's place.
+        self.hover.clear();
+        let Some(anchor) = self.editor.cursor_screen_pos() else {
+            return;
+        };
+        let (line, c) = self.caret_hover_point();
+        self.hover_at(line, c, anchor, true);
+        if self.hover_popup.is_none() && self.hover_request_id.is_none() {
+            self.status = String::from(NO_HOVER_AT_CARET);
+        }
+    }
+
+    /// The buffer point Show Hover describes: the caret, or the word ending
+    /// at it, as in VS Code, so a hover after typing a name or a word-right
+    /// move shows that word.
+    fn caret_hover_point(&self) -> (usize, usize) {
+        let (line, col) = (self.editor.cursor_row, self.editor.cursor_col);
+        if col > 0
+            && self.editor.hover_region_at(line, col).is_none()
+            && self.editor.word_at(line, col - 1).is_some()
+        {
+            return (line, col - 1);
+        }
+        (line, col)
+    }
+
+    /// Resolve a hover at buffer `(line, c)` with its popup at screen cell
+    /// `anchor`, for the pointer or, with `at_caret`, the caret.
+    fn hover_at(&mut self, line: usize, c: usize, anchor: (u16, u16), at_caret: bool) {
+        let (col, row) = anchor;
         // The region (word, or else a diagnostic span over punctuation) the
         // popup belongs to. Nothing of interest under the point → no hover.
         let Some(region) = self.editor.hover_region_at(line, c) else {
@@ -11810,6 +12199,8 @@ impl App {
         };
         self.hover_anchor = Some((col, row));
         self.hover_word = Some(region);
+        self.hover_at_caret = at_caret.then(|| self.status.clone());
+        self.hover_doc = (self.editor.path.clone(), self.editor.edit_seq);
         // Debug hover-to-evaluate: while paused, hovering a variable shows its
         // current value (from the loaded locals/globals) instead of the LSP
         // type hover. Takes priority because the live value is what the user
@@ -11826,7 +12217,8 @@ impl App {
         // Server diagnostics are already in the editor, so capture the
         // message synchronously; the squiggle's message must show even if the
         // server has no type info (or no LSP is attached at all).
-        self.hover_diagnostic = format_diagnostics(&self.editor.diagnostics_at(line, c));
+        self.hover_diagnostic =
+            format_diagnostics(&self.editor.diagnostics_at(line, c, self.workspace_root()));
         // Only a real word is worth a `textDocument/hover` round-trip; over
         // punctuation there is no symbol to describe, so show the diagnostic
         // alone right away.
@@ -12002,11 +12394,20 @@ impl App {
             if Some(result.request_id) != self.hover_request_id {
                 continue;
             }
-            let current = self
-                .hover
-                .cell()
-                .and_then(|(c, r)| self.editor.buffer_pos_at(c, r))
-                .and_then(|(line, ch)| self.editor.hover_region_at(line, ch));
+            if self.hover_doc.0 != self.editor.path || self.hover_doc.1 != self.editor.edit_seq {
+                continue;
+            }
+            // A keyboard hover belongs to the caret (#1518), a dwell's to the
+            // pointer; either may have moved off the word since the request.
+            let current = if self.hover_at_caret.is_some() {
+                let (line, ch) = self.caret_hover_point();
+                self.editor.hover_region_at(line, ch)
+            } else {
+                self.hover
+                    .cell()
+                    .and_then(|(c, r)| self.editor.buffer_pos_at(c, r))
+                    .and_then(|(line, ch)| self.editor.hover_region_at(line, ch))
+            };
             if current != self.hover_word {
                 continue;
             }
@@ -12016,6 +12417,9 @@ impl App {
             self.hover_popup =
                 compose_hover(self.hover_diagnostic.as_deref(), result.text.as_deref())
                     .map(|text| crate::widgets::hover_popup::HoverPopup::new(text, anchor));
+            if self.hover_popup.is_none() && self.hover_at_caret.as_ref() == Some(&self.status) {
+                self.status = String::from(NO_HOVER_AT_CARET);
+            }
             changed = true;
         }
         changed
@@ -12800,24 +13204,27 @@ impl App {
             Some(m) => m.scan_batch(output),
             None => self.matchers.scan_batch(output, cmd),
         };
-        let mut diags = diags;
-        let base = cwd.unwrap_or(self.workspace_root());
-        crate::build_matchers::convert_columns(
-            &mut diags,
-            base,
-            self.build_column_unit,
-            crate::build_matchers::tabstop_from_command(cmd),
-        );
-        self.install_build_diags(pane, cwd, diags)
+        let tabstop = crate::build_matchers::tabstop_from_command(cmd);
+        self.install_build_diags(pane, cwd, diags, tabstop)
     }
 
     /// Install `diags` as pane `pane`'s PROBLEMS contribution (#119/#252).
+    /// The gcc/clang columns are converted here (`build_column_unit`, with
+    /// `tabstop` for a tab), so a watch task's batches get the same
+    /// conversion as a finished command's scan, and each row gets it once.
     fn install_build_diags(
         &mut self,
         pane: u64,
         cwd: Option<&Path>,
-        diags: Vec<crate::build_matchers::BuildDiag>,
+        mut diags: Vec<crate::build_matchers::BuildDiag>,
+        tabstop: usize,
     ) -> bool {
+        crate::build_matchers::convert_columns(
+            &mut diags,
+            cwd.unwrap_or(self.workspace_root()),
+            self.build_column_unit,
+            tabstop,
+        );
         let had_old = self
             .build_diag_files_by_pane
             .get(&pane)
@@ -12872,6 +13279,7 @@ impl App {
                     message: d.message,
                     source: d.source.to_string(),
                     code: None,
+                    related: Vec::new(),
                 },
             ));
         }
@@ -12950,7 +13358,7 @@ impl App {
     /// can fold it into its redraw decision). Files are grouped, ordered by
     /// path; each group's diagnostics are ordered by position.
     fn rebuild_problems(&mut self) -> bool {
-        use crate::widgets::problems::{ProblemGroup, ProblemItem};
+        use crate::widgets::problems::{ProblemGroup, ProblemItem, ProblemRelated};
         let mut paths: Vec<&PathBuf> = self
             .lsp_diagnostics
             .keys()
@@ -12980,6 +13388,18 @@ impl App {
                 let shown = diagnostics_by_source(by_server)
                     .filter(|(_, d)| d.severity != crate::lsp::manager::DiagnosticSeverity::Hint);
                 for (source, d) in shown {
+                    let related = d.related().into_iter().map(|r| ProblemRelated {
+                        rel_path: r
+                            .path
+                            .strip_prefix(self.workspace_root())
+                            .unwrap_or(&r.path)
+                            .to_string_lossy()
+                            .into_owned(),
+                        path: r.path,
+                        line: r.line,
+                        col: r.character,
+                        message: r.message,
+                    });
                     items.push(ProblemItem {
                         line: d.start_line,
                         col: d.start_char,
@@ -12988,6 +13408,7 @@ impl App {
                         message: d.message.clone(),
                         source: source.to_string(),
                         code: d.code.clone(),
+                        related: related.collect(),
                     });
                 }
             }
@@ -13691,7 +14112,10 @@ impl App {
     /// The scope-header lines to pin as sticky scroll: the enclosing symbols of
     /// the top visible line whose header has scrolled above the viewport,
     /// outermost first, capped. Empty when the feature does not apply (welcome
-    /// screen, preview tab, no outline, or nothing scrolled off).
+    /// screen, preview tab, no outline, or nothing scrolled off). The header
+    /// is the symbol's name line (its `selectionRange`), not where its range
+    /// starts: a decorated Python `def` or `class` starts at `@route(...)`,
+    /// which names nothing and could be pinned over the `class` line (#940).
     fn build_sticky_lines(&self) -> Vec<u32> {
         let Some(path) = self.editor.path.as_deref() else {
             return Vec::new();
@@ -13706,7 +14130,7 @@ impl App {
         let symbols = self.outline.symbols();
         breadcrumb_symbol_chain(symbols, top, 0)
             .into_iter()
-            .map(|i| symbols[i].range_start_line)
+            .map(|i| symbols[i].line)
             .filter(|&l| l < top)
             .take(STICKY_SCROLL_MAX)
             .collect()
@@ -14112,18 +14536,26 @@ impl App {
             .and_then(|p| self.roots.owning_root(p))
             .unwrap_or_else(|| self.roots.primary())
             .to_path_buf();
-        self.status = format!("Loading {rel} at {hash}\u{2026}");
+        // Git: Open Commit for Line passes the full hash (#1556), named here
+        // by its first eight digits as the inline blame names it; a TIMELINE
+        // row's is git's own short form already.
+        let shown = if hash.len() >= 40 {
+            hash[..8].to_string()
+        } else {
+            hash.clone()
+        };
+        self.status = format!("Loading {rel} at {shown}\u{2026}");
         self.spawn_git_view(move || {
             let result = crate::git::show_commit_file_diff(&timeline_root, &hash, &rel);
             Box::new(move |app: &mut App| match result {
                 Ok(raw) => {
-                    let label = std::path::PathBuf::from(format!("{rel} @ {hash}"));
+                    let label = std::path::PathBuf::from(format!("{rel} @ {shown}"));
                     if let Err(e) = app.editor.open_git_diff_side_by_side(&label, &raw) {
                         app.status = format!("Could not open diff: {e}");
                         return;
                     }
                     app.focus_pane(Pane::Editor);
-                    app.status = format!("Showing {rel} at {hash}");
+                    app.status = format!("Showing {rel} at {shown}");
                 }
                 Err(e) => app.status = format!("git show failed: {e}"),
             })
@@ -16184,6 +16616,11 @@ impl App {
         let here = self.editor.path.clone();
         let cur = (self.editor.cursor_row as u32, self.editor.cursor_col as u32);
         let mut list: Vec<(PathBuf, crate::widgets::problems::ProblemItem, u32)> = Vec::new();
+        // The walk keeps the panel's order, which does not depend on which
+        // file is open: only the open file's UTF-16 columns can be turned
+        // into characters, so ordering by converted columns reshuffled a
+        // file once it opened, and a step from the remembered entry then
+        // passed over the rows that had moved ahead of it.
         for g in self.problems.groups() {
             for item in &g.items {
                 // Compare in characters, as the caret counts: an LSP column
@@ -16205,35 +16642,89 @@ impl App {
         let key = |e: &(PathBuf, crate::widgets::problems::ProblemItem, u32)| {
             (e.0.clone(), e.1.line, e.2)
         };
-        let idx = match here {
-            None => {
-                if forward {
-                    0
-                } else {
-                    list.len() - 1
-                }
+        // Still where the last jump left the caret: step from that entry
+        // (by its place in the list when it is still there, else by its
+        // position), whatever the clamped caret compares as.
+        let from_last = self
+            .last_problem_jump
+            .as_ref()
+            .filter(|(p, _, _, _, row, col)| {
+                here.as_ref() == Some(p)
+                    && self.editor.cursor_row == *row
+                    && self.editor.cursor_col == *col
+            })
+            .and_then(|(p, line, col, at, _, _)| {
+                let same = |e: &(PathBuf, crate::widgets::problems::ProblemItem, u32)| {
+                    &e.0 == p && e.1.line == *line && e.1.col == *col
+                };
+                list.get(*at)
+                    .filter(|e| same(e))
+                    .map(|_| *at)
+                    .or_else(|| list.iter().position(same))
+            });
+        let idx = if let Some(at) = from_last {
+            if forward {
+                (at + 1) % list.len()
+            } else {
+                (at + list.len() - 1) % list.len()
             }
-            Some(p) => {
-                let at = (p, cur.0, cur.1);
-                if forward {
-                    list.iter().position(|e| key(e) > at).unwrap_or(0)
-                } else {
-                    list.iter()
-                        .rposition(|e| key(e) < at)
-                        .unwrap_or(list.len() - 1)
-                }
-            }
-        };
-        let (path, item, _) = list[idx].clone();
-        let opened = if item.col_utf16 {
-            self.open_at_utf16(&path, item.line, item.col)
         } else {
-            self.open_at(&path, item.line as usize, item.col as usize)
+            match here {
+                None => {
+                    if forward {
+                        0
+                    } else {
+                        list.len() - 1
+                    }
+                }
+                Some(p) => {
+                    let at = (p, cur.0, cur.1);
+                    if forward {
+                        list.iter().position(|e| key(e) > at).unwrap_or(0)
+                    } else {
+                        list.iter()
+                            .rposition(|e| key(e) < at)
+                            .unwrap_or(list.len() - 1)
+                    }
+                }
+            }
         };
-        if let Err(e) = opened {
-            self.status = format!("Open failed: {e}");
-            return;
-        }
+        // An entry whose file no longer opens (deleted since the build) is
+        // passed over in the walk's direction, so it cannot hold every
+        // repeat on itself; only when none opens is the failure reported.
+        let mut idx = idx;
+        let mut tried = 0;
+        let (path, item) = loop {
+            let (path, item, _) = list[idx].clone();
+            let opened = if item.col_utf16 {
+                self.open_at_utf16(&path, item.line, item.col)
+            } else {
+                self.open_at(&path, item.line as usize, item.col as usize)
+            };
+            match opened {
+                Ok(()) => break (path, item),
+                Err(e) => {
+                    tried += 1;
+                    if tried == list.len() {
+                        self.status = format!("Open failed: {e}");
+                        return;
+                    }
+                    idx = if forward {
+                        (idx + 1) % list.len()
+                    } else {
+                        (idx + list.len() - 1) % list.len()
+                    };
+                }
+            }
+        };
+        self.last_problem_jump = Some((
+            path.clone(),
+            item.line,
+            item.col,
+            idx,
+            self.editor.cursor_row,
+            self.editor.cursor_col,
+        ));
         let kind = match item.severity {
             DiagnosticSeverity::Error => "error",
             DiagnosticSeverity::Warning => "warning",
@@ -16649,6 +17140,14 @@ impl App {
         } else {
             format!("{n} cursors at line ends")
         };
+    }
+
+    /// VS Code "Expand Line Selection" (`Cmd+L` / `Ctrl+L`, #1570): select
+    /// the caret's whole line, and one more line on each further press.
+    fn expand_line_selection(&mut self) {
+        if self.editor_is_text() {
+            self.editor.expand_line_selection();
+        }
     }
 
     /// VS Code "Add Selection to Next Find Match" (`Cmd+D`): select the word
@@ -18269,7 +18768,7 @@ impl App {
                     self.completion_request_id = None;
                     return false;
                 }
-                self.editor.insert_char(c);
+                self.type_char_in_editor(c);
                 self.refresh_completion_prefix();
                 if !is_word_continuation(c) {
                     self.completion_popup = None;
@@ -18890,15 +19389,16 @@ impl App {
                         .add_modifier(Modifier::BOLD),
                 );
                 let lines = wrapped_welcome_note_summary(note, inner_w_actual);
-                for (line_idx, line) in lines.iter().enumerate() {
+                let code_style = row_style.fg(self.theme.ui(crate::markdown::CODE));
+                let styled = styled_welcome_note_lines(note, &lines, row_style, code_style);
+                for (line_idx, line) in styled.iter().enumerate() {
                     let line_y = row_y + line_idx as u16;
                     if line_y >= last_row {
                         break;
                     }
-                    let clipped: String = line.chars().take(summary_w as usize).collect();
                     frame
                         .buffer_mut()
-                        .set_string(summary_x, line_y, clipped, row_style);
+                        .set_line(summary_x, line_y, line, summary_w);
                 }
                 row_y = row_y.saturating_add(lines.len().max(1) as u16);
             }
@@ -22868,7 +23368,7 @@ impl App {
             .editor_layout
             .inactive_dfs_index_at(col, row)
             .or_else(|| {
-                let area = self.editor.last_full_area;
+                let area = self.editor_layout_area;
                 if area.width == 0 || area.height == 0 {
                     return None;
                 }
@@ -22891,6 +23391,19 @@ impl App {
             .inactive_groups_mut()
             .get_mut(inactive_idx)
         {
+            // A PDF page step is a synchronous rasterise, so a background
+            // split's PDF coalesces a wheel burst exactly like the focused one
+            // (see wheel_pdf_page), stamped after the render.
+            let ed = group.active_editor_mut();
+            let pdf_doc = (ed.diff.is_none() && ed.pdf_page().is_some()).then(|| ed.path.clone());
+            if let Some(doc) = pdf_doc {
+                if pdf_wheel_cooling(self.last_pdf_wheel.as_ref(), notches, &doc) {
+                    return true;
+                }
+                group.wheel_scroll_active(notches);
+                self.last_pdf_wheel = Some((std::time::Instant::now(), notches.signum(), doc));
+                return true;
+            }
             group.wheel_scroll_active(notches);
             return true;
         }
@@ -22956,6 +23469,8 @@ impl App {
         if !self.editor_layout.is_split() || !self.editor.is_blank_initial() {
             return;
         }
+        // The marks its last tab left go before the group does.
+        self.settle_bookmarks();
         // The focused group is empty; drop it and promote a surviving group to
         // become the new active editor. Evict the right slot's image so it
         // can't ghost after the column disappears.
@@ -23586,6 +24101,7 @@ impl App {
             // into `self.editor`; every other group lives in `editor_layout`.
             // Lay the leaves out and paint each at its rect (depth-first order),
             // reporting the active group's rect so popups anchor there.
+            self.editor_layout_area = editor_area;
             let rects = self.editor_layout.leaf_rects(editor_area, EDITOR_SPLIT_MIN);
             // The layout icons sit over the right end of the editor area's top
             // row; any group's tab strip that reaches it stops short of them.
@@ -24135,9 +24651,19 @@ impl App {
         // Owned snapshot: the spans borrow the status, and borrowing it
         // through scm_worker() would pin all of &self for the whole render.
         let scm_status = self.scm_worker().status().clone();
-        let mut spans: Vec<Span> = Vec::with_capacity(20);
-        spans.extend(brand_spans(self.theme));
-        spans.push(typing_mode_span(self.overwrite_mode));
+        let status_bg = status_bar_bg(self.theme);
+        let tones = StatusTones::new(self.theme, status_bg);
+        let mut spans: Vec<Span> = Vec::with_capacity(26);
+        let workspace_name = self
+            .workspace_root()
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| self.workspace_root().display().to_string());
+        spans.extend(workspace_cap_spans(self.theme, &workspace_name));
+        if self.overwrite_mode {
+            spans.push(Span::raw(" "));
+            spans.push(overwrite_mode_span());
+        }
         let redacted = self.redacted_on_screen();
         if redacted > 0 || self.redactions_revealed() {
             // How much of what is on screen is masked right now (#360): a
@@ -24145,29 +24671,24 @@ impl App {
             // that a reveal window is open.
             let (label, bg) = if self.redactions_revealed() {
                 (
-                    format!(" \u{1f441} {redacted} revealed "),
+                    format!("\u{1f441} {redacted} revealed"),
                     Color::Rgb(0xc0, 0x39, 0x2b),
                 )
             } else {
                 (
-                    format!(" \u{2022} {redacted} redacted "),
+                    format!("\u{2022} {redacted} redacted"),
                     Color::Rgb(0x3a, 0x3f, 0x4b),
                 )
             };
-            spans.push(Span::styled(
-                label,
-                Style::default()
-                    .bg(self.theme.ui(bg))
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ));
+            spans.extend(status_pill(&label, self.theme.ui(bg), Color::White));
+            spans.push(Span::raw(" "));
         }
         if let Some(span) = self.perf.status_span() {
             spans.push(span);
         }
         // The pill the update card rises from and Later folds it into; a
         // click opens or folds the card. Recorded as (start column, width).
-        let offer_chip_x: u16 = spans.iter().map(|s| s.content.chars().count() as u16).sum();
+        let offer_chip_x: u16 = spans.iter().map(|s| status_cells(&s.content)).sum();
         if let Some(toast) = self.update_toast.as_ref().filter(|t| !t.ready) {
             let hovered =
                 crate::widgets::hover::contains(self.status_offer_rect, self.pointer_cell);
@@ -24181,7 +24702,7 @@ impl App {
                 Color::White,
             ));
         }
-        let offer_chip_end: u16 = spans.iter().map(|s| s.content.chars().count() as u16).sum();
+        let offer_chip_end: u16 = spans.iter().map(|s| status_cells(&s.content)).sum();
         let offer_chip =
             (offer_chip_end > offer_chip_x).then(|| (offer_chip_x, offer_chip_end - offer_chip_x));
         if offer_chip.is_some() {
@@ -24189,7 +24710,7 @@ impl App {
         }
         // Both update pills are one click target, doing what the updater
         // chord does (#865); recorded as (start column, width).
-        let update_chip_x: u16 = spans.iter().map(|s| s.content.chars().count() as u16).sum();
+        let update_chip_x: u16 = spans.iter().map(|s| status_cells(&s.content)).sum();
         if self.any_update_ready() {
             spans.extend(crate::widgets::update_popup::pill_spans(
                 &format!(
@@ -24221,7 +24742,7 @@ impl App {
                     .add_modifier(Modifier::BOLD),
             ));
         }
-        let update_chip_end: u16 = spans.iter().map(|s| s.content.chars().count() as u16).sum();
+        let update_chip_end: u16 = spans.iter().map(|s| status_cells(&s.content)).sum();
         let update_chip = (update_chip_end > update_chip_x)
             .then(|| (update_chip_x, update_chip_end - update_chip_x));
         if self.any_update_in_progress() {
@@ -24271,16 +24792,14 @@ impl App {
             let left = until
                 .saturating_duration_since(std::time::Instant::now())
                 .as_secs();
-            spans.push(Span::styled(
-                format!(
-                    " \u{2713} auto-approving {agent} {}:{:02} ",
+            spans.extend(status_pill(
+                &format!(
+                    "\u{2713} auto-approving {agent} {}:{:02}",
                     left / 60,
                     left % 60
                 ),
-                Style::default()
-                    .bg(self.theme.ui(Color::Rgb(0x8a, 0x60, 0x00)))
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
+                self.theme.ui(Color::Rgb(0x8a, 0x60, 0x00)),
+                Color::White,
             ));
             spans.push(Span::raw(" "));
         }
@@ -24297,21 +24816,20 @@ impl App {
         let mut codeql_chip: Option<(u16, u16)> = None;
         if let Some((_, since)) = &self.codeql_run {
             let secs = since.elapsed().as_secs();
-            let text = format!(
-                " \u{27f3} CodeQL {} {}:{:02} \u{2715} ",
-                self.codeql_run_name,
-                secs / 60,
-                secs % 60
+            let pill = status_pill(
+                &format!(
+                    "\u{27f3} CodeQL {} {}:{:02} \u{2715}",
+                    self.codeql_run_name,
+                    secs / 60,
+                    secs % 60
+                ),
+                self.theme.ui(Color::Rgb(0x2b, 0x5d, 0x8a)),
+                Color::White,
             );
-            let x: u16 = spans.iter().map(|s| s.content.chars().count() as u16).sum();
-            codeql_chip = Some((x, text.chars().count() as u16));
-            spans.push(Span::styled(
-                text,
-                Style::default()
-                    .bg(self.theme.ui(Color::Rgb(0x2b, 0x5d, 0x8a)))
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ));
+            let x: u16 = spans.iter().map(|s| status_cells(&s.content)).sum();
+            let w: u16 = pill.iter().map(|s| status_cells(&s.content)).sum();
+            codeql_chip = Some((x, w));
+            spans.extend(pill);
             spans.push(Span::raw(" "));
         }
         if let Some((_, _, started)) = &self.recording {
@@ -24319,12 +24837,10 @@ impl App {
             // leave on; it is not the macro recorder, so it has its own
             // badge and says how long it has run.
             let secs = started.elapsed().as_secs();
-            spans.push(Span::styled(
-                format!(" \u{25cf} CAST {}:{:02} ", secs / 60, secs % 60),
-                Style::default()
-                    .bg(self.theme.ui(Color::Rgb(0x8a, 0x1c, 0x5a)))
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
+            spans.extend(status_pill(
+                &format!("\u{25cf} CAST {}:{:02}", secs / 60, secs % 60),
+                self.theme.ui(Color::Rgb(0x8a, 0x1c, 0x5a)),
+                Color::White,
             ));
             spans.push(Span::raw(" "));
         }
@@ -24333,24 +24849,19 @@ impl App {
             // filled red badge rather than a dim hint (#255). A named register
             // shows which one, since vim users keep several.
             let label = match rec.register {
-                Some(r) => format!(" ● REC @{r} "),
-                None => String::from(" ● REC "),
+                Some(r) => format!("● REC @{r}"),
+                None => String::from("● REC"),
             };
-            spans.push(Span::styled(
-                label,
-                Style::default()
-                    .bg(self.theme.ui(Color::Rgb(0xc0, 0x2b, 0x2b)))
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
+            spans.extend(status_pill(
+                &label,
+                self.theme.ui(Color::Rgb(0xc0, 0x2b, 0x2b)),
+                Color::White,
             ));
             spans.push(Span::raw(" "));
         }
         if self.vim.enabled {
             let (text, bg) = match self.vim.command_line() {
-                Some(cmd) => (
-                    format!(" {cmd} "),
-                    self.theme.ui(Color::Rgb(0x33, 0x33, 0x33)),
-                ),
+                Some(cmd) => (cmd.to_string(), self.theme.ui(Color::Rgb(0x33, 0x33, 0x33))),
                 None => {
                     let label = self.vim.mode_label().unwrap_or("NORMAL");
                     let bg = match self.vim.mode() {
@@ -24360,33 +24871,22 @@ impl App {
                         }
                         _ => self.theme.ui(Color::Rgb(0x4e, 0x9a, 0xff)),
                     };
-                    (format!(" {label} "), bg)
+                    (label.to_string(), bg)
                 }
             };
-            spans.push(Span::styled(
-                text,
-                Style::default()
-                    .bg(bg)
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ));
+            spans.extend(status_pill(&text, bg, Color::White));
             spans.push(Span::raw(" "));
         }
-        // Hairline zone divider (│): fences the brand/git zone, the
-        // diagnostics cluster, and the transient message off from each other
-        // so the bar reads as segments instead of one run of text. Quiet on
-        // both the navy and near-black bars.
-        let zone_div = Style::default().fg(self.theme.ui(Color::Rgb(0x3a, 0x41, 0x50)));
-        // Croft Loch spaces its zones apart the way VS Code's status bar
-        // does; the divider keeps its cell so no click target moves.
-        let div = if self.theme.surfaces().is_some() {
-            " "
-        } else {
-            "\u{2502}"
-        };
-        let scm_spans = git_status_spans(&scm_status);
-        // The wordmark already ends in a space; the git spans don't, so buy
-        // the divider one cell of air only when the branch segment painted.
+        // Zones are set apart by air rather than by drawn dividers, the way
+        // VS Code's status bar spaces its items: the bar reads as a few
+        // quiet groups instead of a ruled table. The spacer keeps its one
+        // cell, so no click target moves.
+        let zone_div = Style::default();
+        let div = " ";
+        let scm_spans = git_status_spans(&scm_status, self.theme);
+        // The git spans open with their own air and the cap ends on its
+        // rounded edge, so the spacer takes one more cell only when the
+        // branch segment painted.
         let scm_present = !scm_spans.is_empty();
         spans.extend(scm_spans);
         spans.push(Span::styled(
@@ -24401,79 +24901,93 @@ impl App {
         // survive a transport drop, so flag it for the whole session (rendered
         // before the transient status so a status update never hides it).
         if let Some(warning) = self.persistence_warning {
-            spans.push(Span::styled(
-                format!(" \u{26a0} {warning} "),
-                Style::default()
-                    .bg(self.theme.ui(Color::Rgb(0xff, 0x9d, 0x2f)))
-                    .fg(self.theme.ui(Color::Rgb(0x10, 0x13, 0x1a)))
-                    .add_modifier(Modifier::BOLD),
+            spans.extend(status_pill(
+                &format!("\u{26a0} {warning}"),
+                self.theme.ui(Color::Rgb(0xff, 0x9d, 0x2f)),
+                self.theme.ui(Color::Rgb(0x10, 0x13, 0x1a)),
             ));
-            spans.push(Span::raw("  "));
+            spans.push(Span::raw(" "));
         }
         // Multiplayer roster badge: how many clients are attached to this
         // persistent session, painted only when someone else is here
         // (manage them via Session: Participants, Cmd+K A).
         if self.session_participants.len() > 1 {
-            spans.push(Span::styled(
-                format!(" \u{f0c0} {} attached ", self.session_participants.len()),
-                Style::default()
-                    .bg(self.theme.ui(Color::Rgb(0x2f, 0x6f, 0xd0)))
-                    .fg(self.theme.ui(Color::Rgb(0xff, 0xff, 0xff)))
-                    .add_modifier(Modifier::BOLD),
+            spans.extend(status_pill(
+                &format!("\u{f0c0} {} attached", self.session_participants.len()),
+                self.theme.ui(Color::Rgb(0x2f, 0x6f, 0xd0)),
+                self.theme.ui(Color::Rgb(0xff, 0xff, 0xff)),
             ));
-            spans.push(Span::raw("  "));
+            spans.push(Span::raw(" "));
         }
         // AI-stream badge: a pilot is streaming an edit into a shared file;
         // orange like the persistence warning (attention, not decoration),
         // naming the cancel chord so the stop path is one glance away.
         if let Some(stream) = &self.collab_stream {
-            spans.push(Span::styled(
-                format!(
-                    " \u{23f9} {} streaming into {} (Cmd+K X to stop) ",
+            spans.extend(status_pill(
+                &format!(
+                    "\u{23f9} {} streaming into {} (Cmd+K X to stop)",
                     stream.name, stream.file
                 ),
-                Style::default()
-                    .bg(self.theme.ui(Color::Rgb(0xff, 0x9d, 0x2f)))
-                    .fg(self.theme.ui(Color::Rgb(0x10, 0x13, 0x1a)))
-                    .add_modifier(Modifier::BOLD),
+                self.theme.ui(Color::Rgb(0xff, 0x9d, 0x2f)),
+                self.theme.ui(Color::Rgb(0x10, 0x13, 0x1a)),
             ));
-            spans.push(Span::raw("  "));
+            spans.push(Span::raw(" "));
         } else if let Some(host) = &self.pair_host {
             // Resident navigator seated and idle: presence, not attention —
             // the stream badge above takes over whenever it is typing.
             spans.push(Span::styled(
                 format!(" \u{25c6} {} seated ", host.title()),
                 Style::default()
-                    .bg(self.theme.ui(Color::Rgb(0x3c, 0x41, 0x4f)))
                     .fg(self.theme.ui(Color::Rgb(0xff, 0x9d, 0x2f)))
                     .add_modifier(Modifier::BOLD),
             ));
-            spans.push(Span::raw("  "));
+            spans.push(Span::raw(" "));
         }
         // Diagnostics counts (click → PROBLEMS), VS Code-style, after git.
-        // Always shown so the bar reads as a health indicator at a glance.
+        // Always shown so the bar reads as a health indicator at a glance,
+        // but a count of zero stays dim: red and amber are kept for a count
+        // that has something to say.
         let err_count = self.problems.error_count();
         let warn_count = self.problems.warning_count();
-        let diag_start_col: u16 = spans.iter().map(|s| s.content.chars().count() as u16).sum();
-        // One cell between the counts, not three: the errors and warnings
-        // read as a single health cluster (they already share one hit rect).
+        let diag_start_col: u16 = spans.iter().map(|s| status_cells(&s.content)).sum();
         // diag_len is measured from the very strings that render, so the hit
         // rect can never drift from the visible text.
-        let err_text = format!(" \u{ea87} {err_count}");
-        let warn_text = format!(" \u{ea6c} {warn_count} ");
-        let diag_len = (err_text.chars().count() + warn_text.chars().count()) as u16;
-        spans.push(Span::styled(
-            err_text,
-            Style::default().fg(self.theme.ui(Color::Rgb(0xf1, 0x4c, 0x4c))),
-        ));
-        spans.push(Span::styled(
-            warn_text,
-            Style::default().fg(self.theme.ui(Color::Rgb(0xcc, 0xa7, 0x00))),
-        ));
+        let diag_parts: [(String, Style); 4] = [
+            (
+                String::from(" \u{ea87} "),
+                Style::default().fg(if err_count > 0 {
+                    self.theme.ui(Color::Rgb(0xf1, 0x4c, 0x4c))
+                } else {
+                    tones.dim
+                }),
+            ),
+            (
+                err_count.to_string(),
+                Style::default().fg(if err_count > 0 { tones.text } else { tones.dim }),
+            ),
+            (
+                String::from(" \u{ea6c} "),
+                Style::default().fg(if warn_count > 0 {
+                    self.theme.ui(Color::Rgb(0xe5, 0xb5, 0x4a))
+                } else {
+                    tones.dim
+                }),
+            ),
+            (
+                format!("{warn_count} "),
+                Style::default().fg(if warn_count > 0 {
+                    tones.text
+                } else {
+                    tones.dim
+                }),
+            ),
+        ];
+        let diag_len: u16 = diag_parts.iter().map(|(t, _)| status_cells(t)).sum();
+        spans.extend(diag_parts.into_iter().map(|(t, st)| Span::styled(t, st)));
         // Transient status message (e.g. "Saved editor.rs"), no keybinding
-        // cheat-sheet — those live in F1 / the Command Palette now. Fenced
-        // behind a divider and dimmed so commentary reads apart from the
-        // clickable clusters around it.
+        // cheat-sheet — those live in F1 / the Command Palette now. Set apart
+        // and muted so commentary reads apart from the clickable clusters
+        // around it.
         // Screen reader mode shows the announcement in the status slot, and
         // every status passes through the UI catalog (#621).
         let status_text = one_line(if self.screen_reader && !self.announcer.line.is_empty() {
@@ -24481,6 +24995,11 @@ impl App {
         } else {
             crate::i18n::tr(&self.status).into_owned()
         });
+        // Paths inside the workspace read relative to it, as Quick Open and
+        // the tabs name them: `Saved src/main.rs`, not the absolute path
+        // with the workspace's own location in front. The Messages channel
+        // below keeps the message as it was said.
+        let status_text = workspace_relative(&status_text, self.workspace_root());
         // A message seen for the first time is kept, in full, in the Messages
         // output channel, and may take the whole bar until the next key or
         // click (#1609): elided to fit, its middle was gone for good.
@@ -24501,14 +25020,14 @@ impl App {
         let mut status_x: u16 = 0;
         if !status_text.is_empty() {
             spans.push(Span::styled(format!("{div} "), zone_div));
-            let x: u16 = spans.iter().map(|s| s.content.chars().count() as u16).sum();
+            let x: u16 = spans.iter().map(|s| status_cells(&s.content)).sum();
             status_x = x;
             if status_h > 0 && x < outer[2].width {
                 self.announce_pos = Some((outer[2].x + x, outer[2].y));
             }
             spans.push(Span::styled(
                 status_text.clone(),
-                Style::default().fg(self.theme.ui(Color::Rgb(0x9a, 0xa4, 0xb8))),
+                Style::default().fg(tones.muted),
             ));
         }
 
@@ -24588,6 +25107,20 @@ impl App {
         } else {
             ""
         };
+        let language_icon = {
+            let name = self
+                .editor
+                .path
+                .as_deref()
+                .and_then(|p| p.file_name())
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let suffix = name
+                .rfind('.')
+                .map(|i| name[i..].to_string())
+                .unwrap_or_default();
+            crate::icons::for_path(&name, &suffix)
+        };
         let mut seg_texts: Vec<String> = vec![
             format!(
                 " Ln {}, Col {}{coverage}{}{column_mode} ",
@@ -24603,7 +25136,13 @@ impl App {
             format!(" {} ", self.editor.indent_style().label()),
             format!(" {} ", self.editor.encoding.name()),
             format!(" {} ", self.editor.eol.label()),
-            format!(" {} ", self.editor.language_label()),
+            // The language rides a pill with the file's own icon, the
+            // right-hand counterpart of the workspace cap.
+            format!(
+                "{PILL_CAP_L}{} {}{PILL_CAP_R}",
+                language_icon.glyph,
+                self.editor.language_label()
+            ),
         ];
         // `2 agents · 1 waiting` (#344), only while an agent is seated; a
         // click focuses the waiting pane.
@@ -24655,8 +25194,11 @@ impl App {
             };
             seg_texts.push(format!(" \u{25c6} {joined} "));
         }
-        let widths: Vec<u16> = seg_texts.iter().map(|s| s.chars().count() as u16).collect();
-        let mut right_total: u16 = widths.iter().sum::<u16>() + (seg_texts.len() as u16 - 1);
+        let widths: Vec<u16> = seg_texts.iter().map(|s| status_cells(s)).collect();
+        // One cell of margin after the last segment, so the language pill's
+        // rounded end does not touch the frame edge.
+        let mut right_total: u16 =
+            widths.iter().sum::<u16>() + (seg_texts.len() as u16 - 1) + STATUS_RIGHT_MARGIN;
         // The right cluster paints OVER the left paragraph, so an over-long
         // transient loses exactly its tail — for "Opened <deep path>" that
         // was the filename, the one informative part (#100). Middle-elide
@@ -24665,7 +25207,7 @@ impl App {
             let left_fixed: u16 = spans
                 .iter()
                 .take(spans.len().saturating_sub(1))
-                .map(|s| s.content.chars().count() as u16)
+                .map(|s| status_cells(&s.content))
                 .sum();
             let fits_beside = |right: u16| {
                 status_rect
@@ -24699,17 +25241,6 @@ impl App {
             }
         }
 
-        // Black theme: drop the navy status strip to a near-black seam (a hair
-        // lighter than the #000000 editor so the bar still reads as distinct),
-        // matching VS Code's OLED themes. Croft Dark keeps the navy band.
-        // Croft Loch's bar is chrome, like the side bar and the tab strip.
-        let status_bg = if let Some(s) = self.theme.surfaces() {
-            s.chrome()
-        } else if self.popup_gradient() {
-            self.theme.ui(Color::Rgb(0x18, 0x18, 0x18))
-        } else {
-            self.theme.ui(Color::Rgb(0x1e, 0x3a, 0x6e))
-        };
         // Left fills the whole bar (background + left text); the right cluster
         // overwrites the right portion.
         frame.render_widget(
@@ -24754,20 +25285,20 @@ impl App {
             } else if self.status_diag_rect.right() > rx {
                 self.status_diag_rect.width = rx - self.status_diag_rect.x;
             }
-            // Build the spans now that x positions are known: segment fg one
-            // shade up from the transient's dim gray, │ dividers between, and
-            // a hover fill on the clickable segments (indices 1..=5) when the
-            // pointer rests on them — same affordance as the activity bar.
+            // Build the spans now that x positions are known. The settings
+            // (indentation, encoding, line endings) are muted; the position
+            // reads its numbers in the text tone over dim labels; the
+            // language sits in a pill. A clickable segment takes a fill
+            // under the pointer, the same affordance as the activity bar.
             // Ln/Col (index 0) opens Go to Line, so it hovers like the rest.
             // Hit rects recorded in the same pass.
-            let seg_style = Style::default().fg(match self.theme.surfaces() {
-                Some(s) => s.muted(),
-                None => self.theme.ui(Color::Rgb(0xc9, 0xd2, 0xe3)),
-            });
-            let hover_style = Style::default()
-                .bg(self.theme.ui(Color::Rgb(0x2a, 0x31, 0x40)))
-                .fg(self.theme.ui(Color::White));
-            let mut right: Vec<Span> = Vec::with_capacity(seg_texts.len() * 2 - 1);
+            let seg_style = Style::default().fg(tones.muted);
+            let lift = match self.theme.surfaces() {
+                Some(s) => s.hairline(),
+                None => self.theme.ui(Color::Rgb(0x2a, 0x31, 0x40)),
+            };
+            let hover_style = Style::default().bg(lift).fg(tones.text);
+            let mut right: Vec<Span> = Vec::with_capacity(seg_texts.len() * 4);
             let mut cx = rx;
             for (i, text) in seg_texts.iter().enumerate() {
                 if i > 0 {
@@ -24783,10 +25314,52 @@ impl App {
                 let hovered = self
                     .pointer_cell
                     .is_some_and(|(pc, pr)| rect_contains(r, pc, pr));
-                right.push(Span::styled(
-                    text.clone(),
-                    if hovered { hover_style } else { seg_style },
-                ));
+                if i == 4 {
+                    // The language pill: lit in the selection tint under
+                    // the pointer, so it hovers like the workspace cap reads.
+                    let fill = if hovered {
+                        self.theme.selection()
+                    } else {
+                        lift
+                    };
+                    let label = self.editor.language_label();
+                    right.push(Span::styled(PILL_CAP_L, Style::default().fg(fill)));
+                    right.push(Span::styled(
+                        language_icon.glyph.to_string(),
+                        Style::default().fg(language_icon.color).bg(fill),
+                    ));
+                    right.push(Span::styled(
+                        format!(" {label}"),
+                        Style::default().fg(tones.text).bg(fill),
+                    ));
+                    right.push(Span::styled(PILL_CAP_R, Style::default().fg(fill)));
+                } else if i == 0 && !hovered {
+                    // Numbers in the text tone, the words around them dim.
+                    let mut run = String::new();
+                    let mut run_digit = false;
+                    for c in text.chars() {
+                        let d = c.is_ascii_digit();
+                        if d != run_digit && !run.is_empty() {
+                            right.push(Span::styled(
+                                std::mem::take(&mut run),
+                                Style::default().fg(if run_digit { tones.text } else { tones.dim }),
+                            ));
+                        }
+                        run_digit = d;
+                        run.push(c);
+                    }
+                    if !run.is_empty() {
+                        right.push(Span::styled(
+                            run,
+                            Style::default().fg(if run_digit { tones.text } else { tones.dim }),
+                        ));
+                    }
+                } else {
+                    right.push(Span::styled(
+                        text.clone(),
+                        if hovered { hover_style } else { seg_style },
+                    ));
+                }
                 match i {
                     0 => self.status_position_rect = r,
                     1 => self.status_indent_rect = r,
@@ -27100,9 +27673,15 @@ impl App {
                 self.toggle_zen_mode();
                 true
             }
-            // Cmd+K V: Live Run, "values" for the active Python file.
+            // Cmd+K V: Live Run, "values" for the active Python file. On a
+            // Markdown tab it is VS Code's Open Preview to the Side (#1605);
+            // Live Run runs only Python, so no tab wants both.
             KeyCode::Char(c) if plain && c.eq_ignore_ascii_case(&'v') => {
-                self.toggle_live_run();
+                if self.editor.language() == Some(crate::highlight::LangKind::Markdown) {
+                    self.open_markdown_preview_to_side();
+                } else {
+                    self.toggle_live_run();
+                }
                 true
             }
             // Cmd+K Cmd+F (SUPER/CTRL held on the second key): Format
@@ -27188,6 +27767,20 @@ impl App {
             // chord, so the Cmd+K leader hosts this the way it hosts Zen (Cmd+K Z).
             KeyCode::Char(c) if plain && c.eq_ignore_ascii_case(&'b') => {
                 self.open_testing_view();
+                true
+            }
+            // Cmd+K Cmd+I in the editor (Ctrl+K Ctrl+I off macOS): Show or
+            // Focus Hover at the caret, VS Code's chord (#1518). Needs the
+            // trailing Cmd, so plain Cmd+K I below stays broadcast input,
+            // and outside the editor the chord broadcasts as before.
+            KeyCode::Char(c)
+                if plain
+                    && cmd_held
+                    && !shifted
+                    && c.eq_ignore_ascii_case(&'i')
+                    && self.focus == Pane::Editor =>
+            {
+                self.run_command(crate::widgets::command_palette::Command::ShowHover);
                 true
             }
             // Cmd+K Shift+I: toggle whether the active pane receives
@@ -27326,6 +27919,7 @@ impl App {
         }
         let capture =
             self.macro_recording.is_some() && !self.macro_replaying && self.focus == Pane::Editor;
+        let palette_before = self.command_palette.is_some();
         // Esc Esc leaves Zen Mode (#1585), counting only Escapes in the
         // editor that closed or cleared nothing: one that dismisses a popup
         // or a selection is that, not half of the pair.
@@ -27336,6 +27930,8 @@ impl App {
             && key.kind == KeyEventKind::Press;
         let before = zen_esc.then(|| self.esc_fingerprint());
         let result = self.recording_file_switches(|app| app.handle_key_inner(key));
+        // A line Enter only indented is cleared once the caret leaves it.
+        self.trim_auto_indents();
         if leader_armed {
             let chord = self.screencast.take_chord_step();
             self.screencast
@@ -27354,7 +27950,9 @@ impl App {
         // is dropped, producing a macro that replays a focus change and then
         // silently loses its payload.
         if capture && self.macro_recording.is_some() {
-            if self.focus == Pane::Editor {
+            if palette_before || self.command_palette.is_some() {
+                self.hold_palette_macro_key(key, palette_before);
+            } else if self.focus == Pane::Editor {
                 self.record_macro_key(key);
             } else {
                 // The issue asks for skipped keys to be logged rather than
@@ -29966,7 +30564,7 @@ impl App {
                     breakpoints,
                 ) {
                     Ok(session) => {
-                        self.debug_sessions.replace_with(name.clone(), session);
+                        self.adopt_debug_session(name.clone(), session, LaunchSlot::Replace);
                         self.run_debug.feedback = Some(format!("Debugging test {name}{using}"));
                         self.run_debug.feedback_is_error = false;
                         let lead = with_python_note(
@@ -30177,7 +30775,7 @@ impl App {
             breakpoints,
         ) {
             Ok(session) => {
-                self.debug_sessions.replace_with(name, session);
+                self.adopt_debug_session(name, session, LaunchSlot::Replace);
                 self.run_debug.feedback = Some(format!("Debugging test {name} (lldb)"));
                 self.run_debug.feedback_is_error = false;
                 self.status = self.with_failure_note(format!(
@@ -35633,7 +36231,7 @@ impl App {
         }
         let runner: &str = match ext.as_str() {
             "js" | "mjs" | "cjs" => "node",
-            "ts" | "tsx" => "tsx",
+            "ts" | "tsx" | "mts" | "cts" => "tsx",
             "rb" => "ruby",
             "lua" => "lua",
             "php" => "php",
@@ -38074,13 +38672,8 @@ impl App {
             }
         };
         match result {
-            Ok(mut session) => {
-                // Held until `initialized`, then pushed with the rest (#611).
-                session.set_function_breakpoints(self.function_breakpoints.clone());
-                match slot {
-                    LaunchSlot::Replace => self.debug_sessions.replace_with(&name, session),
-                    LaunchSlot::Add => self.debug_sessions.push(&name, session),
-                }
+            Ok(session) => {
+                self.adopt_debug_session(&name, session, slot);
                 let verb = match rc.request {
                     RequestKind::Launch => "Debugging",
                     RequestKind::Attach => "Attached:",
@@ -38206,7 +38799,7 @@ impl App {
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_default();
-                self.debug_sessions.replace_with(name.clone(), session);
+                self.adopt_debug_session(name.clone(), session, LaunchSlot::Replace);
                 self.run_debug.feedback = Some(format!("Debugging {name}"));
                 self.run_debug.feedback_is_error = false;
                 let lead = with_python_note(format!("Debugging {name}"), note.as_deref());
@@ -38246,7 +38839,7 @@ impl App {
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_default();
-                self.debug_sessions.replace_with(name.clone(), session);
+                self.adopt_debug_session(name.clone(), session, LaunchSlot::Replace);
                 self.run_debug.feedback = Some(format!("Debugging {name}"));
                 self.run_debug.feedback_is_error = false;
                 self.status =
@@ -38299,7 +38892,7 @@ impl App {
         );
         match crate::dap::session::DapSession::launch_delve(&dlv, &dir, request, breakpoints) {
             Ok(session) => {
-                self.debug_sessions.replace_with(name.to_string(), session);
+                self.adopt_debug_session(name.to_string(), session, LaunchSlot::Replace);
                 self.run_debug.feedback = Some(format!("Debugging test {name}"));
                 self.run_debug.feedback_is_error = false;
                 self.status = self.with_failure_note(format!(
@@ -38349,7 +38942,7 @@ impl App {
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_default();
-                self.debug_sessions.replace_with(name.clone(), session);
+                self.adopt_debug_session(name.clone(), session, LaunchSlot::Replace);
                 self.run_debug.feedback = Some(format!("Debugging {name}"));
                 self.run_debug.feedback_is_error = false;
                 self.status =
@@ -38503,7 +39096,7 @@ impl App {
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_default();
-                self.debug_sessions.replace_with(name.clone(), session);
+                self.adopt_debug_session(name.clone(), session, LaunchSlot::Replace);
                 self.run_debug.feedback = Some(format!("Debugging {name} (lldb)"));
                 self.run_debug.feedback_is_error = false;
                 self.status =
@@ -38760,6 +39353,24 @@ impl App {
         }
         if refused && !names.is_empty() {
             self.status = String::from("This debugger does not support function breakpoints");
+        }
+    }
+
+    /// Install a freshly launched debug session, replacing the running ones
+    /// or, for a compound member, beside them. Every launch path comes
+    /// through here so the stored function breakpoints go with each new
+    /// session (held until `initialized`, then pushed with the rest): set one
+    /// and press F5 with no launch.json, and the program still pauses (#939).
+    fn adopt_debug_session(
+        &mut self,
+        name: impl Into<String>,
+        mut session: crate::dap::session::DapSession,
+        slot: LaunchSlot,
+    ) {
+        session.set_function_breakpoints(self.function_breakpoints.clone());
+        match slot {
+            LaunchSlot::Replace => self.debug_sessions.replace_with(name, session),
+            LaunchSlot::Add => self.debug_sessions.push(name, session),
         }
     }
 
@@ -41089,7 +41700,21 @@ impl App {
                 match value.trim().parse::<usize>() {
                     Ok(n) if n > 0 => {
                         // The typed line is 1-based (what the status bar shows);
-                        // goto_line_centered takes a 0-based row index.
+                        // goto_line_centered takes a 0-based row index. A
+                        // selection left behind would be replaced by the next
+                        // keystroke off screen, so it goes, as Ctrl+G's does.
+                        // Like Quick Open's `:line`, the jump is a Go Back
+                        // stop, and the editor takes the keys even when the
+                        // terminal had them when the status bar was clicked.
+                        if let Some(from) = self.editor.path.clone() {
+                            self.nav.record(NavLoc {
+                                path: from,
+                                row: self.editor.cursor_row,
+                                col: self.editor.cursor_col,
+                            });
+                        }
+                        self.focus_pane(Pane::Editor);
+                        self.editor.clear_selection();
                         self.editor.goto_line_centered(n - 1);
                         self.status = format!("Line {n}");
                     }
@@ -44051,15 +44676,12 @@ impl App {
                 }
             }
             ListPurpose::Bookmark => {
-                if let Some((line, path)) = row.id.split_once('\t')
-                    && let Ok(line) = line.parse::<usize>()
-                {
-                    let path = PathBuf::from(path);
-                    match self.open_at(&path, line.saturating_sub(1), 0) {
-                        Ok(()) => self.status = format!("Bookmark at line {line}"),
-                        Err(e) => self.status = format!("Cannot open bookmark: {e}"),
-                    }
+                // The row's own path, not one parsed back from text: a
+                // file name that is not UTF-8 would not survive the trip.
+                if let Some(target) = self.pending_bookmarks.get(index).cloned() {
+                    self.jump_to_bookmark(target);
                 }
+                self.pending_bookmarks.clear();
             }
             ListPurpose::OutputChannel => {
                 self.output.sync();
@@ -48173,7 +48795,11 @@ impl App {
                 crate::install_session::InstallEvent::CanLaunch => can_launch = true,
                 crate::install_session::InstallEvent::FallbackPrompt { reason } => {
                     if let Some(dialog) = self.connect_dialog.as_mut() {
-                        dialog.set_fallback_prompt(&reason);
+                        // What a yes installs, shown before the answer (#950).
+                        dialog.set_fallback_prompt(
+                            &reason,
+                            &crate::remote::REMOTE_COMPILE_SIDE_EFFECTS,
+                        );
                     } else if let Some(session) = self.install_session.as_ref() {
                         // No dialog to ask through: decline so the installer
                         // errors out with the `croft setup-cross` guidance
@@ -49005,31 +49631,130 @@ impl App {
             sidebar_width: self.sidebar_width,
             terminal_height: self.terminal_height,
             focus_editor: self.focus == Pane::Editor,
-            bookmarks: self.all_bookmarks(),
+            // A path that is not UTF-8 cannot be a JSON key, and one such
+            // mark would fail the whole save.
+            bookmarks: self
+                .all_bookmarks()
+                .into_iter()
+                .filter(|(path, _)| path.to_str().is_some())
+                .collect(),
+            // Filled by the clean-exit save, the one a later launch may
+            // find the files changed since.
+            bookmark_text: std::collections::HashMap::new(),
         }
     }
 
-    /// The bookmarks of every open tab, keyed by file. Each tab is an editor
-    /// with its own marks, so the active one's map alone would miss the rest.
+    /// Every tab of every editor group: the focused tab first, then the
+    /// focused group's tabs and the other groups' in order. The order in
+    /// which a tab's copy of a file's marks counts.
+    fn editors_in_bookmark_order(&self) -> impl Iterator<Item = &Editor> + '_ {
+        std::iter::once(&*self.editor).chain(
+            std::iter::once(&self.editor)
+                .chain(self.editor_layout.inactive_groups())
+                .flat_map(|g| g.editors.iter()),
+        )
+    }
+
+    /// The tab whose copy of `path`'s marks counts: the first, in
+    /// [`Self::editors_in_bookmark_order`], that shows the file and holds
+    /// marks for it, since those follow its text; else the first that
+    /// still holds marks from showing it earlier.
+    fn bookmark_source(&self, path: &Path) -> Option<&Editor> {
+        self.editors_in_bookmark_order()
+            .find(|e| e.path.as_deref() == Some(path) && e.bookmarks.contains_key(path))
+            .or_else(|| {
+                self.editors_in_bookmark_order()
+                    .find(|e| e.bookmarks.contains_key(path))
+            })
+    }
+
+    /// The bookmarks of every tab of every editor group, keyed by file, one
+    /// set per file: each file's from [`Self::bookmark_source`]. The tabs of
+    /// a file hold the same marks (see [`Self::share_bookmarks`]), each on
+    /// its own text, so the set is never a union of their copies, which
+    /// would bring back a mark a tab cleared. A file whose tabs all closed
+    /// adds the marks they left.
     fn all_bookmarks(
         &self,
     ) -> std::collections::HashMap<PathBuf, std::collections::BTreeSet<usize>> {
         let mut all = std::collections::HashMap::new();
-        // A tab's own file first: its marks are the live ones.
-        for ed in &self.editor.editors {
-            if let Some(path) = &ed.path
-                && let Some(set) = ed.bookmarks.get(path)
-            {
-                all.insert(path.clone(), set.clone());
+        for ed in self.editors_in_bookmark_order() {
+            for path in ed.bookmarks.keys() {
+                if !all.contains_key(path)
+                    && let Some(source) = self.bookmark_source(path)
+                {
+                    all.insert(path.clone(), source.bookmarks[path].clone());
+                }
             }
         }
-        // Then files the tab showed earlier, whose marks it still holds.
-        for ed in &self.editor.editors {
-            for (path, set) in &ed.bookmarks {
-                all.entry(path.clone()).or_insert_with(|| set.clone());
-            }
+        for (path, set) in &self.closed_bookmarks {
+            all.entry(path.clone()).or_insert_with(|| set.clone());
         }
         all
+    }
+
+    /// Keep the marks the tabs closed since the last call left, for each
+    /// file no open tab holds marks for, and hand a file's kept marks back
+    /// to the tabs that show it again. Run every tick, before anything
+    /// reads the marks. Returns whether a tab took marks back.
+    pub(crate) fn settle_bookmarks(&mut self) -> bool {
+        let mut released = self.editor.take_released_bookmarks();
+        for group in self.editor_layout.inactive_groups_mut() {
+            released.extend(group.take_released_bookmarks());
+        }
+        for marks in released {
+            for (path, set) in marks {
+                if !self
+                    .editors_in_bookmark_order()
+                    .any(|e| e.bookmarks.contains_key(&path))
+                {
+                    self.closed_bookmarks.insert(path, set);
+                }
+            }
+        }
+        if self.closed_bookmarks.is_empty() {
+            return false;
+        }
+        let mut taken = Vec::new();
+        let groups =
+            std::iter::once(&mut self.editor).chain(self.editor_layout.inactive_groups_mut());
+        for group in groups {
+            // A diff, image or sheet tab's rows are not the file's lines.
+            for ed in group.editors.iter_mut().filter(|e| !e.has_non_text_view()) {
+                if let Some(path) = ed.path.clone()
+                    && !ed.bookmarks.contains_key(&path)
+                    && let Some(set) = self.closed_bookmarks.get(&path)
+                {
+                    ed.adopt_bookmarks(&path, Some(set));
+                    taken.push(path);
+                }
+            }
+        }
+        for path in &taken {
+            self.closed_bookmarks.remove(path);
+        }
+        !taken.is_empty()
+    }
+
+    /// Hand saved bookmarks to every tab of every group, each taking its
+    /// file's set trimmed to the lines the file still has.
+    fn restore_bookmarks_everywhere(
+        &mut self,
+        marks: &std::collections::HashMap<PathBuf, std::collections::BTreeSet<usize>>,
+    ) {
+        if marks.is_empty() {
+            return;
+        }
+        self.closed_bookmarks
+            .retain(|path, _| !marks.contains_key(path));
+        for ed in self.editor.editors.iter_mut() {
+            ed.restore_bookmarks(marks);
+        }
+        for group in self.editor_layout.inactive_groups_mut() {
+            for ed in group.editors.iter_mut() {
+                ed.restore_bookmarks(marks);
+            }
+        }
     }
 
     /// Returns the xlsx cells (#1593) it could not put back, as the tabs
@@ -49055,9 +49780,7 @@ impl App {
         }
         // Every tab is its own editor with its own marks: hand each the saved
         // set once its file is open, trimmed to the lines the file still has.
-        for ed in self.editor.editors.iter_mut() {
-            ed.restore_bookmarks(&state.bookmarks);
-        }
+        self.restore_bookmarks_everywhere(&state.bookmarks);
         if state.active_tab < self.editor.tab_count() {
             self.editor.select(state.active_tab);
         }
@@ -49076,6 +49799,146 @@ impl App {
             Pane::Tree
         };
         left
+    }
+
+    /// This workspace's session file, saved at each clean exit.
+    fn saved_session_path(&self) -> Option<PathBuf> {
+        let dir = self.session_dir.as_deref()?;
+        Some(crate::session_state::saved_path(dir, self.workspace_root()))
+    }
+
+    /// Save the session for the next launch of this workspace (a clean
+    /// exit): its tabs, layout and bookmarks, without unsaved text.
+    fn save_session_for_next_launch(&mut self) -> Result<()> {
+        let Some(file) = self.saved_session_path() else {
+            return Ok(());
+        };
+        // A tab closed since the last tick still holds the only copy of
+        // its file's marks.
+        self.settle_bookmarks();
+        let mut state = self
+            .capture_session_state_with(false)
+            .without_unsaved_text();
+        // A clean exit throws unsaved edits away (the prompt asked first),
+        // and the next launch opens the file as it is on disk: a mark that
+        // moved with those edits goes back to its line there. Each mark on
+        // an open file also keeps what its line reads there, for a launch
+        // that finds the file changed since (see
+        // `SessionState::relocate_bookmarks_on_disk`).
+        for (path, set) in state.bookmarks.iter_mut() {
+            let Some(source) = self
+                .bookmark_source(path)
+                .filter(|s| s.path.as_deref() == Some(path.as_path()))
+            else {
+                continue;
+            };
+            let disk;
+            let lines: &[String] = if source.dirty {
+                let Ok(bytes) = std::fs::read(path) else {
+                    continue;
+                };
+                // Decoded as the tab decoded it, or a UTF-16 file matches no
+                // line of its buffer.
+                let (text, _, _) = source.encoding.decode(&bytes);
+                disk = crate::widgets::editor::split_into_lines(&text);
+                *set = crate::widgets::editor::carry_marks(set, &source.lines, &disk);
+                &disk
+            } else {
+                &source.lines
+            };
+            let text = set
+                .iter()
+                .filter_map(|&line| Some((line, lines.get(line.checked_sub(1)?)?.clone())))
+                .collect();
+            state.bookmark_text.insert(path.clone(), text);
+        }
+        state.bookmarks.retain(|_, set| !set.is_empty());
+        state
+            .bookmark_text
+            .retain(|path, _| state.bookmarks.contains_key(path));
+        state.save(&file)
+    }
+
+    /// Read the session the last clean exit saved on a thread of its own,
+    /// once the first frame is up, for [`Self::poll_saved_session`] to
+    /// apply. `tabs` false brings back only its bookmarks (hot exit
+    /// restored the tabs). A file saved for another workspace is ignored,
+    /// and so is a missing one: the first launch has none. The file stays,
+    /// so a crash before the next clean exit still has it.
+    fn read_saved_session(&mut self, tabs: bool) {
+        let Some(path) = self.saved_session_path() else {
+            return;
+        };
+        let root = self.workspace_root().to_path_buf();
+        let (tx, rx) = std::sync::mpsc::channel();
+        crate::startup_gate::spawn_after_first_frame(move || {
+            if let Ok(mut state) = crate::session_state::SessionState::load(&path)
+                && state.is_of(&root)
+            {
+                state.relocate_bookmarks_on_disk();
+                let _ = tx.send(state);
+            }
+        });
+        self.saved_session = Some((rx, tabs));
+    }
+
+    /// Apply the saved session once it is read (see
+    /// [`Self::read_saved_session`]). Its tabs come back only into an
+    /// editor still showing its blank first tab: a file the launch opened,
+    /// or one the user opened first, is not covered over. Returns whether
+    /// anything changed, for a redraw.
+    fn poll_saved_session(&mut self) -> bool {
+        let Some((rx, tabs)) = self.saved_session.as_ref() else {
+            return false;
+        };
+        let state = match rx.try_recv() {
+            Ok(state) => state,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return false,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.saved_session = None;
+                return false;
+            }
+        };
+        let tabs = *tabs;
+        self.saved_session = None;
+        if tabs && self.editor.is_blank_initial() && !state.tabs.is_empty() {
+            // No unsaved text, so nothing is left over to keep.
+            let _ = self.apply_session_state(&state);
+            self.sync_open_file_poll_mtime();
+        } else {
+            self.restore_bookmarks_everywhere(&state.bookmarks);
+            self.carry_saved_marks_onto_unsaved_tabs(&state.bookmarks);
+        }
+        true
+    }
+
+    /// The saved marks sit on each file's lines on disk (a clean exit saves
+    /// them there), but a tab hot exit brought back holds unsaved edits:
+    /// carry its file's marks from the file on disk onto its own lines.
+    fn carry_saved_marks_onto_unsaved_tabs(
+        &mut self,
+        marks: &std::collections::HashMap<PathBuf, std::collections::BTreeSet<usize>>,
+    ) {
+        let in_splits = self
+            .editor_layout
+            .inactive_groups_mut()
+            .into_iter()
+            .flat_map(|g| g.editors.iter_mut());
+        for ed in self.editor.editors.iter_mut().chain(in_splits) {
+            let Some(path) = ed.path.clone().filter(|_| ed.dirty) else {
+                continue;
+            };
+            let Some(set) = marks.get(&path) else {
+                continue;
+            };
+            let Ok(bytes) = std::fs::read(&path) else {
+                continue;
+            };
+            let (text, _, _) = ed.encoding.decode(&bytes);
+            let disk = crate::widgets::editor::split_into_lines(&text);
+            let carried = crate::widgets::editor::carry_marks(set, &disk, &ed.lines);
+            ed.adopt_bookmarks(&path, Some(&carried));
+        }
     }
 
     /// Keep the xlsx cells an update relaunch could not put back (#1593)
@@ -49265,6 +50128,17 @@ impl App {
         let proceed = matches!(payload.trim().to_ascii_lowercase().as_str(), "y" | "yes");
         if proceed {
             if let Some(dialog) = self.connect_dialog.as_mut() {
+                // What a yes installs must have been on screen (#950): a
+                // window too short to show it all keeps the question open.
+                if !dialog.notes.is_empty() && !dialog.notes_shown {
+                    dialog.error = Some(String::from(
+                        "Make the window taller to read what a remote compile installs, then answer",
+                    ));
+                    // Emptied, so the y typed again once it fits is a yes,
+                    // not "yy".
+                    dialog.clear_input();
+                    return;
+                }
                 dialog.set_installing();
             }
             if let Some(session) = self.install_session.as_ref() {
@@ -49628,11 +50502,76 @@ impl App {
         if !self.editor_is_text() {
             return;
         }
+        // Start from the marks the file's other tabs hold, or toggling here
+        // would hand every tab this tab's set alone.
+        self.adopt_shared_bookmarks();
         self.status = match self.editor.toggle_bookmark_at(line) {
             Some(true) => format!("Bookmark set on line {line}"),
             Some(false) => format!("Bookmark cleared on line {line}"),
             None => String::from("Save the file before bookmarking a line"),
         };
+        if let Some(path) = self.editor.path.clone() {
+            self.share_bookmarks(&path);
+        }
+    }
+
+    /// Give the focused tab its file's marks from another tab, in any
+    /// group, when it holds none of its own: a tab opened on a file after
+    /// its marks were set starts without them.
+    fn adopt_shared_bookmarks(&mut self) {
+        // The marks a file's last tab left when it closed come back first.
+        self.settle_bookmarks();
+        let Some(path) = self.editor.path.clone() else {
+            return;
+        };
+        if self.editor.bookmarks.contains_key(&path) {
+            return;
+        }
+        let Some(source) = self.bookmark_source(&path) else {
+            return;
+        };
+        let set = &source.bookmarks[&path];
+        // A tab showing the file may hold unsaved edits this one lacks:
+        // each mark goes to the line it is on here.
+        let marks = if source.path.as_deref() == Some(path.as_path()) {
+            crate::widgets::editor::carry_marks(set, &source.lines, &self.editor.lines)
+        } else {
+            set.clone()
+        };
+        self.editor.adopt_bookmarks(&path, Some(&marks));
+    }
+
+    /// Hand `path`'s marks, as the focused tab now holds them, to every
+    /// other tab of every group that shows the file or still holds marks
+    /// for it, so a file has one set of marks: one set or cleared in a tab
+    /// is set or cleared in all of them.
+    fn share_bookmarks(&mut self, path: &Path) {
+        // The focused tab's set is the file's now; marks a closed tab left
+        // would bring back one it cleared.
+        self.closed_bookmarks.remove(path);
+        let active = self.editor.active_index();
+        let (before, rest) = self.editor.editors.split_at_mut(active);
+        let Some((source, after)) = rest.split_first_mut() else {
+            return;
+        };
+        let source: &Editor = source;
+        let marks = source.bookmarks.get(path);
+        let in_splits = self
+            .editor_layout
+            .inactive_groups_mut()
+            .into_iter()
+            .flat_map(|g| g.editors.iter_mut());
+        for ed in before.iter_mut().chain(after.iter_mut()).chain(in_splits) {
+            if ed.path.as_deref() == Some(path) {
+                // Another copy of the file, whose unsaved edits may differ
+                // from this one's: each mark goes to the line it is on there.
+                let carried =
+                    marks.map(|m| crate::widgets::editor::carry_marks(m, &source.lines, &ed.lines));
+                ed.adopt_bookmarks(path, carried.as_ref());
+            } else if ed.bookmarks.contains_key(path) {
+                ed.adopt_bookmarks(path, marks);
+            }
+        }
     }
 
     /// Jump to the next (`forward`) or previous bookmark in the open file,
@@ -49660,45 +50599,102 @@ impl App {
     }
 
     /// Bookmarks: View Bookmarks: a filterable list of every bookmark in
-    /// the open tabs (`file:line  text of the line`), Enter jumps to it.
+    /// the open tabs of every editor group (`file:line  text of the line`),
+    /// Enter jumps to it. Only the file a tab shows counts: the marks a tab
+    /// still holds for a file it showed earlier are not of an open file.
     fn open_bookmark_picker(&mut self) {
         use crate::widgets::list_picker::{ListPicker, ListPurpose, ListRow};
         let root = self.tree.root.clone();
-        let all = self.all_bookmarks();
-        let mut paths: Vec<&PathBuf> = all.keys().collect();
-        paths.sort();
-        let mut rows = Vec::new();
-        for path in paths {
-            let open = self
-                .editor
-                .editors
-                .iter()
-                .find(|e| e.path.as_ref() == Some(path));
-            let on_disk: Vec<String>;
-            let lines: &[String] = match open {
-                Some(e) => &e.lines,
-                None => {
-                    on_disk = std::fs::read_to_string(path)
-                        .map(|t| t.lines().map(str::to_string).collect())
-                        .unwrap_or_default();
-                    &on_disk
+        // The focused group first, so a mark it shares with another group
+        // jumps to the tab already in front of the user.
+        let active = self.editor_layout.active_dfs_index();
+        let groups = std::iter::once((active, &self.editor)).chain(
+            (0..self.editor_layout.leaf_count())
+                .filter_map(|g| Some((g, self.editor_layout.group_ref_at_dfs(g)?))),
+        );
+        // Two tabs on one file (a split, a symbol tab) list a shared mark once.
+        let mut seen = std::collections::HashSet::new();
+        let mut found: Vec<(BookmarkTarget, String)> = Vec::new();
+        for (group, tabs) in groups {
+            // A diff, image or sheet tab's rows are not the file's lines.
+            for (tab, ed) in tabs.editors.iter().enumerate() {
+                let Some(path) = ed.path.as_ref().filter(|_| !ed.has_non_text_view()) else {
+                    continue;
+                };
+                // Only lines the buffer has (see `bookmarked_lines`), and on
+                // a symbol tab only the lines of its symbol, the ones it shows.
+                for line in ed.bookmarked_lines() {
+                    if bookmark_line_shown(ed, line) && seen.insert((path.clone(), line)) {
+                        let text = ed.lines[line - 1].trim().chars().take(80).collect();
+                        let path = path.clone();
+                        found.push((
+                            BookmarkTarget {
+                                group,
+                                tab,
+                                path,
+                                line,
+                            },
+                            text,
+                        ));
+                    }
                 }
-            };
-            let shown = path.strip_prefix(&root).unwrap_or(path).display();
-            // A mark past the last line is no target (see `bookmarked_lines`).
-            for &line in all[path]
-                .iter()
-                .filter(|&&l| (1..=lines.len()).contains(&l))
-            {
-                let text: String = lines[line - 1].trim().chars().take(80).collect();
-                rows.push(ListRow {
-                    id: format!("{line}\t{}", path.display()),
-                    label: format!("{shown}:{line}  {text}"),
-                });
             }
+        }
+        found.sort_by(|(a, _), (b, _)| (&a.path, a.line).cmp(&(&b.path, b.line)));
+        self.pending_bookmarks.clear();
+        let mut rows = Vec::with_capacity(found.len());
+        for (target, text) in found {
+            let shown = target.path.strip_prefix(&root).unwrap_or(&target.path);
+            rows.push(ListRow {
+                id: self.pending_bookmarks.len().to_string(),
+                label: format!("{}:{}  {text}", shown.display(), target.line),
+            });
+            self.pending_bookmarks.push(target);
         }
         let picker = ListPicker::new(ListPurpose::Bookmark, "Bookmarks", rows);
         self.open_list_picker(picker, "No bookmarks (Cmd+Opt+Shift+K sets one)");
+    }
+
+    /// Enter on a View Bookmarks row: focus the editor group and the tab
+    /// that hold the mark, and put the caret on its line there, with no
+    /// selection left over for the next keystroke to type over. A tab that
+    /// closed or moved on since the list opened leaves the file to open in
+    /// that group as any jump would.
+    fn jump_to_bookmark(&mut self, target: BookmarkTarget) {
+        let BookmarkTarget {
+            group,
+            tab,
+            path,
+            line,
+        } = target;
+        if group != self.editor_layout.active_dfs_index()
+            && self.editor_layout.group_ref_at_dfs(group).is_some()
+        {
+            let current = std::mem::take(&mut self.editor);
+            self.editor = self.editor_layout.refocus_to_dfs(current, group);
+        }
+        self.hover_popup = None;
+        self.hover_diagnostic = None;
+        let same_tab = self.editor.editors.get(tab).is_some_and(|ed| {
+            ed.path.as_deref() == Some(path.as_path())
+                && !ed.has_non_text_view()
+                && bookmark_line_shown(ed, line)
+        });
+        if same_tab {
+            self.editor.select(tab);
+        } else if let Err(e) = self.editor.open_preview(&path) {
+            self.status = format!("Cannot open bookmark: {e}");
+            return;
+        } else {
+            // A tab opened here for a file another tab still shows gets
+            // that file's marks too.
+            self.adopt_shared_bookmarks();
+        }
+        self.sync_open_file_poll_mtime();
+        self.editor.jump_to_bookmark(line);
+        self.focus_pane(Pane::Editor);
+        self.poke_cursor();
+        self.status = format!("Bookmark at line {line}");
     }
 
     /// Clear every bookmark in the open file, reporting how many went.
@@ -49710,6 +50706,11 @@ impl App {
             return;
         }
         let gone = self.editor.clear_bookmarks();
+        // From every tab of the file, or a copy left in another would bring
+        // the marks back with the next session.
+        if let Some(path) = self.editor.path.clone() {
+            self.share_bookmarks(&path);
+        }
         self.status = if gone == 0 {
             String::from("No bookmarks in this file")
         } else if gone == 1 {
@@ -49809,6 +50810,59 @@ impl App {
         } else {
             self.status = String::from("Markdown Preview needs a Markdown file");
         }
+    }
+
+    /// Markdown: Open Preview to the Side (#1605, VS Code's
+    /// `markdown.showPreviewToSide`): the active Markdown file rendered in
+    /// the next editor group, or in a new group to the right when there is
+    /// none, showing what is typed here as it is typed
+    /// ([`App::sync_markdown_side_previews`]). Focus stays on the source,
+    /// which a tab showing the preview turns back into.
+    fn open_markdown_preview_to_side(&mut self) {
+        let Some(path) = self.editor.path.clone() else {
+            self.status = String::from("Open Preview to the Side: save the file first");
+            return;
+        };
+        if self.editor.language() != Some(crate::highlight::LangKind::Markdown)
+            || self.editor.has_non_text_view()
+        {
+            self.status = String::from("Markdown Preview needs a Markdown file");
+            return;
+        }
+        if self.editor.markdown_preview.is_some() {
+            self.editor.toggle_markdown_preview();
+        }
+        let source = self.editor_layout.active_dfs_index();
+        let opened = if source + 1 < self.editor_layout.leaf_count() {
+            let here = std::mem::take(&mut self.editor);
+            self.editor = self.editor_layout.refocus_to_dfs(here, source + 1);
+            self.editor.open_preview(&path)
+        } else {
+            let mut group = EditorTabs::default();
+            let opened = group.open_preview(&path);
+            if opened.is_ok() {
+                group.copy_view_position_from(&self.editor);
+                let here = std::mem::replace(&mut self.editor, group);
+                self.editor_layout
+                    .split_active(here, editor_layout::SplitDir::Horizontal, true);
+            }
+            opened
+        };
+        if opened.is_ok() && self.editor.markdown_preview.is_none() {
+            self.editor.toggle_markdown_preview();
+        }
+        if self.editor_layout.active_dfs_index() != source {
+            let side = std::mem::take(&mut self.editor);
+            self.editor = self.editor_layout.refocus_to_dfs(side, source);
+        }
+        // The side pane comes up at the source's place and with its text.
+        self.md_scroll_synced = None;
+        self.sync_markdown_side_previews();
+        self.focus_pane(Pane::Editor);
+        self.status = match opened {
+            Ok(()) => format!("Previewing {} to the side", self.status_path(&path)),
+            Err(e) => format!("Open Preview to the Side: {e}"),
+        };
     }
 
     fn handle_editor_key(&mut self, key: KeyEvent) {
@@ -50007,6 +51061,10 @@ impl App {
         }
         if is_add_cursors_to_line_ends_key(key) {
             self.add_cursors_to_line_ends();
+            return;
+        }
+        if is_expand_line_selection_key(key) {
+            self.expand_line_selection();
             return;
         }
         if is_delete_line_key(key) {
@@ -50642,8 +51700,7 @@ impl App {
                     && !key.modifiers.contains(KeyModifiers::ALT)
                     && !key.modifiers.contains(KeyModifiers::SUPER) =>
             {
-                self.editor.overwrite = self.overwrite_mode;
-                self.editor.insert_char(c);
+                self.type_char_in_editor(c);
                 // With an incomplete list pending but none of it on screen,
                 // typing on still re-asks (#1529).
                 self.note_incomplete_completion_edit();
@@ -54635,9 +55692,16 @@ impl App {
         // Watch publishes first: a batch replaces the pane's entries
         // wholesale, and marks the pane so the watcher's own eventual
         // FinishedCommand rescan cannot resurrect stale cycles.
+        // A batch has no command line to read `-ftabstop=` from, so its
+        // tabs count at the default stop.
         for (pane, cwd, diags) in watch_installs {
             self.watch_published_panes.insert(pane);
-            build_changed |= self.install_build_diags(pane, cwd.as_deref(), diags);
+            build_changed |= self.install_build_diags(
+                pane,
+                cwd.as_deref(),
+                diags,
+                crate::build_matchers::DEFAULT_TABSTOP,
+            );
         }
         for (pane, cwd, cmd, output) in build_scans {
             // A command that printed nothing (`cd`, `clear`) says nothing
@@ -56155,6 +57219,7 @@ impl App {
                 message: d.message,
                 source,
                 code: d.code,
+                related: Vec::new(),
             },
         ))
     }
@@ -58247,6 +59312,66 @@ impl App {
         }
     }
 
+    /// Hold back a recorded key that opened or went into the Command Palette
+    /// (#952) until the palette closes: it then joins the macro with the rest
+    /// of that palette session, so a palette command replays whole. The
+    /// session that runs Macro: Start/Stop Recording never gets here with
+    /// its Enter, because stopping drops the recording and what it held.
+    /// One the palette was opened for without a key (a click) is dropped:
+    /// replayed without the chord, its query would be typed into the file.
+    /// So is one whose command took focus out of the editor, such as
+    /// Terminal: Focus Terminal: the click that brings it back is not
+    /// recorded, so a replay would type the keys after it into the shell.
+    fn hold_palette_macro_key(&mut self, key: crossterm::event::KeyEvent, palette_before: bool) {
+        let open_now = self.command_palette.is_some();
+        let in_editor = self.focus == Pane::Editor;
+        let Some(rec) = self.macro_recording.as_mut() else {
+            return;
+        };
+        if !palette_before {
+            // The key that opened the palette starts a session that
+            // replays; whatever an earlier one held was never closed by a
+            // key, so it has nothing to replay.
+            rec.palette_keys.clear();
+            rec.palette_keys.push(key);
+        } else if !rec.palette_keys.is_empty() {
+            rec.palette_keys.push(key);
+        } else {
+            crate::output::push(
+                "Macros",
+                crate::output::OutputLevel::Info,
+                &format!("skipped {key:?}: the palette was not opened from the keyboard"),
+            );
+        }
+        if open_now {
+            return;
+        }
+        let held = std::mem::take(&mut rec.palette_keys);
+        if in_editor {
+            for k in held {
+                rec.recorded.push_key(k);
+            }
+        } else if !held.is_empty() {
+            crate::output::push(
+                "Macros",
+                crate::output::OutputLevel::Info,
+                "skipped a palette command that left the editor: recording captures the editor pane only",
+            );
+        }
+    }
+
+    /// Drop what a palette session held for the macro once the palette has
+    /// closed without a key, as a click outside it or on a row does (#952):
+    /// a session that is never closed from the keyboard has nothing that
+    /// replays, and a later session must not pick its keys up.
+    fn drop_unkeyed_palette_macro_keys(&mut self) {
+        if self.command_palette.is_none()
+            && let Some(rec) = self.macro_recording.as_mut()
+        {
+            rec.palette_keys.clear();
+        }
+    }
+
     /// Start recording into `register` (vim `q{a-z}`) or into the unnamed
     /// last-recording slot (the palette command). Starting while already
     /// recording stops instead, so one gesture toggles.
@@ -58258,6 +59383,7 @@ impl App {
         self.macro_recording = Some(crate::macros::Recording {
             register,
             recorded: crate::macros::Macro::default(),
+            palette_keys: Vec::new(),
         });
         // One source of truth: vim's `q` branches on this, and a copy the
         // machine kept for itself drifted whenever the palette was used.
@@ -58504,6 +59630,7 @@ impl App {
             Cmd::AddSelectionToNextMatch => self.start_select_next_occurrence(),
             Cmd::SelectAllOccurrences => self.select_all_occurrences(),
             Cmd::AddCursorsToLineEnds => self.add_cursors_to_line_ends(),
+            Cmd::ExpandLineSelection => self.expand_line_selection(),
             Cmd::JumpToBracket => {
                 if !self.editor.jump_to_matching_bracket() {
                     self.status = String::from("Go to Bracket: no matching bracket");
@@ -58541,6 +59668,7 @@ impl App {
             Cmd::ToggleInlineValues => self.toggle_inline_values(),
             Cmd::ToggleInlayHints => self.toggle_inlay_hints(),
             Cmd::ToggleMarkdownPreview => self.toggle_markdown_preview(),
+            Cmd::OpenMarkdownPreviewToSide => self.open_markdown_preview_to_side(),
             // Cmd+Enter's run from any terminal (#843): the same confirm popup.
             Cmd::RunCodeBlockAtCursor => {
                 if !self.run_fence_at_cursor(true) {
@@ -58662,6 +59790,7 @@ impl App {
             | Cmd::RenameSymbol
             | Cmd::TriggerSuggest
             | Cmd::TriggerParameterHints
+            | Cmd::ShowHover
                 if self.editor.has_non_text_view() =>
             {
                 self.status = format!("{} needs a text file", cmd.title());
@@ -58674,6 +59803,7 @@ impl App {
             Cmd::RenameSymbol => self.start_rename_symbol(),
             Cmd::TriggerSuggest => self.trigger_completion(),
             Cmd::TriggerParameterHints => self.trigger_signature_help(),
+            Cmd::ShowHover => self.show_hover_at_caret(),
             // Position-carrying commands (#259). They read the click the
             // dispatcher set, and do nothing from the keyboard: invoked from
             // the palette there is no click to act on, and guessing the
@@ -58820,6 +59950,12 @@ impl App {
             Cmd::GitCopyPermalink => self.share_link(ShareLink::CopyPermalink),
             Cmd::GitCopyHeadLink => self.share_link(ShareLink::CopyHeadLink),
             Cmd::GitOpenOnRemote => self.share_link(ShareLink::OpenOnRemote),
+            Cmd::GitOpenLineCommit => self.open_commit_for_line(),
+            Cmd::GitCopyLineCommitHash => {
+                if let Some((hash, short)) = self.caret_line_commit() {
+                    self.run_commit_action(CommitAction::CopyHash, &hash, &short);
+                }
+            }
             Cmd::ToggleFold => {
                 let row = self.editor.cursor_row;
                 self.editor.toggle_fold(row);
@@ -59119,6 +60255,10 @@ impl App {
                     // hex, reported honestly). Sticks across FS-sync
                     // reloads; cleared by opening a different file.
                     self.editor.force_text = true;
+                    // A Markdown preview is a view of the buffer that a
+                    // same-path reload keeps (#1605), not a route `open`
+                    // takes, so it is put down here.
+                    self.editor.markdown_preview = None;
                     match self.editor.open(&p) {
                         Ok(()) if self.editor.hex.is_some() => {
                             self.status =
@@ -59164,6 +60304,20 @@ impl App {
                 }
             },
             Cmd::ReopenAsPreview => match self.editor.path.clone() {
+                // Markdown's preview is a toggle on the open tab, not a
+                // routing decision `open` makes (#1363): turn it on, as
+                // Markdown: Toggle Preview does, keeping the caret, undo
+                // history and any unsaved edits.
+                Some(_)
+                    if self.editor.language() == Some(crate::highlight::LangKind::Markdown)
+                        && !self.editor.has_non_text_view() =>
+                {
+                    if self.editor.markdown_preview.is_none() {
+                        self.toggle_markdown_preview();
+                    } else {
+                        self.status = String::from("Markdown Preview");
+                    }
+                }
                 Some(_) if self.editor.dirty => {
                     self.status =
                         String::from("Save or revert the buffer before reopening the preview");
@@ -61610,8 +62764,11 @@ impl App {
     fn editor_find_set_query(&mut self, new_query: String) {
         // A whole-query replacement puts the caret after it; the caret
         // editors below then move it where the edit left it.
+        // Assigned, not `set_caret`: that clamps to the query still in place,
+        // so a longer replacement would leave the caret inside it. Reads
+        // clamp through `caret()` once the new query is in.
         if let Some(s) = self.editor_find.as_mut() {
-            s.set_caret(new_query.chars().count());
+            s.caret = new_query.chars().count();
         }
         let unchanged = self
             .editor_find
@@ -62653,6 +63810,18 @@ impl App {
             );
         }
         self.recording_file_switches(|app| app.handle_mouse_inner(m));
+        self.drop_unkeyed_palette_macro_keys();
+        self.trim_auto_indents();
+    }
+
+    /// Clear the indentation Enter left on a line the caret has since left
+    /// (#956), in every tab of every editor group: a key or click that
+    /// switched tabs or groups has left the line in the one it came from.
+    fn trim_auto_indents(&mut self) {
+        self.editor.trim_auto_indents(true);
+        for group in self.editor_layout.inactive_groups_mut() {
+            group.trim_auto_indents(false);
+        }
     }
 
     fn handle_mouse_inner(&mut self, m: MouseEvent) {
@@ -62692,16 +63861,29 @@ impl App {
         if matches!(m.kind, MouseEventKind::Down(MouseButton::Left))
             && !self.modal_overlay_open()
             && self.context_menu.is_none()
-            && (self
+        {
+            if self
                 .editor_find
                 .as_mut()
                 .is_some_and(|f| f.click_at(m.column, m.row))
-                || self
-                    .terminal_find
-                    .as_mut()
-                    .is_some_and(|f| f.click_at(m.column, m.row)))
-        {
-            return;
+            {
+                // The bar takes the keys only while the editor has focus, so
+                // a click on it from the terminal or the side bar moves focus
+                // there too, or the typing after it would land elsewhere.
+                if self.focus != Pane::Editor {
+                    self.focus_pane(Pane::Editor);
+                }
+                return;
+            }
+            // The terminal find bar closes whenever the terminal loses
+            // focus, so a click on it always comes with focus already there.
+            if self
+                .terminal_find
+                .as_mut()
+                .is_some_and(|f| f.click_at(m.column, m.row))
+            {
+                return;
+            }
         }
         // The wheel over an editor group's tab strip scrolls its tabs.
         if let Some(delta) = match m.kind {
@@ -63002,15 +64184,19 @@ impl App {
                     let over_submenu = self
                         .submenu_rect()
                         .is_some_and(|r| rect_contains(r, m.column, m.row));
-                    let visible = if over_submenu {
-                        self.submenu_rect()
-                            .map(|r| r.height.saturating_sub(2) as usize)
-                            .unwrap_or(0)
-                    } else {
-                        self.menu_rect()
-                            .map(|r| r.height.saturating_sub(2) as usize)
-                            .unwrap_or(0)
-                    };
+                    // Over the parent panel with a submenu open, the wheel
+                    // is the parent's: the submenu closes, as moving the
+                    // parent's highlight off its row does, and the parent
+                    // steps. Otherwise the active level steps.
+                    if !over_submenu
+                        && self
+                            .menu_rect()
+                            .is_some_and(|r| rect_contains(r, m.column, m.row))
+                        && let Some(menu) = self.context_menu.as_mut()
+                    {
+                        menu.close_submenu();
+                    }
+                    let visible = self.menu_visible_rows();
                     if let Some(menu) = self.context_menu.as_mut() {
                         menu.wheel_active(if down { 3 } else { -3 }, visible);
                     }
@@ -64061,6 +65247,7 @@ impl App {
                 // A new press starts a new gesture, even if the release of a
                 // breakpoint-lane press never arrived.
                 self.breakpoint_lane_press = false;
+                self.editor_line_drag = None;
                 if in_secondary_outline {
                     self.click_secondary_outline(m.column, m.row);
                     return;
@@ -64108,6 +65295,11 @@ impl App {
                 if in_editor && let Some(idx) = self.editor.code_lens_at(m.column, m.row) {
                     self.focus_pane(Pane::Editor);
                     self.run_code_lens(idx);
+                    return;
+                }
+                // So is the inline blame (#1556): it opens its commit.
+                if in_editor && self.editor.blame_commit_at(m.column, m.row).is_some() {
+                    self.open_commit_for_line();
                     return;
                 }
                 if in_editor && self.editor.diff.is_none() {
@@ -65320,6 +66512,20 @@ impl App {
                         self.poke_cursor();
                         return;
                     }
+                    // A press on a line number selects that line, and a drag
+                    // down the numbers selects whole lines, as in VS Code
+                    // (#1570). It used to put the caret at column 1. Only
+                    // the number's own columns: a blank chevron cell, the
+                    // spacer and a gutter with no numbers keep that click.
+                    if m.modifiers.is_empty()
+                        && self.editor.line_number_line_at(m.column, m.row).is_some()
+                    {
+                        self.editor_line_drag =
+                            Some(self.editor.select_lines_at(None, m.column, m.row));
+                        self.editor_click.clear();
+                        self.poke_cursor();
+                        return;
+                    }
                     // VS Code Shift+Alt+drag: start a column (box) selection.
                     // Checked before the plain Alt+click caret so the two
                     // modifiers don't both fire.
@@ -65343,9 +66549,18 @@ impl App {
                     let is_double = self
                         .editor_click
                         .is_double(now, m.column, m.row, m.modifiers);
-                    if is_double {
-                        self.editor.select_word_at(m.column, m.row);
+                    if self
+                        .editor_click
+                        .is_triple(now, m.column, m.row, m.modifiers)
+                    {
+                        // A third click selects the whole line (#1570); a
+                        // drag from it extends line by line.
+                        self.editor_line_drag =
+                            Some(self.editor.select_lines_at(None, m.column, m.row));
                         self.editor_click.clear();
+                    } else if is_double {
+                        self.editor.select_word_at(m.column, m.row);
+                        self.editor_click.record_double(now, m.column, m.row);
                     } else {
                         // Anchor a fresh selection at the click; a drag widens it,
                         // a clean click ends up cleared on mouse-up.
@@ -65662,6 +66877,11 @@ impl App {
                         self.poke_cursor();
                         return;
                     }
+                    if let Some(anchor) = self.editor_line_drag {
+                        self.editor.select_lines_at(Some(anchor), m.column, m.row);
+                        self.poke_cursor();
+                        return;
+                    }
                     self.editor.mouse_drag(m.column, m.row);
                     self.poke_cursor();
                 } else if in_tree {
@@ -65719,6 +66939,7 @@ impl App {
             }
             MouseEventKind::Up(MouseButton::Left) => {
                 self.editor_tab_drag_from = None;
+                self.editor_line_drag = None;
                 // The release of a press that was forwarded to a tracking
                 // child goes to the same pane (#474), clamped to its grid
                 // like the drag. `report_mouse` may decline if the child
@@ -67085,7 +68306,7 @@ impl App {
                 let row = self.editor.cursor_row;
                 let diagnostic = self
                     .editor
-                    .diagnostics_at(row, self.editor.cursor_col)
+                    .diagnostics_at(row, self.editor.cursor_col, self.workspace_root())
                     .into_iter()
                     .next()
                     .map(|(_, m)| m);
@@ -68170,6 +69391,56 @@ impl App {
         moved
     }
 
+    /// Open Preview to the Side (#1605): a split's Markdown preview renders
+    /// the text being typed in the source pane beside it. Each pane's tab is
+    /// a buffer of its own, and nobody types into the preview's, so it showed
+    /// the file as last loaded. The panes pair as in
+    /// [`App::sync_markdown_scroll`], the focused pane's tab the preferred
+    /// source; a preview left with no source beside it shows its own buffer
+    /// again. The preview's buffer is never touched, so it stays clean.
+    /// Returns true when a preview was rebuilt.
+    pub fn sync_markdown_side_previews(&mut self) -> bool {
+        let mut tabs: Vec<&mut crate::widgets::editor::Editor> = std::iter::once(&mut self.editor)
+            .chain(self.editor_layout.inactive_groups_mut())
+            .filter_map(|group| {
+                let idx = group.active_index();
+                group.editors.get_mut(idx)
+            })
+            .collect();
+        let mut changed = false;
+        for p in 0..tabs.len() {
+            let follows = match tabs[p].markdown_preview.as_ref() {
+                Some(md) if !md.notebook && md.doc_path.is_none() => md.follows,
+                _ => continue,
+            };
+            let source = (0..tabs.len()).find(|&s| {
+                s != p
+                    && tabs[s].path.is_some()
+                    && tabs[s].path == tabs[p].path
+                    && tabs[s].markdown_preview.is_none()
+                    && !tabs[s].has_non_text_view()
+            });
+            let wanted = source.map(|s| (tabs[s].edit_seq, tabs[s].undo_step_id));
+            let built = tabs[p]
+                .markdown_preview
+                .as_ref()
+                .is_some_and(|md| md.built_seq == tabs[p].edit_seq);
+            // A preview of its own buffer is rebuilt by its render, as ever.
+            if wanted == follows && (built || wanted.is_none()) {
+                continue;
+            }
+            match source {
+                Some(s) => {
+                    let text = tabs[s].lines.join("\n");
+                    tabs[p].rebuild_markdown_preview_from(&text, wanted);
+                }
+                None => tabs[p].rebuild_markdown_preview(),
+            }
+            changed = true;
+        }
+        changed
+    }
+
     /// Arm or disarm Live Run for the active file (Cmd+K V).
     pub(crate) fn toggle_live_run(&mut self) {
         let Some(path) = self.editor.path.clone() else {
@@ -68324,10 +69595,20 @@ impl App {
         );
     }
 
+    /// Type `c` into the active editor in the app's typing mode. The mode is
+    /// copied first: a tab switched to in the same input batch has not had
+    /// its `overwrite` flag synced by the draw yet.
+    fn type_char_in_editor(&mut self, c: char) {
+        self.editor.overwrite = self.overwrite_mode;
+        self.editor.insert_char(c);
+    }
+
     /// Flip Insert/Overwrite typing (the Insert key).
     fn toggle_overwrite_mode(&mut self) {
         self.overwrite_mode = !self.overwrite_mode;
         self.editor.overwrite = self.overwrite_mode;
+        // Text typed before and after the switch undo as separate steps.
+        self.editor.break_undo_coalescing();
         self.status = format!(
             "{} mode",
             if self.overwrite_mode {
@@ -69261,7 +70542,6 @@ impl App {
         self.indent_guides_enabled = !p.disable_indent_guides;
         self.editor.show_indent_guides = self.indent_guides_enabled;
         self.home_walks_rows = p.home_walks_wrapped_rows;
-        self.editor.home_walks_rows = self.home_walks_rows;
         crate::widgets::hover::set_settings(crate::widgets::hover::HoverSettings::from_prefs(
             &p.hover_heading,
             &p.hover_icon,
@@ -69275,14 +70555,17 @@ impl App {
         self.editor.whitespace_mode = self.whitespace_mode;
         self.rulers = crate::widgets::editor::normalize_rulers(&p.rulers);
         // Straight onto every open editor: the focus sync that otherwise
-        // carries it does not run per frame, so a reload would leave open
-        // tabs on the old rulers until an unrelated focus change.
+        // carries them does not run per frame, so a reload would leave open
+        // tabs on the old rulers and Home walk until an unrelated focus
+        // change.
         for ed in self.editor.editors.iter_mut() {
             ed.rulers.clone_from(&self.rulers);
+            ed.home_walks_rows = self.home_walks_rows;
         }
         for group in self.editor_layout.inactive_groups_mut() {
             for ed in group.editors.iter_mut() {
                 ed.rulers.clone_from(&self.rulers);
+                ed.home_walks_rows = self.home_walks_rows;
             }
         }
         self.line_numbers = crate::widgets::editor::LineNumbers::from_pref(&p.line_numbers);
@@ -71006,7 +72289,10 @@ impl App {
             }
             MenuAction::ToggleBookmarkAt { line } => {
                 self.focus_pane(Pane::Editor);
-                // `line` is 1-based, like the bookmark set.
+                // The clicked line (1-based), with the caret, selection and
+                // scroll left alone, as the gutter's own toggle does: moving
+                // the caret there kept the selection, which the next key
+                // then replaced off screen.
                 self.toggle_bookmark_at(line);
             }
             MenuAction::NextBookmark => {
@@ -72473,13 +73759,8 @@ impl App {
     /// freezing the TUI for one render per event. A reversal is deliberate
     /// and always passes.
     fn wheel_pdf_page(&mut self, delta: i32) {
-        const COOLDOWN: std::time::Duration = std::time::Duration::from_millis(150);
         let doc = self.editor.path.clone();
-        if let Some((at, dir, last_doc)) = &self.last_pdf_wheel
-            && *dir == delta.signum()
-            && *last_doc == doc
-            && at.elapsed() < COOLDOWN
-        {
+        if pdf_wheel_cooling(self.last_pdf_wheel.as_ref(), delta, &doc) {
             return;
         }
         let Some(cur) = self.editor.pdf_page() else {
@@ -77975,6 +79256,36 @@ fn one_line(text: String) -> String {
         .join(" ")
 }
 
+/// `text` with each absolute path under `root` written relative to it, for
+/// the status bar: `Saved /home/me/proj/src/main.rs` reads `Saved
+/// src/main.rs`. A path only counts where it starts a word (after the start,
+/// a space, a quote or a bracket), so `root` found inside some other
+/// absolute path is left alone; the root on its own is kept as is.
+fn workspace_relative(text: &str, root: &Path) -> String {
+    let root = root.to_string_lossy();
+    let root = root.trim_end_matches('/');
+    if root.is_empty() {
+        return text.to_string();
+    }
+    let needle = format!("{root}/");
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = rest.find(&needle) {
+        let starts_word = rest[..i]
+            .chars()
+            .next_back()
+            .or_else(|| out.chars().next_back())
+            .is_none_or(|c| c.is_whitespace() || "'\"`([{<".contains(c));
+        out.push_str(&rest[..i]);
+        if !starts_word {
+            out.push_str(&needle);
+        }
+        rest = &rest[i + needle.len()..];
+    }
+    out.push_str(rest);
+    out
+}
+
 /// The excerpt window for a Peek popup: up to `total` lines, at most
 /// `above` of them before `target`, clamped to the file. Returns the start
 /// line index and the excerpt slice (cloned).
@@ -78894,7 +80205,7 @@ fn is_run_fence_key(key: KeyEvent) -> bool {
 /// with the pane's directory on its import path, as before. Should the file
 /// not be written, the heredoc is the fallback.
 ///
-/// A shell block of several lines, or holding a tab or `!`, goes as one
+/// A shell block of several lines, or holding a tab, `!` or `#`, goes as one
 /// single-quoted `printf '%b'` argument instead. Typed line by line, each
 /// line was a command of its own, so the capture under the fence and the
 /// pane's outcome described only the first one to finish (#920); as one
@@ -78902,8 +80213,13 @@ fn is_run_fence_key(key: KeyEvent) -> bool {
 /// status it ends with. Typed into an interactive shell, a tab is
 /// completion and bash expands `!` as history, so what ran was not what
 /// the confirm popup showed. Inside single quotes neither happens, and the
-/// tab travels as `\t`. A backslash travels as `\0134`, since fish folds
-/// `\\` inside single quotes to one backslash where bash and zsh keep both.
+/// tab travels as `\t`. zsh reads a typed `#` as a word, not a comment,
+/// unless `interactive_comments` is set, and it is off by default: `echo
+/// done  # note` printed the note and a comment alone failed with exit 127
+/// (#1367). Text `eval`ed or `source`d is a script, where every shell reads
+/// a comment as one, and a `#` that is not a comment parses as typed. A
+/// backslash travels as `\0134`, since fish folds `\\` inside single
+/// quotes to one backslash where bash and zsh keep both.
 /// `shell` is the pane's shell: fish before 3.4 rejects `$(...)` as
 /// syntax, so a fish pane `source`s the decoded block from a `psub` file
 /// rather than `eval`ing it, which every fish reads alike. Not piped to
@@ -78923,7 +80239,7 @@ fn fence_command(interpreter: &str, code: &str, scripts: &Path, shell: &str) -> 
         }
         return format!("{interpreter} - <<'{end}'\n{code}\n{end}\r");
     }
-    if code.contains(['\n', '\t', '!']) {
+    if code.contains(['\n', '\t', '!', '#']) {
         let escaped = format!("{code}\n")
             .replace('\\', "\\0134")
             .replace('\n', "\\n")
@@ -79378,6 +80694,14 @@ fn is_indentation_to_tabs_key(key: KeyEvent) -> bool {
 /// surfaced as a command).
 fn is_trim_final_newlines_key(key: KeyEvent) -> bool {
     is_cmd_alt_shift_letter(key, 'n')
+}
+
+/// Whether `ed` shows 1-based `line`: every line of an ordinary tab, only
+/// its symbol's lines on a symbol tab (#369), where a caret elsewhere would
+/// be snapped back to the symbol's edge.
+fn bookmark_line_shown(ed: &Editor, line: usize) -> bool {
+    ed.symbol_clip()
+        .is_none_or(|(first, end)| (first..end).contains(&line.saturating_sub(1)))
 }
 
 /// `Cmd+Opt+Shift+K`: toggle a bookmark on the cursor's line (VS Code's
@@ -80017,9 +81341,10 @@ fn mouse_context_for(
 /// A left press reports `DoubleClick` when croft's own click tracker already
 /// considers it one, so a binding agrees with the built-in select-word
 /// behaviour rather than disagreeing about the same physical click. Triple
-/// click is NOT reported: the tracker distinguishes single from double only,
-/// and inventing a third level here would make `triple_click` bindings fire
-/// on the second click. `Gesture::parse` therefore rejects it with a load
+/// click is NOT reported: only the editor's tracker counts a third click,
+/// for its built-in line selection (#1570), and the others distinguish
+/// single from double only, so a `triple_click` binding would fire on the
+/// second click there. `Gesture::parse` therefore rejects it with a load
 /// warning rather than accepting a binding that could never behave.
 fn gesture_for(
     m: &MouseEvent,
@@ -80503,6 +81828,19 @@ fn is_add_cursors_to_line_ends_key(key: KeyEvent) -> bool {
         && !key
             .modifiers
             .intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER)
+}
+
+/// `Cmd+L` (`Ctrl+L` too, as `Cmd+D` takes `Ctrl+D`): Expand Line Selection
+/// (#1570), VS Code's chord. Editor-only, so a focused shell keeps `Ctrl+L`
+/// to clear the screen; Shift belongs to Select All Occurrences.
+fn is_expand_line_selection_key(key: KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Char('l' | 'L'))
+        && key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER)
+        && !key
+            .modifiers
+            .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT)
 }
 
 /// Editor-pane Change All Occurrences: `Cmd+F2` (macOS) or `Ctrl+F2` (Linux),
@@ -81196,17 +82534,10 @@ fn sheet_cell_at(view: &crate::sheet::SheetView, col: u16, row: u16) -> Option<(
     if col < g.body_x {
         return None;
     }
-    let mut x_off = 0u16;
-    for (c, w) in data.col_widths.iter().enumerate().skip(data.scroll_col) {
-        if x_off + w + 1 > g.body_w {
-            break;
-        }
-        if col >= g.body_x + x_off && col < g.body_x + x_off + w {
-            return Some((r, c));
-        }
-        x_off += w + 1;
-    }
-    None
+    crate::sheet::visible_columns(&data.col_widths, data.scroll_col, g.body_w)
+        .into_iter()
+        .find(|&(_, x_off, w)| col >= g.body_x + x_off && col < g.body_x + x_off + w)
+        .map(|(c, _, _)| (r, c))
 }
 
 /// Char-boundary helpers for the in-grid cell editor (#177): byte
@@ -81455,6 +82786,22 @@ fn scrollback_opens_as_log(rows: &[String]) -> bool {
     }
     let cut = prefix.floor_char_boundary(prefix.len().min(8192));
     crate::ansi_text::looks_like_ansi(&prefix[..cut])
+}
+
+/// Whether a PDF wheel step of `delta` in `doc` falls inside the cooldown of
+/// the last one (`last`: when, which direction, which document): a
+/// same-direction repeat in the same document within 150 ms is dropped so a
+/// momentum flick costs one rasterise, not one per event. A reversal or
+/// another document always passes.
+fn pdf_wheel_cooling(
+    last: Option<&(std::time::Instant, i32, Option<PathBuf>)>,
+    delta: i32,
+    doc: &Option<PathBuf>,
+) -> bool {
+    const COOLDOWN: std::time::Duration = std::time::Duration::from_millis(150);
+    last.is_some_and(|(at, dir, last_doc)| {
+        *dir == delta.signum() && last_doc == doc && at.elapsed() < COOLDOWN
+    })
 }
 
 fn rect_contains(r: Rect, x: u16, y: u16) -> bool {
@@ -82889,6 +84236,10 @@ fn key_to_bytes(key: KeyEvent, app_cursor: bool) -> Vec<u8> {
 /// mirroring the horizontal rule VS Code renders between hover sections.
 const HOVER_DIVIDER: &str = "────────";
 
+/// What Show or Focus Hover says when the caret has nothing to describe
+/// (#1518): a keyboard command that does nothing must say why.
+const NO_HOVER_AT_CARET: &str = "No hover information at the caret";
+
 /// Render the diagnostics under the hovered point into a single labelled text
 /// block, errors first (so the most severe message leads), each line prefixed
 /// with its severity. `None` when there are no diagnostics. The severity word
@@ -83261,24 +84612,14 @@ pub fn run(
             app.add_workspace_folder(folder);
         }
     }
-    // Determine which session file to restore from, if any:
-    //   * a self-update re-exec names one explicitly;
-    //   * otherwise hot exit is tried first, and ".session" (saved at the
-    //     previous clean exit) is the fallback when hot exit had nothing.
-    let session_path: Option<std::path::PathBuf> = if let Some(path) = restore_session {
-        Some(path.clone())
-    } else if !app.restore_hot_exit() {
-        Some(std::path::PathBuf::from(".session"))
-    } else {
-        None
-    };
-    // Restore the tabs / layout
-    if let Some(session_path) = session_path {
-        match crate::session_state::SessionState::load(&session_path) {
+    // Restore the tabs / layout carried across a self-update re-exec, then
+    // delete the handoff file so a later normal launch starts clean.
+    if let Some(session_path) = restore_session.as_ref() {
+        match crate::session_state::SessionState::load(session_path) {
             Ok(state) => {
                 let left = app.apply_session_state(&state);
                 if app.hold_unrestored_tabs(left) {
-                    let _ = std::fs::remove_file(&session_path);
+                    let _ = std::fs::remove_file(session_path);
                 } else {
                     // Kept: it holds the only copy of cells not put back.
                     app.status = format!(
@@ -83298,6 +84639,14 @@ pub fn run(
                 );
             }
         }
+    } else {
+        // A normal launch brings back what hot exit kept of this workspace
+        // when croft last ended without a clean quit (#862). The session
+        // the last clean exit saved brings back its tabs when hot exit had
+        // none, and its bookmarks either way; it is read once the first
+        // frame is up, off this thread.
+        let restored = app.restore_hot_exit();
+        app.read_saved_session(!restored);
     }
     crate::startup_trace::mark("session restored");
     // `--zen`: hide the Explorer sidebar and terminal so the editor fills the
@@ -83566,15 +84915,10 @@ pub fn run(
             crate::remote::RemoteOutcome::Exited => return Ok(()),
         }
     }
-
-    let state = app.capture_session_state();
-    let file_name = ".session";
-    // let state_path = crate::session_state::persistent_session_path(&root);
-    let state_path = std::path::Path::new(&file_name);
-    if let Err(e) = state.save(state_path) {
-        eprintln!("croft: failed to save session: {e}");
+    // A clean exit: what the next launch of this workspace opens with.
+    if let Err(e) = app.save_session_for_next_launch() {
+        eprintln!("croft: could not save the session: {e:#}");
     }
-
     Ok(())
 }
 
@@ -83831,6 +85175,9 @@ fn run_pending_scp_uploads(app: &mut App, terminal: &mut CroftTerminal) -> Resul
         let _ = out.write_all(&takeover_mode_seq());
         let _ = out.flush();
     }
+    // The takeover block set the steady bar; the next draw puts the
+    // overwrite block back if it is wanted.
+    app.caret_block_sent = false;
     terminal.clear().ok();
     app.overlays.activity.mark_dirty();
     app.overlays.welcome.mark_dirty();
@@ -84126,9 +85473,14 @@ fn main_loop(app: &mut App, terminal: &mut CroftTerminal) -> Result<()> {
         app.tick_hot_exit(std::time::Instant::now());
         let highlights_changed = app.poll_highlights();
         // Pictures baked off the UI thread (#1973) go up as they land.
-        let images_changed = app.poll_chrome_bake() | app.poll_welcome_bake();
-        let live_run_changed =
-            app.tick_live_run() | app.sync_markdown_scroll() | app.tick_minimap();
+        let images_changed =
+            app.poll_chrome_bake() | app.poll_welcome_bake() | app.poll_saved_session();
+        // A closed tab's bookmarks are kept, and come back with its file.
+        let bookmarks_changed = app.settle_bookmarks();
+        let live_run_changed = app.tick_live_run()
+            | app.sync_markdown_side_previews()
+            | app.sync_markdown_scroll()
+            | app.tick_minimap();
         app.tick_code_lens();
         let code_lens_changed = app.tick_config_watch()
             | app.drain_lsp_code_lens()
@@ -84169,7 +85521,8 @@ fn main_loop(app: &mut App, terminal: &mut CroftTerminal) -> Result<()> {
         app.refresh_signature_help_if_moved();
         let sig_help_changed = app.drain_lsp_signature_help();
         app.poll_hover();
-        let hover_changed = app.drain_lsp_hover() | app.drain_lsp_rust_analyzer();
+        let hover_changed =
+            app.drain_lsp_hover() | app.drain_lsp_rust_analyzer() | app.drain_blame_hover();
         let tab_hover_changed = app.poll_tab_hover();
         let ui_tooltip_changed = app.poll_ui_tooltip();
         let definition_changed = app.drain_lsp_definition();
@@ -84284,6 +85637,7 @@ fn main_loop(app: &mut App, terminal: &mut CroftTerminal) -> Result<()> {
             || auto_save_changed
             || highlights_changed
             || images_changed
+            || bookmarks_changed
             || live_run_changed
             || code_lens_changed
             || ws_symbols_changed
@@ -84654,6 +86008,9 @@ fn main_loop(app: &mut App, terminal: &mut CroftTerminal) -> Result<()> {
                             let out = terminal.backend_mut();
                             let _ = out.write_all(&reattach_reassert_seq(app.theme));
                             let _ = out.flush();
+                            // The re-assert set the steady bar; resend the
+                            // overwrite block on the next draw if wanted.
+                            app.caret_block_sent = false;
                         }
                     }
                     _ => {}

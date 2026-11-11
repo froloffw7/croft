@@ -770,6 +770,48 @@ fn editor_cmd_o_opens_line_below_with_indent() {
     assert_eq!((app.editor.cursor_row, app.editor.cursor_col), (1, 4));
 }
 
+/// #956: Enter leaves only indentation on its new line; switching to
+/// another tab leaves that line, so the tab switched away from is saved
+/// with it blank. The tab still being typed in keeps it under the caret.
+#[test]
+fn switching_tabs_clears_the_indentation_enter_left_behind() {
+    let tmp = tempfile::tempdir().unwrap();
+    let a = tmp.path().join("a.py");
+    let b = tmp.path().join("b.py");
+    std::fs::write(&a, "def f():\n    return 1\n").unwrap();
+    std::fs::write(&b, "x = 1\n").unwrap();
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    app.editor.open_pinned(&a).unwrap();
+    app.focus_pane(Pane::Editor);
+    app.editor.cursor_row = 1;
+    app.editor.cursor_col = 12;
+    app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(app.editor.lines[2], "    ", "the caret's line keeps it");
+    let a_tab = app.editor.active_index();
+    app.editor.open_in_new_tab(&b).unwrap();
+    app.trim_auto_indents();
+    assert_eq!(
+        app.editor.editors[a_tab].lines[2], "",
+        "a.py's line was left"
+    );
+}
+
+/// #956: moving off the line with a key, through the app's key handling,
+/// clears what Enter left on it.
+#[test]
+fn arrowing_off_a_line_enter_only_indented_clears_it() {
+    let mut app = editor_app_with_lines(&["def f():", "    return 1", "x = 2"]);
+    app.editor.cursor_row = 1;
+    app.editor.cursor_col = 12;
+    app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(app.editor.lines[2], "    ");
+    app.handle_key(key(KeyCode::Down, KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(app.editor.lines, ["def f():", "    return 1", "", "x = 2"]);
+}
+
 #[test]
 fn editor_cmd_shift_enter_opens_line_above_with_indent() {
     // Open-line-above moved off Cmd+Shift+O (now Go to Symbol) onto its real
@@ -1331,6 +1373,57 @@ fn shift_alt_i_adds_a_cursor_at_each_line_end() {
         app.editor.lines,
         ["foo = 1;", "bar = foo;", "foo += 2", "food = 3"]
     );
+}
+
+/// #1570: `Ctrl+L` selects the caret's line through the start of the next,
+/// each further press adds a line, and typing replaces them; it used to do
+/// nothing. On the last line, which has no line after it, it selects to the
+/// end. The palette and VS Code's `expandLineSelection` id reach it too.
+#[test]
+fn ctrl_l_selects_the_line_and_each_press_adds_the_next() {
+    use crate::widgets::command_palette::Command;
+    assert_eq!(
+        Command::from_id("expand_line_selection"),
+        Some(Command::ExpandLineSelection)
+    );
+    let tmp = tempfile::tempdir().unwrap();
+    let mut app = app_with_open_file(tmp.path(), "h.py", "a = 1\nb = 2\nc = 3");
+    app.handle_key(ctrl('l')).unwrap();
+    assert_eq!(app.editor.selection.unwrap().normalised(), ((0, 0), (1, 0)));
+    app.handle_key(ctrl('l')).unwrap();
+    assert_eq!(app.editor.selection.unwrap().normalised(), ((0, 0), (2, 0)));
+    app.handle_key(ctrl('l')).unwrap();
+    assert_eq!(app.editor.selection.unwrap().normalised(), ((0, 0), (2, 5)));
+    app.handle_key(key(KeyCode::Esc, KeyModifiers::NONE))
+        .unwrap();
+    (app.editor.cursor_row, app.editor.cursor_col) = (1, 2);
+    assert!(run_from_palette(&mut app, "Expand Line Selection"));
+    type_char(&mut app, 'Z');
+    assert_eq!(app.editor.lines, ["a = 1", "Zc = 3"]);
+}
+
+/// #1570: with carets on lines 1 and 2, the first `Ctrl+L` leaves two line
+/// selections that only touch, and the second grows them into an overlap,
+/// which becomes one selection, so typing replaces lines 1 to 3 once. The
+/// overlap used to reach the edit kept apart: the lower replacement left the
+/// upper one's end stale, and typing panicked, or in a longer file deleted
+/// lines nobody selected.
+#[test]
+fn ctrl_l_merges_the_line_selections_of_two_carets_once_they_overlap() {
+    use crate::widgets::command_palette::Command;
+    let tmp = tempfile::tempdir().unwrap();
+    let mut app = app_with_open_file(tmp.path(), "h.py", "a\nb\nc\nd");
+    app.run_command(Command::AddCursorBelow);
+    app.handle_key(ctrl('l')).unwrap();
+    assert_eq!(app.editor.carets.len(), 1, "touching selections stay two");
+    app.handle_key(ctrl('l')).unwrap();
+    assert!(
+        !app.editor.has_multi_cursor(),
+        "the overlap is one selection"
+    );
+    assert_eq!(app.editor.selection.unwrap().normalised(), ((0, 0), (3, 0)));
+    type_char(&mut app, 'Z');
+    assert_eq!(app.editor.lines, ["Zd"]);
 }
 
 const COLUMN_PY: &str = "alpha = 1\nbeta  = 2\ngamma = 3\n";

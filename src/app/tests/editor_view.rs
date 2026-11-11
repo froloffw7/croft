@@ -115,19 +115,127 @@ fn minimap_rgba_to_png_roundtrips() {
 }
 
 /// #1544 negative: the line number and the text body keep their clicks:
-/// they move the caret and set no breakpoint.
+/// the number selects its line (#1570), the text moves the caret, and
+/// neither sets a breakpoint.
 #[test]
-fn a_click_on_the_line_number_or_the_text_moves_the_caret_only() {
+fn a_click_on_the_line_number_or_the_text_sets_no_breakpoint() {
     let (mut app, _tmp, f) = app_with_painted_file("l1\nl2\nl3\nl4\nl5\n");
     let number = app.editor.last_inner.x + 2;
     let text_x = app.editor.last_inner.x + app.editor.last_gutter_width + 1;
     let (row2, row3) = (app.editor.last_inner.y + 2, app.editor.last_inner.y + 3);
     click_and_release(&mut app, number, row2);
-    assert_eq!(app.editor.cursor_row, 2, "the number click moves the caret");
+    assert_eq!(
+        app.editor.selection.map(|s| s.normalised()),
+        Some(((2, 0), (3, 0))),
+        "the number click selects its line"
+    );
     app.editor_click.clear();
     click_and_release(&mut app, text_x + 1, row3);
     assert_eq!(app.editor.cursor_row, 3, "the text click moves the caret");
     assert!(app.editor.breakpoint_lines(&f).is_empty());
+}
+
+/// #1570: a third click on the same cell inside the double-click window
+/// selects the whole line, newline included, so typing replaces it. It used
+/// to start over as a single click and drop the word the double selected.
+/// Holding the third press and dragging extends the selection by lines.
+#[test]
+fn a_triple_click_selects_the_line_and_a_drag_extends_it_by_lines() {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    let (mut app, _tmp, _f) = app_with_painted_file("def f():\n    return 1\n    pass\n");
+    let col = app.editor.last_inner.x + app.editor.last_gutter_width + 1 + 6;
+    let row = app.editor.last_inner.y + 1;
+    click_and_release(&mut app, col, row);
+    click_and_release(&mut app, col, row);
+    assert_eq!(
+        app.editor.selection.map(|s| s.normalised()),
+        Some(((1, 4), (1, 10))),
+        "the double selects `return`"
+    );
+    click_and_release(&mut app, col, row);
+    assert_eq!(
+        app.editor.selection.map(|s| s.normalised()),
+        Some(((1, 0), (2, 0))),
+        "the triple selects line 2 through the start of line 3"
+    );
+    app.handle_key(key(KeyCode::Char('Z'), KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(app.editor.lines, ["def f():", "Z    pass"]);
+
+    let (mut app, _tmp, _f) = app_with_painted_file("def f():\n    return 1\n    pass\n");
+    click_and_release(&mut app, col, row);
+    click_and_release(&mut app, col, row);
+    app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), col, row));
+    app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), col, row + 1));
+    app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), col, row + 1));
+    assert_eq!(
+        app.editor.selection.map(|s| s.normalised()),
+        Some(((1, 0), (2, 8))),
+        "the drag takes whole lines 2 and 3, the last to its end"
+    );
+}
+
+/// #1570: a press on line number 2 selects that line through the start of
+/// line 3, and a drag down or up the numbers selects whole lines. It used to
+/// put the caret at column 1.
+#[test]
+fn a_line_number_press_selects_the_line_and_a_drag_selects_lines() {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    let (mut app, _tmp, _f) = app_with_painted_file("l1\nl2\nl3\nl4\nl5\n");
+    let number = app.editor.last_inner.x + 2;
+    let y = app.editor.last_inner.y;
+    click_and_release(&mut app, number, y + 1);
+    assert_eq!(
+        app.editor.selection.map(|s| s.normalised()),
+        Some(((1, 0), (2, 0)))
+    );
+    // Down from line 2 to line 4, then up from line 4 to line 1, the caret
+    // at the end the pointer went to.
+    for (from, to, want, caret) in [(1, 3, ((1, 0), (4, 0)), 4), (3, 0, ((0, 0), (4, 0)), 0)] {
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            number,
+            y + from,
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            number,
+            y + to,
+        ));
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), number, y + to));
+        assert_eq!(app.editor.selection.map(|s| s.normalised()), Some(want));
+        assert_eq!(app.editor.cursor_row, caret, "{from}->{to}");
+    }
+}
+
+/// #1570 negative: only the number's own columns select a line. A press on
+/// the blank chevron cell of a line with no fold, on the spacer before the
+/// change bar, or in a gutter with line numbers off still puts the caret at
+/// column 1 and selects nothing.
+#[test]
+fn only_the_line_number_columns_select_the_line() {
+    use crate::widgets::editor::LineNumbers;
+    let (mut app, _tmp, _f) = app_with_painted_file("l1\nl2\nl3\n");
+    let x = app.editor.last_inner.x;
+    let row = app.editor.last_inner.y + 1;
+    let spacer = x + app.editor.last_gutter_width - 1;
+    let selected = |app: &App| app.editor.selection.map(|s| s.normalised());
+    for col in [x + 1, spacer] {
+        app.editor_click.clear();
+        click_and_release(&mut app, col, row);
+        assert_eq!(selected(&app), None, "column {col} selects nothing");
+        assert_eq!((app.editor.cursor_row, app.editor.cursor_col), (1, 0));
+    }
+    app.editor_click.clear();
+    click_and_release(&mut app, x + 2, row);
+    assert_eq!(selected(&app), Some(((1, 0), (2, 0))), "the number does");
+
+    app.editor.line_numbers = LineNumbers::Off;
+    draw(&mut app, 100, 30);
+    app.editor_click.clear();
+    click_and_release(&mut app, x + 2, row + 1);
+    assert_eq!(selected(&app), None, "no numbers, no line selection");
+    assert_eq!((app.editor.cursor_row, app.editor.cursor_col), (2, 0));
 }
 
 /// #1544 negative: the fold chevron still folds, and a lane click past the
@@ -282,14 +390,14 @@ fn inline_blame_annotation_paints_on_the_cursor_line() {
         Some(crate::git::Blame::new(
             vec![
                 std::sync::Arc::new(crate::git::BlameCommit {
-                    short_hash: "abc12345".into(),
+                    hash: "abc12345".into(),
                     summary: "init".into(),
                     author: "Vitali".into(),
                     age_secs: 3600,
                     uncommitted: false,
                 }),
                 std::sync::Arc::new(crate::git::BlameCommit {
-                    short_hash: "abc12345".into(),
+                    hash: "abc12345".into(),
                     summary: "add x".into(),
                     author: "Alice".into(),
                     age_secs: 60,
@@ -1295,6 +1403,25 @@ fn reloaded_rulers_reach_every_open_editor() {
     assert!(app.editor.editors.iter().all(|e| e.rulers.is_empty()));
 }
 
+/// #1569: a settings reload carries `home_walks_wrapped_rows` straight onto
+/// every open editor, not only the active one, so a tab picked without a
+/// focus sync walks (or does not) as the setting says.
+#[test]
+fn reloaded_home_walk_reaches_every_open_editor() {
+    let mut app = editor_app_with_lines(&["a b"]);
+    app.editor
+        .open_text_buffer(std::path::Path::new("later.txt"), "c d")
+        .unwrap();
+    app.apply_merged_settings(&crate::prefs::Prefs {
+        home_walks_wrapped_rows: true,
+        ..Default::default()
+    });
+    assert!(app.editor.editors.len() >= 2);
+    assert!(app.editor.editors.iter().all(|e| e.home_walks_rows));
+    app.apply_merged_settings(&crate::prefs::Prefs::default());
+    assert!(app.editor.editors.iter().all(|e| !e.home_walks_rows));
+}
+
 #[test]
 fn build_sticky_lines_pins_enclosing_headers_scrolled_above_the_viewport() {
     use crate::lsp::manager::OutlineKind;
@@ -1318,6 +1445,31 @@ fn build_sticky_lines_pins_enclosing_headers_scrolled_above_the_viewport() {
     assert_eq!(app.build_sticky_lines(), vec![0]);
     // Parked on the class header itself: nothing is scrolled off, so no pins.
     app.editor.scroll = 0;
+    assert!(app.build_sticky_lines().is_empty());
+}
+
+/// #940: a decorated definition's range starts at its decorator, but the
+/// sticky header is its `def`/`class` line, which names it. With that line
+/// itself at the top, nothing is pinned over it.
+#[test]
+fn sticky_scroll_pins_the_name_line_of_a_decorated_definition() {
+    use crate::lsp::manager::OutlineKind;
+    let tmp = tempfile::tempdir().unwrap();
+    let f = tmp.path().join("api.py");
+    std::fs::write(&f, "x\n").unwrap();
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    app.editor.open(&f).unwrap();
+    // `@dataclass` on line 3 above `class Order:` on 4; inside it,
+    // `@staticmethod` on 6 above `def validate` on 7.
+    let mut order = sym("Order", OutlineKind::Class, 0, 3, 40);
+    order.line = 4;
+    let mut validate = sym("validate", OutlineKind::Method, 1, 6, 30);
+    validate.line = 7;
+    app.outline.set_symbols(f.clone(), vec![order, validate]);
+    app.editor.scroll = 20;
+    assert_eq!(app.build_sticky_lines(), vec![4, 7], "the name lines");
+    // Negative: the class line at the top is shown, not covered by a pin.
+    app.editor.scroll = 4;
     assert!(app.build_sticky_lines().is_empty());
 }
 
@@ -2422,62 +2574,6 @@ fn the_pointer_is_an_i_beam_over_a_popup_value_row_and_a_search_field() {
     assert_eq!(app.pointer_shape_at(q.x + 1, q.y), Text);
 }
 
-#[test]
-fn a_crowded_tab_strip_offers_a_list_of_all_open_tabs() {
-    use crate::widgets::list_picker::ListPurpose;
-    let tmp = tempfile::tempdir().unwrap();
-    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
-    for i in 0..14 {
-        let f = tmp.path().join(format!("a_rather_long_name_{i:02}.txt"));
-        std::fs::write(&f, "x\n").unwrap();
-        app.editor.open_pinned(&f).unwrap();
-    }
-    let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
-    term.draw(|f| app.render(f)).unwrap();
-    let y = app.editor.tab_strip_y_for_test();
-    let col = (0..100)
-        .find(|&c| app.editor.tab_list_button_at(c, y))
-        .expect("the tabs overflow, so the strip draws the list button");
-    assert_eq!(app.ui_tooltip_at(col, y), Some("Show All Open Tabs"));
-    app.handle_mouse(mouse(
-        crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
-        col,
-        y,
-    ));
-    let picker = app.list_picker.as_ref().expect("the button opens the list");
-    assert_eq!(picker.purpose, ListPurpose::OpenTab);
-    assert_eq!(picker.rows.len(), 14);
-    assert_eq!(picker.selected, 13, "the active tab is the selected row");
-    // Picking the first row activates that tab and scrolls the strip to it.
-    for _ in 0..13 {
-        app.handle_key(key(KeyCode::Up, KeyModifiers::NONE))
-            .unwrap();
-    }
-    app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE))
-        .unwrap();
-    assert_eq!(app.editor.active_index(), 0);
-    term.draw(|f| app.render(f)).unwrap();
-    assert!(
-        app.editor.tab_screen_x(0).is_some_and(|(_, w)| w > 0),
-        "the picked tab is on screen"
-    );
-}
-
-#[test]
-fn centring_a_line_before_the_first_render_leaves_context_above() {
-    // A file opened for the first time has no viewport yet (zero text rows),
-    // so there is no middle to centre on: the target must still be brought
-    // near the top instead of staying at scroll 0 (a Global Search hit).
-    let mut e = crate::widgets::editor::Editor::new();
-    e.lines = (0..200).map(|i| format!("line {i}")).collect();
-    assert_eq!(e.text_rows(), 0, "precondition: not rendered yet");
-    e.goto_line_centered(100);
-    assert_eq!(e.cursor_row, 100);
-    assert_eq!(e.scroll, 95, "five lines of context above the target");
-    e.goto_line_centered(2);
-    assert_eq!(e.scroll, 0, "near the top it saturates at 0");
-}
-
 fn overwrite_app(text: &str) -> (tempfile::TempDir, App) {
     let tmp = tempfile::tempdir().unwrap();
     let mut app = App::new(tmp.path().to_path_buf()).unwrap();
@@ -2553,7 +2649,101 @@ fn overwrite_typing_undoes_in_one_step_and_a_selection_is_replaced_as_usual() {
 }
 
 #[test]
-fn overwrite_mode_is_shown_by_a_glyph_after_the_wordmark_not_in_the_position() {
+fn switching_the_typing_mode_starts_a_new_undo_step() {
+    let (_t, mut app) = overwrite_app("hello");
+    app.handle_key(key(KeyCode::Char('A'), KeyModifiers::NONE))
+        .unwrap();
+    app.handle_key(key(KeyCode::Insert, KeyModifiers::NONE))
+        .unwrap();
+    app.handle_key(key(KeyCode::Char('B'), KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(app.editor.lines[0], "ABello");
+    app.editor.undo();
+    assert_eq!(
+        app.editor.lines[0], "Ahello",
+        "the overwrite run undoes on its own"
+    );
+    app.editor.undo();
+    assert_eq!(app.editor.lines[0], "hello");
+}
+
+#[test]
+fn overwrite_leaves_the_caret_after_a_cluster_the_typed_char_joins() {
+    // U+1F1FA before the French flag's two indicators pairs with the first of
+    // them, so the caret must step past that new pair, not stop inside it.
+    let (_t, mut app) = overwrite_app("a\u{1F1EB}\u{1F1F7}");
+    app.overwrite_mode = true;
+    app.handle_key(key(KeyCode::Char('\u{1F1FA}'), KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(app.editor.lines[0], "\u{1F1FA}\u{1F1EB}\u{1F1F7}");
+    assert_eq!(app.editor.cursor_col, 2, "after the joined pair");
+    app.handle_key(key(KeyCode::Char('x'), KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(
+        app.editor.lines[0], "\u{1F1FA}\u{1F1EB}x",
+        "the next key replaces the cluster after the caret"
+    );
+}
+
+#[test]
+fn overwrite_adds_a_combining_mark_to_the_letter_before_the_caret() {
+    // The accent belongs to the `e` just typed: it must not eat the `b`.
+    let (_t, mut app) = overwrite_app("abcd");
+    app.overwrite_mode = true;
+    app.handle_key(key(KeyCode::Char('e'), KeyModifiers::NONE))
+        .unwrap();
+    app.handle_key(key(KeyCode::Char('\u{301}'), KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(app.editor.lines[0], "e\u{301}bcd");
+    assert_eq!(app.editor.cursor_col, 2);
+    app.handle_key(key(KeyCode::Char('x'), KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(
+        app.editor.lines[0], "e\u{301}xcd",
+        "the next key replaces again"
+    );
+    app.editor.undo();
+    assert_eq!(
+        app.editor.lines[0], "abcd",
+        "still one undo step for the run"
+    );
+}
+
+#[test]
+fn overwrite_steps_past_an_emoji_a_typed_zwj_joins() {
+    // A ZWJ typed between 👩 and 💻 makes one 👩‍💻: the caret goes after it,
+    // so the next key replaces the `x`, not the 💻.
+    let (_t, mut app) = overwrite_app("\u{1F469}\u{1F4BB}x");
+    app.overwrite_mode = true;
+    app.editor.cursor_col = 1;
+    app.handle_key(key(KeyCode::Char('\u{200D}'), KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(app.editor.lines[0], "\u{1F469}\u{200D}\u{1F4BB}x");
+    assert_eq!(app.editor.cursor_col, 3, "after the joined emoji");
+    app.handle_key(key(KeyCode::Char('a'), KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(app.editor.lines[0], "\u{1F469}\u{200D}\u{1F4BB}a");
+}
+
+#[test]
+fn overwrite_drops_the_empty_selection_a_click_leaves() {
+    let (_t, mut app) = overwrite_app("abcd");
+    app.overwrite_mode = true;
+    app.editor.selection = Some(crate::widgets::editor::EditorSelection {
+        anchor: (0, 0),
+        head: (0, 0),
+    });
+    app.handle_key(key(KeyCode::Char('x'), KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(app.editor.lines[0], "xbcd");
+    assert!(
+        app.editor.selection.is_none(),
+        "no stale anchor for a later Shift+arrow"
+    );
+}
+
+#[test]
+fn overwrite_mode_is_shown_by_a_glyph_after_the_workspace_cap_not_in_the_position() {
     let (_t, mut app) = overwrite_app("abc");
     let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 30)).unwrap();
     let bar = |t: &ratatui::Terminal<ratatui::backend::TestBackend>| -> String {
@@ -2566,13 +2756,74 @@ fn overwrite_mode_is_shown_by_a_glyph_after_the_wordmark_not_in_the_position() {
     term.draw(|f| app.render(f)).unwrap();
     let insert = bar(&term);
     assert!(
-        insert.contains("ft \u{2380}"),
-        "insert glyph after cr<>ft: {insert}"
+        !insert.contains('\u{2380}') && !insert.contains('\u{2381}'),
+        "Insert, the default, adds nothing to the bar: {insert}"
     );
     app.handle_key(key(KeyCode::Insert, KeyModifiers::NONE))
         .unwrap();
     term.draw(|f| app.render(f)).unwrap();
     let over = bar(&term);
-    assert!(over.contains("ft \u{2381}"), "overwrite glyph: {over}");
+    // The workspace cap ends on its rounded right edge; the glyph follows
+    // one cell of air later.
+    assert!(
+        over.contains("\u{e0b4} \u{2381}"),
+        "overwrite glyph after the workspace cap: {over}"
+    );
     assert!(!over.contains("OVR"), "the Ln/Col segment stays unchanged");
+}
+
+#[test]
+fn a_crowded_tab_strip_offers_a_list_of_all_open_tabs() {
+    use crate::widgets::list_picker::ListPurpose;
+    let tmp = tempfile::tempdir().unwrap();
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    for i in 0..14 {
+        let f = tmp.path().join(format!("a_rather_long_name_{i:02}.txt"));
+        std::fs::write(&f, "x\n").unwrap();
+        app.editor.open_pinned(&f).unwrap();
+    }
+    let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+    term.draw(|f| app.render(f)).unwrap();
+    let y = app.editor.tab_strip_y_for_test();
+    let col = (0..100)
+        .find(|&c| app.editor.tab_list_button_at(c, y))
+        .expect("the tabs overflow, so the strip draws the list button");
+    assert_eq!(app.ui_tooltip_at(col, y), Some("Show All Open Tabs"));
+    app.handle_mouse(mouse(
+        crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        col,
+        y,
+    ));
+    let picker = app.list_picker.as_ref().expect("the button opens the list");
+    assert_eq!(picker.purpose, ListPurpose::OpenTab);
+    assert_eq!(picker.rows.len(), 14);
+    assert_eq!(picker.selected, 13, "the active tab is the selected row");
+    // Picking the first row activates that tab and scrolls the strip to it.
+    for _ in 0..13 {
+        app.handle_key(key(KeyCode::Up, KeyModifiers::NONE))
+            .unwrap();
+    }
+    app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(app.editor.active_index(), 0);
+    term.draw(|f| app.render(f)).unwrap();
+    assert!(
+        app.editor.tab_screen_x(0).is_some_and(|(_, w)| w > 0),
+        "the picked tab is on screen"
+    );
+}
+
+#[test]
+fn centring_a_line_before_the_first_render_leaves_context_above() {
+    // A file opened for the first time has no viewport yet (zero text rows),
+    // so there is no middle to centre on: the target must still be brought
+    // near the top instead of staying at scroll 0 (a Global Search hit).
+    let mut e = crate::widgets::editor::Editor::new();
+    e.lines = (0..200).map(|i| format!("line {i}")).collect();
+    assert_eq!(e.text_rows(), 0, "precondition: not rendered yet");
+    e.goto_line_centered(100);
+    assert_eq!(e.cursor_row, 100);
+    assert_eq!(e.scroll, 95, "five lines of context above the target");
+    e.goto_line_centered(2);
+    assert_eq!(e.scroll, 0, "near the top it saturates at 0");
 }

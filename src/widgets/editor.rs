@@ -897,22 +897,13 @@ fn render_sheet(
     }
 
     // Lay out visible columns from `scroll_col` rightwards until we run
-    // out of horizontal space.
-    let mut visible: Vec<(usize, u16)> = Vec::new(); // (col_idx, x_offset)
-    let mut x_off = 0u16;
-    for (c, w) in sheet.col_widths.iter().enumerate().skip(sheet.scroll_col) {
-        if x_off + w + 1 > body_w {
-            break;
-        }
-        visible.push((c, x_off));
-        x_off += w + 1; // +1 for inter-column gap
-    }
+    // out of horizontal space: (col_idx, x_offset, drawn width).
+    let visible = crate::sheet::visible_columns(&sheet.col_widths, sheet.scroll_col, body_w);
 
     // Header text.
-    for (c, x_off) in &visible {
-        let label = sheet.headers.get(*c).map(|s| s.as_str()).unwrap_or("");
-        let cell_x = body_x + *x_off;
-        let w = sheet.col_widths[*c];
+    for &(c, x_off, w) in &visible {
+        let label = sheet.headers.get(c).map(|s| s.as_str()).unwrap_or("");
+        let cell_x = body_x + x_off;
         write_cell(buf, cell_x, header_y, w, label, head_style);
     }
 
@@ -950,32 +941,36 @@ fn render_sheet(
             gutter_style.bg(style.bg.unwrap_or(Color::Reset)),
         );
         let row = &sheet.rows[row_idx];
-        for (c, x_off) in &visible {
+        for (c, x_off, w) in &visible {
+            let w = *w;
             let cell_text = row.get(*c).map(|s| s.as_str()).unwrap_or("");
-            let w = sheet.col_widths[*c];
             let is_cursor = row_idx == sheet.cur_row && *c == sheet.cur_col;
             if is_cursor {
                 if let Some(edit) = editing.as_ref() {
                     // In-grid editor (#177): show the tail that keeps the
-                    // caret visible, caret cell reversed.
-                    // Window in CHARACTERS (#193 review: the cursor is
-                    // a byte offset, and byte math shortened the tail
-                    // for multi-byte text), then convert to a byte start.
+                    // caret visible, caret cell reversed. The window is
+                    // measured in screen columns (#1138), whole graphemes
+                    // dropped from the left until what is before the caret
+                    // fits with a column left for the caret itself.
+                    use unicode_segmentation::UnicodeSegmentation;
                     let avail = w as usize;
-                    let chars_before = edit.value[..edit.cursor].chars().count();
-                    let skip = chars_before.saturating_sub(avail.saturating_sub(1));
-                    let start = edit
-                        .value
-                        .char_indices()
-                        .nth(skip)
-                        .map(|(i, _)| i)
-                        .unwrap_or(0);
+                    let before = &edit.value[..edit.cursor];
+                    let mut caret_cells = crate::sheet::text_width(before);
+                    let mut start = 0;
+                    let mut dropped = before.grapheme_indices(true);
+                    while caret_cells + 1 > avail {
+                        let Some((i, g)) = dropped.next() else {
+                            break;
+                        };
+                        caret_cells -= crate::sheet::grapheme_width(g);
+                        start = i + g.len();
+                    }
                     let shown = &edit.value[start..];
                     let edit_style = Style::default()
                         .fg(theme.accent_contrast_fg())
                         .bg(theme.accent());
                     write_cell(buf, body_x + *x_off, y, w, shown, edit_style);
-                    let caret_cells = shown[..edit.cursor - start].chars().count() as u16;
+                    let caret_cells = caret_cells.min(u16::MAX as usize) as u16;
                     let cx = body_x + *x_off + caret_cells.min(w.saturating_sub(1));
                     buf[(cx, y)].set_style(
                         Style::default()
@@ -1020,7 +1015,7 @@ fn render_sheet(
     let visible_col_first = sheet.scroll_col + 1;
     let visible_col_last = visible
         .last()
-        .map(|(c, _)| *c + 1)
+        .map(|(c, _, _)| *c + 1)
         .unwrap_or(visible_col_first);
     // A SQLite page names its rows by place in the table, with no total:
     // nobody counted the table (#1222), and the sheet name says whether
@@ -1440,6 +1435,50 @@ fn paint_intraline_range(
     }
 }
 
+/// Recolour one diff line drawn at `text_x` from char `skip`, `width` cells
+/// wide, in its syntax colours (#2020): each character takes its span's
+/// foreground and weight, and keeps the row's background, which is what
+/// marks it removed, added or unchanged. Cells follow display width, as
+/// [`clip_pad_cells`] lays them down.
+fn paint_diff_syntax(
+    buf: &mut Buffer,
+    text_x: u16,
+    y: u16,
+    width: u16,
+    text: &str,
+    skip: usize,
+    spans: &[HiSpan],
+) {
+    if spans.is_empty() || width == 0 {
+        return;
+    }
+    let mut cell = 0u16;
+    let mut next = 0;
+    for (i, (byte, c)) in text.char_indices().enumerate() {
+        // Spans arrive in order and do not overlap.
+        while spans.get(next).is_some_and(|s| s.range().end <= byte) {
+            next += 1;
+        }
+        if i < skip {
+            continue;
+        }
+        let w = char_cells(c) as u16;
+        if cell + w > width {
+            break;
+        }
+        if let Some(span) = spans.get(next).filter(|s| s.range().contains(&byte)) {
+            let style = Style {
+                bg: None,
+                ..span.style
+            };
+            for dx in 0..w {
+                buf[(text_x + cell + dx, y)].set_style(style);
+            }
+        }
+        cell += w;
+    }
+}
+
 /// Returns the hit-test rects of the prev / next change arrows painted
 /// in the diff header (in that order). Both are `Rect::default()` when
 /// the header was too narrow to allocate them.
@@ -1462,6 +1501,9 @@ fn render_diff(
     if inner.height < 3 || inner.width < 16 {
         return (Rect::default(), Rect::default());
     }
+    // A small diff colours in this frame; a large one paints plain now and
+    // takes its colours when `poll_highlights` lands them.
+    diff.colour_syntax(Some(HIGHLIGHT_INLINE_BUDGET));
     if diff.unified {
         return render_unified_deletion(diff, inner, buf, bg, theme);
     }
@@ -1666,6 +1708,17 @@ fn render_diff(
                 })
                 .bg(l_cell_bg),
         );
+        if let Some(i) = l_left_idx {
+            paint_diff_syntax(
+                buf,
+                l_text_x,
+                y,
+                l_text_w,
+                &l_text,
+                diff.scroll_x,
+                diff.syntax.left(i),
+            );
+        }
         // The changed characters of a replaced line (#1351), on both sides.
         let intraline = match row {
             DiffRow::Replaced { .. } => crate::widgets::diff::changed_char_ranges(&l_text, &r_text),
@@ -1752,6 +1805,17 @@ fn render_diff(
                 })
                 .bg(r_cell_bg),
         );
+        if let Some(i) = r_right_idx {
+            paint_diff_syntax(
+                buf,
+                r_text_x,
+                y,
+                r_text_w,
+                &r_text,
+                diff.scroll_x,
+                diff.syntax.right(i),
+            );
+        }
         if let Some((_, range)) = intraline {
             let (r, g, b) = crate::widgets::diff::INTRALINE_ADDED_BG;
             paint_intraline_range(
@@ -2209,6 +2273,17 @@ fn render_unified_deletion(
                 })
                 .bg(cell_bg),
         );
+        if let Some(i) = left_idx {
+            paint_diff_syntax(
+                buf,
+                text_x,
+                y,
+                text_w,
+                &text,
+                diff.scroll_x,
+                diff.syntax.left(i),
+            );
+        }
     }
 
     let visible_first = diff.scroll + 1;
@@ -2228,16 +2303,32 @@ fn render_unified_deletion(
 }
 
 fn write_cell(buf: &mut Buffer, x: u16, y: u16, w: u16, text: &str, style: Style) {
-    let max_chars = w as usize;
-    // Overflow is cut plainly with no trailing ellipsis marker (the user wants
-    // no ellipsis anywhere in croft).
-    let content: String = text.chars().take(max_chars).map(visible_control).collect();
-    let mut padded = content;
-    let pad_count = max_chars.saturating_sub(padded.chars().count());
-    for _ in 0..pad_count {
-        padded.push(' ');
+    use unicode_segmentation::UnicodeSegmentation;
+    // Fill the slot in screen columns, not chars (#1138): a CJK or emoji
+    // glyph is two columns, so `w` chars drew up to twice the slot and ran
+    // into the next column. Blank it first; then a wide glyph that would
+    // straddle the edge is left out and its column stays blank. Overflow is
+    // cut plainly with no trailing ellipsis marker (the user wants no
+    // ellipsis anywhere in croft).
+    let width = w as usize;
+    buf.set_stringn(x, y, " ".repeat(width), width, style);
+    let mut col = 0;
+    for g in text.graphemes(true) {
+        let gw = crate::sheet::grapheme_width(g);
+        if gw == 0 {
+            continue;
+        }
+        if col + gw > width {
+            break;
+        }
+        if g.contains(char::is_control) {
+            let shown: String = g.chars().map(visible_control).collect();
+            buf.set_stringn(x + col as u16, y, &shown, gw, style);
+        } else {
+            buf.set_stringn(x + col as u16, y, g, gw, style);
+        }
+        col += gw;
     }
-    buf.set_string(x, y, &padded, style);
 }
 
 /// A control character as a glyph a cell can show (#1002): the buffer drops
@@ -3145,6 +3236,15 @@ pub enum GitMark {
     Deleted,
 }
 
+/// What the inline blame says of the cursor's line (#1556).
+#[derive(Clone, Copy, Debug)]
+pub enum LineBlame<'a> {
+    /// The line differs from HEAD: the annotation reads `Uncommitted changes`.
+    Uncommitted,
+    /// The commit that last changed the line.
+    Commit(&'a crate::git::BlameCommit),
+}
+
 /// One tick on the editor's overview ruler: the whole-file summary VS Code and
 /// Zed paint down the scrollbar track, so a problem or a search hit outside the
 /// viewport is still visible.
@@ -3403,6 +3503,11 @@ pub struct Editor {
     /// Whether to paint the current-line blame annotation (user pref, default
     /// on). The blame data is still fetched so toggling is instant.
     pub blame_enabled: bool,
+    /// The blame annotation painted this frame when it names a commit:
+    /// `(screen y, x range, the commit's hash)`, which the mouse hovers for
+    /// the commit's card and clicks to open its changes (#1556). Cleared at
+    /// render start, like the lens spans.
+    blame_span: Option<(u16, std::ops::Range<u16>, String)>,
     /// Paint who typed each line in the gutter and name the seat in the
     /// inline-blame annotation (#349). Off by default: it is a review lens,
     /// not a resting state, and `Editor: Toggle Provenance` flips it for the
@@ -3513,6 +3618,12 @@ pub struct Editor {
     /// on-type formatting trigger detector (#254). Stale once any other
     /// edit bumps the seq.
     pub last_typed: Option<(char, u64)>,
+    /// The whitespace-only line Enter just indented (#956): its row, how
+    /// many characters of indentation it got, and the `edit_seq` that left
+    /// it so. The indentation is cleared again, as VS Code's
+    /// `trimAutoWhitespace` does, once the caret leaves the line with
+    /// nothing typed on it.
+    auto_indent: Option<(usize, usize, u64)>,
     /// Collaborators' caret positions in this file (multiplayer sessions,
     /// docs/MULTIPLAYER.md): (row, char col, participant color). Painted as
     /// colored block cells like secondary carets; the App rebuilds this
@@ -4070,6 +4181,7 @@ impl Editor {
             blame_lines: None,
             blame_for: None,
             blame_enabled: true,
+            blame_span: None,
             provenance_overlay: false,
             scroll: 0,
             scroll_sub: 0,
@@ -4101,6 +4213,7 @@ impl Editor {
             last_edit_origin: (0, 0),
             select_expand: None,
             last_typed: None,
+            auto_indent: None,
             ghost_carets: Vec::new(),
             ghost_caret_labels: Vec::new(),
             stream_stop_line: None,
@@ -4312,6 +4425,21 @@ impl Editor {
         (line < self.lines.len()).then_some(line)
     }
 
+    /// The 0-based line whose number `(col, row)` is on (#1570): only the
+    /// number's own columns, right of the sign margin (the breakpoint lane
+    /// and the fold chevron) and left of the spacer before the change bar,
+    /// on any visual row of a source line. A press there selects the line,
+    /// as in VS Code. With line numbers off there are no such columns, and
+    /// views without source lines have none either.
+    pub fn line_number_line_at(&self, col: u16, row: u16) -> Option<usize> {
+        let x = self.last_inner.x;
+        let numbers = x + 2..x + self.last_gutter_width.saturating_sub(1);
+        if !numbers.contains(&col) || self.has_non_text_view() || self.markdown_preview.is_some() {
+            return None;
+        }
+        self.gutter_line_at(col, row)
+    }
+
     /// The 0-based line whose breakpoint lane `(col, row)` is on (#1544): the
     /// sign cell left of the fold chevron, where breakpoints draw, on any
     /// visual row of a source line. A left click there toggles a breakpoint,
@@ -4484,6 +4612,46 @@ impl Editor {
         }
         self.bookmarks = marks.clone();
         self.sync_bookmarks_to_buffer();
+    }
+
+    /// Take `path`'s marks as another tab holds them (`None`: it has none),
+    /// so every tab keeps one set per file. Trimmed to the buffer when
+    /// `path` is the open file, whose later edits then carry them.
+    pub fn adopt_bookmarks(
+        &mut self,
+        path: &Path,
+        marks: Option<&std::collections::BTreeSet<usize>>,
+    ) {
+        match marks {
+            Some(set) if !set.is_empty() => {
+                self.bookmarks.insert(path.to_path_buf(), set.clone());
+            }
+            _ => {
+                self.bookmarks.remove(path);
+            }
+        }
+        if self.path.as_deref() == Some(path) {
+            self.sync_bookmarks_to_buffer();
+        }
+    }
+
+    /// This tab's bookmarks on the files as saved: the open file's marks
+    /// follow its unsaved edits, so with the tab closing on those edits
+    /// each goes back to its line on disk, decoded as the tab decoded it.
+    pub fn bookmarks_on_disk(
+        &self,
+    ) -> std::collections::HashMap<PathBuf, std::collections::BTreeSet<usize>> {
+        let mut marks = self.bookmarks.clone();
+        if self.dirty
+            && let Some(path) = self.path.as_deref()
+            && let Some(set) = marks.get_mut(path)
+            && let Ok(bytes) = std::fs::read(path)
+        {
+            let (text, _, _) = self.encoding.decode(&bytes);
+            *set = carry_marks(set, &self.lines, &split_into_lines(&text));
+        }
+        marks.retain(|_, set| !set.is_empty());
+        marks
     }
 
     /// Whether 0-based `line` carries a bookmark in the open file.
@@ -4689,12 +4857,14 @@ impl Editor {
 
     /// Put the cursor on 1-based `line`, clamped to the buffer, unfolding
     /// anything hiding it and centring it in the viewport — a bookmark
-    /// inside a collapsed region must still be reachable.
-    fn jump_to_bookmark(&mut self, line: usize) {
+    /// inside a collapsed region must still be reachable. The selection and
+    /// any secondary carets go, so the next keystroke edits only that line.
+    pub fn jump_to_bookmark(&mut self, line: usize) {
         if self.lines.is_empty() {
             return;
         }
         self.selection = None;
+        self.collapse_carets();
         self.goto_line_centered(line.saturating_sub(1));
         self.reveal_cursor_fold();
         self.ensure_cursor_col_visible();
@@ -4803,6 +4973,22 @@ impl Editor {
     /// The git half of the annotation: author, age and summary of the
     /// cursor's line, or the uncommitted marker.
     fn committed_blame_annotation(&self) -> Option<String> {
+        Some(match self.cursor_line_blame()? {
+            LineBlame::Uncommitted => "Uncommitted changes".to_string(),
+            LineBlame::Commit(commit) => format!(
+                "{}, {} • {}",
+                commit.author,
+                crate::git::humanize_age(commit.age_secs),
+                commit.summary
+            ),
+        })
+    }
+
+    /// What the inline blame says of the cursor's line, or `None` when it
+    /// says nothing: blame is off or unavailable, or the line was edited
+    /// past the blamed range. Git: Open Commit for Line and the annotation's
+    /// hover and click act on its commit (#1556).
+    pub fn cursor_line_blame(&self) -> Option<LineBlame<'_>> {
         if !self.blame_enabled {
             return None;
         }
@@ -4826,7 +5012,7 @@ impl Editor {
             self.git_mark_at(self.cursor_row),
             Some(GitMark::Added | GitMark::Modified)
         ) {
-            return Some("Uncommitted changes".to_string());
+            return Some(LineBlame::Uncommitted);
         }
         // Insertions/deletions shift line indices out from under the blamed
         // snapshot; only trust the 1:1 mapping while the line counts match.
@@ -4840,15 +5026,20 @@ impl Editor {
         if text.is_some_and(|t| Some(t) != self.lines.get(self.cursor_row).map(String::as_str)) {
             return None;
         }
-        if commit.uncommitted {
-            return Some("Uncommitted changes".to_string());
-        }
-        Some(format!(
-            "{}, {} • {}",
-            commit.author,
-            crate::git::humanize_age(commit.age_secs),
-            commit.summary
-        ))
+        Some(if commit.uncommitted {
+            LineBlame::Uncommitted
+        } else {
+            LineBlame::Commit(commit)
+        })
+    }
+
+    /// The hash of the commit the blame annotation painted this frame names
+    /// at screen cell `(col, row)`, if it is there (#1556).
+    pub fn blame_commit_at(&self, col: u16, row: u16) -> Option<&str> {
+        self.blame_span
+            .as_ref()
+            .filter(|(y, xs, _)| *y == row && xs.contains(&col))
+            .map(|(_, _, hash)| hash.as_str())
     }
 
     /// The buffer's merge-conflict blocks, rescanned only when the buffer
@@ -6026,10 +6217,20 @@ impl Editor {
                     return Ok(());
                 }
             }
-            // A `.tar.xz` under another name (#1645); a plain xz file is not
-            // a tar and falls through to hex.
-            Some(crate::magic::Magic::Xz) => {
-                match self.open_archive(path, crate::archive::ArchiveKind::TarXz) {
+            // A `.tar.xz`, `.tar.bz2` or `.tar.zst` under another name
+            // (#1645); a plain compressed file is not a tar and falls through
+            // to hex.
+            Some(
+                m @ (crate::magic::Magic::Xz
+                | crate::magic::Magic::Bzip2
+                | crate::magic::Magic::Zstd),
+            ) => {
+                let kind = match m {
+                    crate::magic::Magic::Xz => crate::archive::ArchiveKind::TarXz,
+                    crate::magic::Magic::Bzip2 => crate::archive::ArchiveKind::TarBz2,
+                    _ => crate::archive::ArchiveKind::TarZst,
+                };
+                match self.open_archive(path, kind) {
                     Ok(()) => return Ok(()),
                     Err(e) if crate::archive::is_list_cap_refusal(&e.to_string()) => {
                         self.route_note = Some((path.to_path_buf(), e.to_string()));
@@ -6216,7 +6417,22 @@ impl Editor {
         self.last_edit_kind = None;
         self.image = None;
         self.sheet = None;
-        self.markdown_preview = None;
+        // A same-path reload (the FS-sync sweep after another pane saves the
+        // file, an agent or formatter rewriting it, a revert) keeps the
+        // rendered Markdown view (#1605): dropping it turned the tab back
+        // into source whenever anything rewrote the file. The `edit_seq`
+        // bump below rebuilds it from the new text. A notebook's view is
+        // rebuilt below anyway, and a document's or media card's belonged to
+        // a viewer this text route has just replaced.
+        let keep_preview = !changed_file
+            && self.lang == Some(LangKind::Markdown)
+            && self
+                .markdown_preview
+                .as_ref()
+                .is_some_and(|md| !md.notebook && md.doc_path.is_none());
+        if !keep_preview {
+            self.markdown_preview = None;
+        }
         self.hex = None;
         self.log = None;
         self.archive = None;
@@ -6417,6 +6633,7 @@ impl Editor {
             row_of_line: Vec::new(),
             scroll_to_source: None,
             links: crate::markdown::MdLinks::default(),
+            follows: None,
         });
         self.status = format!("Opened media info {}", path.display());
         Ok(())
@@ -6498,6 +6715,7 @@ impl Editor {
             row_of_line: Vec::new(),
             scroll_to_source: None,
             links: crate::markdown::MdLinks::default(),
+            follows: None,
         });
         self.status = format!("Opened document {}", path.display());
         Ok(())
@@ -7533,6 +7751,10 @@ impl Editor {
         // A pass already running bakes the old palette's colors.
         self.highlight_job = None;
         self.recompute_highlights();
+        // A diff view's colours are baked the same way (#2020).
+        if let Some(diff) = self.diff.as_mut() {
+            diff.syntax.restart();
+        }
         // The markdown preview bakes the theme into its lines at build time
         // and rebuilds only when the buffer edits (`built_seq`), so a theme
         // switch must rebuild it here or it keeps the old colors until the
@@ -7575,17 +7797,28 @@ impl Editor {
         if self.markdown_preview.is_none() {
             return;
         }
+        let text = self.lines.join("\n");
+        self.rebuild_markdown_preview_from(&text, None);
+    }
+
+    /// [`Self::rebuild_markdown_preview`] from `text` instead of this tab's
+    /// buffer (#1605): the source pane's text, for a preview to the side
+    /// that follows it, with `follows` naming that source (`None` when
+    /// `text` is the buffer's own).
+    pub fn rebuild_markdown_preview_from(&mut self, text: &str, follows: Option<(u64, u64)>) {
+        if self.markdown_preview.is_none() {
+            return;
+        }
         // The image-aware builder (#196 review): the plain one left
         // md.images pointing at anchors into the REPLACED lines, and
         // the wrap-key recompute then sliced with stale first_line
         // values - an out-of-range panic on a theme switch.
-        let text = self.lines.join("\n");
         let base = self
             .path
             .as_ref()
             .and_then(|p| p.parent().map(|d| d.to_path_buf()));
         let (lines, images, runnables, source_map, links) = crate::markdown::render_markdown_mapped(
-            &text,
+            text,
             self.theme,
             &mut self.registry,
             base.as_deref(),
@@ -7598,6 +7831,14 @@ impl Editor {
             md.runnables = runnables;
             md.links = links;
             md.built_seq = self.edit_seq;
+            md.follows = follows;
+            // The visual-row caches (images, play glyphs, scroll sync) are
+            // keyed on `(built_seq, width)`, and a preview following another
+            // pane rebuilds with its own `built_seq` unchanged (#1605
+            // review): without this they kept the first build's rows, so
+            // clicks and scrolling landed on stale lines. `(0, 0)` never
+            // matches a drawn width.
+            md.wrap_key = (0, 0);
         }
     }
 
@@ -7795,6 +8036,16 @@ impl Editor {
     /// calls this every tick for every tab; true when the colors changed.
     pub fn poll_highlights(&mut self) -> bool {
         use std::sync::mpsc::TryRecvError;
+        // A diff view's colours land the same way (#2020). One whose pass
+        // waited for a free slot starts it once one frees.
+        if let Some(diff) = self.diff.as_mut() {
+            if diff.syntax.waiting() {
+                diff.colour_syntax(Some(std::time::Duration::ZERO));
+            }
+            if diff.syntax.poll() {
+                return true;
+            }
+        }
         let Some(job) = &self.highlight_job else {
             return false;
         };
@@ -8389,6 +8640,7 @@ impl Editor {
             row_of_line: Vec::new(),
             scroll_to_source,
             links,
+            follows: None,
         });
         true
     }
@@ -8436,6 +8688,7 @@ impl Editor {
             row_of_line: Vec::new(),
             scroll_to_source: None,
             links: crate::markdown::MdLinks::default(),
+            follows: None,
         });
         true
     }
@@ -8561,20 +8814,55 @@ impl Editor {
                 .is_some_and(|l| self.cursor_col < l.chars().count())
     }
 
+    /// Whether `c` typed at the caret joins the cluster just before it: a
+    /// combining accent after its letter, a vowel sign after its consonant, a
+    /// ZWJ or the next part of an emoji sequence.
+    fn joins_cluster_before_caret(&self, c: char) -> bool {
+        let Some(line) = self.lines.get(self.cursor_row) else {
+            return false;
+        };
+        let byte = self.byte_index(self.cursor_row, self.cursor_col);
+        let Some(prev) = line[..byte].graphemes(true).next_back() else {
+            return false;
+        };
+        let mut joined = String::with_capacity(prev.len() + c.len_utf8());
+        joined.push_str(prev);
+        joined.push(c);
+        joined.graphemes(true).nth(1).is_none()
+    }
+
     /// Overwrite-mode typing: replace the character cluster under the caret
-    /// with `c` and step past it. One undo step per keystroke run, like
-    /// ordinary typing. Auto-closing pairs and tags are bypassed: a typed
-    /// bracket replaces, it does not grow a partner.
+    /// with `c` and step past it. A `c` that completes the character before
+    /// the caret (see [`Self::joins_cluster_before_caret`]) belongs to it, so
+    /// it is added and nothing is replaced. One undo step per keystroke run,
+    /// like ordinary typing. Auto-closing pairs and tags are bypassed: a
+    /// typed bracket replaces, it does not grow a partner.
     fn overwrite_char(&mut self, c: char) {
         self.pin_on_edit();
         self.push_undo(EditKind::InsertChar);
+        // A click leaves an empty selection behind; drop it, as the insert
+        // path does, or a later Shift+arrow would extend from the click.
+        self.selection = None;
         let row = self.cursor_row;
         let from = self.byte_index(row, self.cursor_col);
-        let next = next_grapheme_col(&self.lines[row], self.cursor_col);
-        let to = self.byte_index(row, next);
+        let to = if self.joins_cluster_before_caret(c) {
+            from
+        } else {
+            let next = next_grapheme_col(&self.lines[row], self.cursor_col);
+            self.byte_index(row, next)
+        };
         let mut buf = [0u8; 4];
         self.lines[row].replace_range(from..to, c.encode_utf8(&mut buf));
-        self.cursor_col += 1;
+        // The typed char can join the clusters around it into one (a ZWJ
+        // between two emoji, a regional indicator before a flag); step past
+        // the whole cluster then, so the next keystroke never lands inside it.
+        let col = self.cursor_col + 1;
+        let line = &self.lines[row];
+        self.cursor_col = if floor_grapheme_col(line, col) == col {
+            col
+        } else {
+            next_grapheme_col(line, col)
+        };
         self.mark_buffer_changed();
         self.recompute_highlights();
         self.last_typed = Some((c, self.edit_seq));
@@ -9583,13 +9871,84 @@ impl Editor {
     }
 
     pub fn insert_newline(&mut self) {
+        // Enter again on a line Enter only indented leaves that line blank
+        // (#956): the indentation moves down with the caret, and the clear
+        // is part of this Enter's undo step.
+        let blank = self
+            .auto_indent
+            .take()
+            .filter(|&(row, len, seq)| {
+                seq == self.edit_seq
+                    && row == self.cursor_row
+                    && self.selection.is_none()
+                    && self.is_auto_indent_line(row, len)
+            })
+            .map(|(row, ..)| row);
         self.pin_on_edit();
         self.push_undo(EditKind::Newline);
         self.delete_selection_inner();
         self.smart_insert_newline_inner();
+        if let Some(row) = blank
+            && row < self.cursor_row
+            && self.lines[row].chars().all(|c| c == ' ' || c == '\t')
+            && !self.lines[row].is_empty()
+        {
+            self.lines[row].clear();
+            self.remap_carets(|p| p);
+            self.mark_buffer_changed();
+        }
+        self.note_auto_indent();
         self.recompute_highlights();
         // Newline is an on-type trigger for several servers (#254).
         self.last_typed = Some(('\n', self.edit_seq));
+    }
+
+    /// Remember the caret's line when Enter left it holding nothing but the
+    /// indentation it inserted, caret at its end (#956).
+    fn note_auto_indent(&mut self) {
+        let row = self.cursor_row;
+        self.auto_indent = self.lines.get(row).and_then(|line| {
+            let len = line.chars().count();
+            (len > 0 && self.cursor_col == len && line.chars().all(|c| c == ' ' || c == '\t'))
+                .then_some((row, len, self.edit_seq))
+        });
+    }
+
+    /// Whether `row` still holds exactly the `len` characters of
+    /// indentation Enter gave it and nothing else.
+    fn is_auto_indent_line(&self, row: usize, len: usize) -> bool {
+        self.lines.get(row).is_some_and(|line| {
+            line.chars().count() == len && line.chars().all(|c| c == ' ' || c == '\t')
+        })
+    }
+
+    /// Clear the indentation Enter put on a line the caret has since left
+    /// with nothing typed on it (#956), so a blank line between statements
+    /// is saved blank rather than as `"    "` that every linter flags. Called
+    /// after each key and click, with `tab_left` set for every tab but the
+    /// one being typed in: switching away from a tab leaves its line too.
+    /// It takes no undo step of its own: the step on top is still the one
+    /// before the Enter, so one Ctrl+Z still undoes the Enter.
+    pub fn trim_auto_indent(&mut self, tab_left: bool) {
+        let Some((row, len, seq)) = self.auto_indent else {
+            return;
+        };
+        if seq == self.edit_seq && row == self.cursor_row && !tab_left {
+            return;
+        }
+        self.auto_indent = None;
+        // Anything typed or edited since, here or elsewhere, keeps the line.
+        if seq != self.edit_seq || !self.is_auto_indent_line(row, len) {
+            return;
+        }
+        self.lines[row].clear();
+        // A selection end or an extra caret on the line stays on it, at
+        // its new end, not past it.
+        self.remap_carets(|p| p);
+        let pos = self.last_edit_pos;
+        self.mark_buffer_changed();
+        self.last_edit_pos = pos;
+        self.recompute_highlights();
     }
 
     fn smart_insert_newline_inner(&mut self) {
@@ -13398,18 +13757,45 @@ impl Editor {
         self.dedup_carets();
     }
 
-    /// Drop extra carets that sit on the primary or on an earlier caret: kept
-    /// apart, the next key would edit the same spot twice.
+    /// Drop extra carets that sit on the primary or on an earlier caret, and
+    /// merge selections that overlap into one, as VS Code does (#1570):
+    /// kept apart, the next key would edit the same spot twice, and the
+    /// edit at the lower one left the upper one's end stale, so typing over
+    /// two overlapping line selections panicked or deleted lines nobody
+    /// selected. Selections that only touch stay apart, as does a caret at a
+    /// selection's edge. A merged selection keeps the place in the order and
+    /// the direction of its first member, so the primary stays the primary.
     fn dedup_carets(&mut self) {
-        let primary = self.selections_with_primary()[0].normalised();
-        let mut kept: Vec<EditorSelection> = Vec::with_capacity(self.carets.len());
-        for s in std::mem::take(&mut self.carets) {
-            let n = s.normalised();
-            if n != primary && !kept.iter().any(|k| k.normalised() == n) {
-                kept.push(s);
+        let all = self.selections_with_primary();
+        let mut by_start: Vec<usize> = (0..all.len()).collect();
+        by_start.sort_by_key(|&i| all[i].normalised());
+        // Each run of overlapping selections: (first member, start, end).
+        let mut runs: Vec<(usize, BPos, BPos)> = Vec::with_capacity(all.len());
+        for i in by_start {
+            let (start, end) = all[i].normalised();
+            match runs.last_mut() {
+                Some(run) if start < run.2 || (start, end) == (run.1, run.2) => {
+                    run.0 = run.0.min(i);
+                    run.2 = run.2.max(end);
+                }
+                _ => runs.push((i, start, end)),
             }
         }
-        self.carets = kept;
+        runs.sort_unstable_by_key(|run| run.0);
+        let mut merged = runs.into_iter().map(|(i, start, end)| {
+            let (anchor, head) = if all[i].anchor <= all[i].head {
+                (start, end)
+            } else {
+                (end, start)
+            };
+            EditorSelection { anchor, head }
+        });
+        let primary = merged.next().expect("the primary is always first");
+        if primary != all[0] {
+            self.selection = primary.has_area().then_some(primary);
+            (self.cursor_row, self.cursor_col) = primary.head;
+        }
+        self.carets = merged.collect();
     }
 
     /// A position kept as (rows from the last line, chars from its line's
@@ -16301,6 +16687,55 @@ impl Editor {
         self.last_edit_kind = None;
     }
 
+    /// Lines `from` through `to` as one whole-line selection (#1570): from
+    /// the start of the top line to the start of the line after the bottom
+    /// one, or to the end of the buffer's last line, which has none. With
+    /// `to` above `from` it runs upward, the caret at the top.
+    fn whole_lines(&self, from: usize, to: usize) -> EditorSelection {
+        let last = self.lines.len().saturating_sub(1);
+        let (top, bottom) = (from.min(to).min(last), from.max(to).min(last));
+        let start = (top, 0);
+        let end = if bottom < last {
+            (bottom + 1, 0)
+        } else {
+            (last, self.line_char_len(last))
+        };
+        let (anchor, head) = if to < from {
+            (end, start)
+        } else {
+            (start, end)
+        };
+        EditorSelection { anchor, head }
+    }
+
+    /// Whole-line selection by mouse (#1570), as VS Code's triple-click and
+    /// line-number click make: select from line `anchor` (the line under the
+    /// pointer when `None`) through the line under screen `(col, row)`, and
+    /// return the anchor so a drag can keep extending from it.
+    pub fn select_lines_at(&mut self, anchor: Option<usize>, col: u16, row: u16) -> usize {
+        self.click(col, row);
+        let anchor = anchor.unwrap_or(self.cursor_row);
+        self.set_selections(&[self.whole_lines(anchor, self.cursor_row)]);
+        anchor
+    }
+
+    /// VS Code "Expand Line Selection" (#1570): every cursor's selection
+    /// grows to the whole lines it touches, through the start of the next
+    /// line. A selection that already ends at a line start reaches one line
+    /// further, so each press adds a line.
+    pub fn expand_line_selection(&mut self) {
+        let all: Vec<EditorSelection> = self
+            .selections_with_primary()
+            .iter()
+            .map(|s| {
+                let (start, end) = s.normalised();
+                self.whole_lines(start.0, end.0)
+            })
+            .collect();
+        self.set_selections(&all);
+        self.last_edit_kind = None;
+    }
+
     /// Move the cursor to the screen coordinates (col, row). Used for mouse clicks.
     pub fn click(&mut self, col: u16, row: u16) {
         if self.lines.is_empty() || self.last_inner.height == 0 {
@@ -16494,7 +16929,8 @@ impl Editor {
 
     /// Severities and messages of every diagnostic whose range covers the
     /// character position, each message followed by its rule as
-    /// `source(code)` and the rule's link on a line of its own (#1540).
+    /// `source(code)` and the rule's link on a line of its own (#1540), then
+    /// a line per related location (#1523), its file relative to `root`.
     /// The position is `(line, ch)`. Decoded on demand from the retained
     /// `diagnostics` (UTF-16 positions) rather than the per-line span cache so
     /// the messages don't have to be duplicated into the render-time cache.
@@ -16506,6 +16942,7 @@ impl Editor {
         &self,
         line: usize,
         ch: usize,
+        root: &Path,
     ) -> Vec<(crate::lsp::manager::DiagnosticSeverity, String)> {
         if self.diagnostics_path.as_deref() != self.path.as_deref() {
             return Vec::new();
@@ -16532,7 +16969,12 @@ impl Editor {
             };
             let to = to.max(from + 1);
             if ch >= from && ch < to {
-                out.push((d.severity, message_with_code(d)));
+                let mut text = message_with_code(d);
+                for related in d.related() {
+                    text.push('\n');
+                    text.push_str(&related.label(root));
+                }
+                out.push((d.severity, text));
             }
         }
         out
@@ -17028,10 +17470,14 @@ fn text_end(start: (usize, usize), text: &str) -> (usize, usize) {
 
 /// Title-case a string: the first alphanumeric of each run is upper-cased,
 /// the rest lower-cased, separators preserved. Used by Transform to Title
-/// Case.
+/// Case. An apostrophe (`'` or `’`) right after a letter stays inside the
+/// word, so `don't` and `journey's` keep a lower-case tail (#1016); one at
+/// the start of a word (`'tis`) still lets the next letter start it, as in
+/// VS Code.
 fn title_case(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut prev_alnum = false;
+    let mut prev_letter = false;
     for c in s.chars() {
         if c.is_alphanumeric() {
             if prev_alnum {
@@ -17040,9 +17486,15 @@ fn title_case(s: &str) -> String {
                 out.extend(c.to_uppercase());
             }
             prev_alnum = true;
+            prev_letter = c.is_alphabetic();
+        } else if matches!(c, '\'' | '\u{2019}') && prev_letter {
+            // `prev_alnum` stays set: the letter after it continues the word.
+            out.push(c);
+            prev_letter = false;
         } else {
             out.push(c);
             prev_alnum = false;
+            prev_letter = false;
         }
     }
     out
@@ -18924,6 +19376,24 @@ fn line_mapper<'a>(
     }
 }
 
+/// `marks` (1-based lines of `old`) carried to the lines they sit on in
+/// `new`, another copy of the same file: a second tab of it whose unsaved
+/// edits differ, or the file on disk under a buffer whose edits are being
+/// discarded. Each mark moves as an edit from `old` to `new` would move it
+/// (see [`line_mapper`]): one on a line deleted outright is dropped, and one
+/// on a line edited in place stays on that line, as it does while typing.
+pub fn carry_marks(
+    marks: &std::collections::BTreeSet<usize>,
+    old: &[String],
+    new: &[String],
+) -> std::collections::BTreeSet<usize> {
+    if old == new {
+        return marks.clone();
+    }
+    let map = line_mapper(old, new);
+    marks.iter().filter_map(|&line| map(line)).collect()
+}
+
 /// The line mapping behind [`shift_bookmark_lines`].
 fn shift_line_mapper<'a>(
     old: &'a [String],
@@ -19319,6 +19789,7 @@ impl Widget for &mut Editor {
         self.last_hscrollbar = Rect::default();
         self.merge_action_spans.clear();
         self.code_lens_spans.clear();
+        self.blame_span = None;
         // Every rect this frame publishes is cleared up front, so a frame
         // that paints nothing leaves nothing behind for the mouse path to
         // hit-test against. `render_log` sets its own when it paints; the
@@ -20552,6 +21023,13 @@ impl Widget for &mut Editor {
                             .fg(self.theme.ignored_fg())
                             .add_modifier(Modifier::ITALIC),
                     );
+                    // Hover and click reach the commit it names (#1556);
+                    // `Uncommitted changes` has none to show.
+                    if let Some(LineBlame::Commit(c)) = self.cursor_line_blame() {
+                        let hash = c.hash.clone();
+                        let w = unicode_width::UnicodeWidthStr::width(shown.as_str()) as u16;
+                        self.blame_span = Some((y, start_x..(start_x + w).min(right), hash));
+                    }
                 }
             }
 
@@ -20896,8 +21374,10 @@ impl Editor {
     /// Paint the rendered Markdown preview: the pre-built lines flow through
     /// a wrapping `Paragraph` so paragraphs reflow with the pane, scrolled by
     /// the preview's own offset, with a scrollbar over the wrapped height.
-    /// Rebuilds first when the buffer moved under the preview (a live edit in
-    /// a split, an external reload) so it always shows the current text.
+    /// Rebuilds first when the buffer moved under the preview (an edit, an
+    /// external reload) so it always shows the current text. A preview to
+    /// the side shows its source pane's text, which the app hands it
+    /// (`App::sync_markdown_side_previews`, #1605).
     fn render_markdown_preview(&mut self, inner: Rect, buf: &mut Buffer) {
         let stale = self
             .markdown_preview
@@ -20910,26 +21390,7 @@ impl Editor {
         } else if stale {
             // The image-aware builder (#176): the plain one here left the
             // images list pointing at STALE anchors after a live edit.
-            let text = self.lines.join("\n");
-            let base = self
-                .path
-                .as_ref()
-                .and_then(|p| p.parent().map(|d| d.to_path_buf()));
-            let (lines, images, runnables, map, links) = crate::markdown::render_markdown_mapped(
-                &text,
-                self.theme,
-                &mut self.registry,
-                base.as_deref(),
-                self.md_outputs.clone(),
-            );
-            if let Some(md) = self.markdown_preview.as_mut() {
-                md.lines = lines;
-                md.source_map = map;
-                md.images = images;
-                md.runnables = runnables;
-                md.links = links;
-                md.built_seq = self.edit_seq;
-            }
+            self.rebuild_markdown_preview();
         }
         let Some(md) = self.markdown_preview.as_mut() else {
             return;
@@ -22361,6 +22822,10 @@ pub struct EditorTabs {
     pub hover_pointer: Option<(u16, u16)>,
     /// Handed to the active editor each frame: see [`Editor::cell_images`].
     pub cell_images: bool,
+    /// The bookmarks of the tabs closed since the App last took them
+    /// ([`Self::take_released_bookmarks`]), on the files' saved lines, so a
+    /// file's marks outlive the last tab that held them.
+    released_bookmarks: Vec<std::collections::HashMap<PathBuf, std::collections::BTreeSet<usize>>>,
 }
 
 impl EditorTabs {
@@ -22381,6 +22846,7 @@ impl EditorTabs {
             search_highlight_term: None,
             search_highlight_opts: crate::widgets::search::SearchOpts::default(),
             hover_pointer: None,
+            released_bookmarks: Vec::new(),
         }
     }
 
@@ -22441,10 +22907,12 @@ impl EditorTabs {
             return;
         }
         if let Some(page) = ed.pdf_page() {
+            // One page per wheel event, like the focused preview: the
+            // caller's notches are text lines (3 a tick), not pages.
             let target = if notches >= 0 {
-                page.saturating_add(notches as u32)
+                page.saturating_add(1)
             } else {
-                page.saturating_sub(notches.unsigned_abs()).max(1)
+                page.saturating_sub(1).max(1)
             };
             ed.set_pdf_page(target);
             return;
@@ -22510,6 +22978,16 @@ impl EditorTabs {
         self.active = idx;
         self.editors[self.active].focused = true;
         true
+    }
+
+    /// [`Editor::trim_auto_indent`] over every tab (#956): the active one
+    /// keeps the line its caret is still on when `focused_group`, and every
+    /// other tab has been switched away from, so its line was left.
+    pub fn trim_auto_indents(&mut self, focused_group: bool) {
+        let active = self.active;
+        for (i, editor) in self.editors.iter_mut().enumerate() {
+            editor.trim_auto_indent(!(focused_group && i == active));
+        }
     }
 
     /// Sweep EVERY open tab (not just the active one) for external on-disk
@@ -22692,11 +23170,13 @@ impl EditorTabs {
             let was_focused = self.editors[0].focused;
             let mut fresh = Editor::new();
             fresh.focused = was_focused;
-            self.editors[0] = fresh;
+            let closed = std::mem::replace(&mut self.editors[0], fresh);
+            self.release_bookmarks(&closed);
             self.active = 0;
             return true;
         }
-        self.editors.remove(idx);
+        let closed = self.editors.remove(idx);
+        self.release_bookmarks(&closed);
         if self.active > idx {
             self.active -= 1;
         } else if self.active >= self.editors.len() {
@@ -22706,6 +23186,21 @@ impl EditorTabs {
             ed.focused = i == self.active;
         }
         true
+    }
+
+    /// Keep a closing tab's bookmarks for the App, which holds a file's
+    /// marks once no tab does.
+    fn release_bookmarks(&mut self, closed: &Editor) {
+        if !closed.bookmarks.is_empty() {
+            self.released_bookmarks.push(closed.bookmarks_on_disk());
+        }
+    }
+
+    /// The bookmarks of the tabs closed since the last call, oldest first.
+    pub fn take_released_bookmarks(
+        &mut self,
+    ) -> Vec<std::collections::HashMap<PathBuf, std::collections::BTreeSet<usize>>> {
+        std::mem::take(&mut self.released_bookmarks)
     }
 
     /// Close every tab whose index ≠ `keep_idx`, except pinned tabs, which
@@ -22727,6 +23222,8 @@ impl EditorTabs {
                 kept.push(ed);
             } else if ed.pinned || ed.dirty {
                 kept.push(ed);
+            } else {
+                self.release_bookmarks(&ed);
             }
         }
         let removed = before - kept.len();
@@ -22761,6 +23258,8 @@ impl EditorTabs {
                     new_active = Some(kept.len());
                 }
                 kept.push(ed);
+            } else {
+                self.release_bookmarks(&ed);
             }
         }
         let removed = before - kept.len();
@@ -22804,6 +23303,8 @@ impl EditorTabs {
                     new_active = kept.len();
                 }
                 kept.push(ed);
+            } else {
+                self.release_bookmarks(&ed);
             }
         }
         let removed = before - kept.len();
@@ -23173,7 +23674,8 @@ impl EditorTabs {
             if let Some(prev) = self.preview_index()
                 && prev != idx
             {
-                self.editors.remove(prev);
+                let dropped = self.editors.remove(prev);
+                self.release_bookmarks(&dropped);
                 let new_idx = if idx > prev { idx - 1 } else { idx };
                 // Bypass `select` here because the removal may have left
                 // `self.active` pointing past the end (when the active
@@ -24343,7 +24845,7 @@ mod tests {
         uncommitted: bool,
     ) -> std::sync::Arc<crate::git::BlameCommit> {
         std::sync::Arc::new(crate::git::BlameCommit {
-            short_hash: "abc12345".into(),
+            hash: "abc12345".into(),
             summary: summary.into(),
             author: author.into(),
             age_secs: age,
@@ -27479,6 +27981,171 @@ mod tests {
         assert!(!row(3).contains("NULL"), "'' stays empty: {}", row(3));
     }
 
+    /// #1138: CJK, Hangul and emoji take two columns each. The grid sized
+    /// and filled cells in chars, so `서울특별시` showed as `서울특` and ran
+    /// into the next column (`大阪府2750000`).
+    #[test]
+    fn wide_characters_fit_their_column_and_keep_the_gap() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("cities.csv");
+        std::fs::write(
+            &p,
+            "city,pref,pop\n東京都,東京,13960000\n大阪市,大阪府,2750000\n\
+             Seoul,서울특별시,9500000\nemoji 🎉🎉🎉,x,1\n",
+        )
+        .unwrap();
+        let mut e = Editor::new();
+        e.open(&p).unwrap();
+        let view = e.sheet.as_mut().unwrap();
+        // The caret sits on the header-less last row, so the rows above
+        // draw plainly.
+        view.sheets[0].cur_row = 3;
+        let area = Rect::new(0, 0, 60, 8);
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        render_sheet(
+            view,
+            Some(&p),
+            area,
+            &mut buf,
+            Color::Reset,
+            crate::theme::Theme::default(),
+        );
+        // What a terminal shows on row `y`: a wide glyph's covered cell is
+        // skipped, as the terminal draws the glyph over it.
+        let row = |y: u16| -> String {
+            let mut out = String::new();
+            let mut x = 0;
+            while x < area.width {
+                let sym = buf[(x, y)].symbol();
+                out.push_str(sym);
+                x += unicode_width::UnicodeWidthStr::width(sym).max(1) as u16;
+            }
+            out
+        };
+        let screen: Vec<String> = (0..area.height).map(row).collect();
+        let body = screen.join("\n");
+        for whole in ["東京都", "大阪府", "서울특별시", "emoji 🎉🎉🎉"] {
+            assert!(body.contains(whole), "{whole} is drawn whole:\n{body}");
+        }
+        assert!(
+            !body.contains("大阪府2750000"),
+            "a gap between columns:\n{body}"
+        );
+        assert!(
+            !body.contains("시9500000"),
+            "a gap between columns:\n{body}"
+        );
+        // Every value of a column starts at the same screen column.
+        let col_of = |needle: &str| -> usize {
+            let line = screen.iter().find(|l| l.contains(needle)).unwrap();
+            let byte = line.find(needle).unwrap();
+            unicode_width::UnicodeWidthStr::width(&line[..byte])
+        };
+        assert_eq!(col_of("13960000"), col_of("2750000"));
+        assert_eq!(col_of("2750000"), col_of("9500000"));
+        assert_eq!(col_of("大阪府"), col_of("서울특별시"));
+    }
+
+    /// #1138: the in-grid editor windows its text in screen columns too. A
+    /// value of wide characters longer than the column shows its tail with
+    /// the caret inside the slot, not twice the slot running over the next
+    /// column.
+    #[test]
+    fn the_in_grid_editor_keeps_wide_text_inside_its_column() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("cities.csv");
+        std::fs::write(&p, "city,pref,pop\nSeoul,서울특별시,9500000\nx,y,1\n").unwrap();
+        let mut e = Editor::new();
+        e.open(&p).unwrap();
+        let view = e.sheet.as_mut().unwrap();
+        let value = "서울특별시서울특별시".to_string();
+        view.sheets[0].cur_row = 0;
+        view.sheets[0].cur_col = 1;
+        view.editing = Some(crate::sheet::CellEdit {
+            cursor: value.len(),
+            value,
+        });
+        let area = Rect::new(0, 0, 50, 6);
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        render_sheet(
+            view,
+            Some(&p),
+            area,
+            &mut buf,
+            Color::Reset,
+            crate::theme::Theme::default(),
+        );
+        let line = (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .find(|l| l.contains("Seoul"))
+            .unwrap();
+        assert!(
+            line.contains("9500000"),
+            "the next column is intact: {line:?}"
+        );
+        // The tail that fits: 4 of the 10 glyphs (8 columns), then the caret.
+        assert!(line.contains("울 특 별 시"), "{line:?}");
+        assert!(!line.contains("서 울 특 별 시 서"), "{line:?}");
+    }
+
+    /// #1138 review: 20 CJK characters make a 40-column-wide column. In a
+    /// pane narrower than that, the grid drew no column at all; it now
+    /// draws that one clipped to the pane.
+    #[test]
+    fn a_column_wider_than_a_narrow_pane_is_drawn_clipped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("long.csv");
+        let long = "東京都".repeat(7);
+        std::fs::write(&p, format!("name,n\n{long},1\nx,2\n")).unwrap();
+        let mut e = Editor::new();
+        e.open(&p).unwrap();
+        let view = e.sheet.as_mut().unwrap();
+        view.sheets[0].cur_row = 1;
+        let area = Rect::new(0, 0, 30, 6);
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        render_sheet(
+            view,
+            Some(&p),
+            area,
+            &mut buf,
+            Color::Reset,
+            crate::theme::Theme::default(),
+        );
+        let body = (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(body.contains("name"), "the header is drawn:\n{body}");
+        assert!(
+            body.contains("東 京 都 東 京 都"),
+            "the value, clipped:\n{body}"
+        );
+    }
+
+    #[test]
+    fn a_wide_glyph_that_would_straddle_the_cell_edge_is_left_out() {
+        let area = Rect::new(0, 0, 6, 1);
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        buf.set_string(0, 0, "zzzzzz", Style::default());
+        // Three columns hold one wide glyph; the second would need 4.
+        write_cell(&mut buf, 0, 0, 3, "表表", Style::default());
+        assert_eq!(buf[(0, 0)].symbol(), "表");
+        assert_eq!(buf[(2, 0)].symbol(), " ", "the edge column is blank");
+        assert_eq!(
+            buf[(3, 0)].symbol(),
+            "z",
+            "nothing past the slot is touched"
+        );
+    }
+
     #[test]
     fn oversized_csv_keeps_its_size_refusal_instead_of_silently_opening() {
         // #188 review: the parse-failure fallthrough must not swallow
@@ -28307,7 +28974,7 @@ mod tests {
             }],
         );
         assert_eq!(
-            e.diagnostics_at(0, 6),
+            e.diagnostics_at(0, 6, Path::new("/tmp")),
             vec![(
                 DiagnosticSeverity::Error,
                 String::from("Type 'number' is not assignable to type 'string'.")
@@ -28315,7 +28982,7 @@ mod tests {
             "a point inside the diagnostic range must surface its message"
         );
         assert!(
-            e.diagnostics_at(0, 0).is_empty(),
+            e.diagnostics_at(0, 0, Path::new("/tmp")).is_empty(),
             "a point outside every diagnostic range must surface nothing"
         );
     }
@@ -28356,7 +29023,7 @@ mod tests {
             ],
         );
         assert_eq!(
-            e.diagnostics_at(0, 8),
+            e.diagnostics_at(0, 8, Path::new("/tmp")),
             vec![(
                 crate::lsp::manager::DiagnosticSeverity::Warning,
                 String::from(
@@ -28365,11 +29032,50 @@ mod tests {
             )]
         );
         assert_eq!(
-            e.diagnostics_at(0, 12),
+            e.diagnostics_at(0, 12, Path::new("/tmp")),
             vec![(
                 crate::lsp::manager::DiagnosticSeverity::Warning,
                 String::from("`json` is unused")
             )]
+        );
+    }
+
+    /// #1523: the places the server points at to explain a diagnostic
+    /// follow it in the hover as `file(line, col): message`, one-based, the
+    /// file relative to the workspace.
+    #[test]
+    fn diagnostics_at_lists_the_related_locations_under_the_message() {
+        let mut e = editor_with("let first = &v[0]; v.push(2);");
+        e.path = Some(PathBuf::from("/w/src/main.rs"));
+        let at = |line, character, message: &str| lsp_types::DiagnosticRelatedInformation {
+            location: lsp_types::Location {
+                uri: lsp_types::Url::parse("file:///w/src/main.rs").unwrap(),
+                range: lsp_types::Range::new(
+                    lsp_types::Position::new(line, character),
+                    lsp_types::Position::new(line, character + 1),
+                ),
+            },
+            message: message.into(),
+        };
+        let wire = lsp_types::Diagnostic {
+            range: lsp_types::Range::new(
+                lsp_types::Position::new(0, 19),
+                lsp_types::Position::new(0, 28),
+            ),
+            message: "cannot borrow `v` as mutable".into(),
+            related_information: Some(vec![
+                at(0, 13, "immutable borrow occurs here"),
+                at(4, 15, "immutable borrow later used here"),
+            ]),
+            ..Default::default()
+        };
+        let d = crate::lsp::client::convert_diagnostic("rust-analyzer", &wire);
+        e.apply_diagnostics(PathBuf::from("/w/src/main.rs"), vec![d]);
+        assert_eq!(
+            e.diagnostics_at(0, 20, Path::new("/w"))[0].1,
+            "cannot borrow `v` as mutable\n\
+             src/main.rs(1, 14): immutable borrow occurs here\n\
+             src/main.rs(5, 16): immutable borrow later used here"
         );
     }
 
@@ -28394,7 +29100,7 @@ mod tests {
             }],
         );
         assert_eq!(
-            e.diagnostics_at(0, 6),
+            e.diagnostics_at(0, 6, Path::new("/tmp")),
             vec![(
                 DiagnosticSeverity::Warning,
                 String::from("missing semicolon")
@@ -29649,6 +30355,55 @@ mod tests {
             text.contains("New heading") && !text.contains("Old heading"),
             "a stale preview must rebuild against the edited buffer; got:\n{text}"
         );
+    }
+
+    /// #1605: the same-path `open` behind every FS-sync reload (a save in
+    /// another pane, an agent rewriting the file) keeps the tab rendered,
+    /// showing the new text; another file still opens as source.
+    #[test]
+    fn markdown_preview_survives_a_same_path_reload() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("doc.md");
+        std::fs::write(&path, "# Old heading\n").unwrap();
+        let mut e = Editor::new();
+        e.open(&path).unwrap();
+        assert!(e.toggle_markdown_preview());
+        std::fs::write(&path, "# Rewritten heading\n\nAnd a paragraph.\n").unwrap();
+        e.open(&path).unwrap();
+        assert!(
+            e.markdown_preview.is_some(),
+            "a reload of the same file must stay a preview"
+        );
+        let text = first_row_screen(&mut e, 60, 8);
+        assert!(
+            text.contains("Rewritten heading") && !text.contains("# Rewritten"),
+            "the preview must render the reloaded text; got:\n{text}"
+        );
+        let other = tmp.path().join("other.md");
+        std::fs::write(&other, "# Other\n").unwrap();
+        e.open(&other).unwrap();
+        assert!(e.markdown_preview.is_none(), "another file opens as source");
+    }
+
+    /// #1605 review: a preview rebuilt from another pane's text keeps its own
+    /// `built_seq`, so its row caches must still be rebuilt, or scroll sync,
+    /// link and play-glyph clicks use the first build's rows.
+    #[test]
+    fn a_preview_rebuilt_from_another_pane_refreshes_its_row_caches() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("doc.md");
+        std::fs::write(&path, "# Title\n").unwrap();
+        let mut e = Editor::new();
+        e.open(&path).unwrap();
+        assert!(e.toggle_markdown_preview());
+        first_row_screen(&mut e, 60, 20);
+        let typed = "# Title\n\nA new paragraph.\n\n```sh\necho hi\n```\n";
+        e.rebuild_markdown_preview_from(typed, Some((7, 7)));
+        first_row_screen(&mut e, 60, 20);
+        let md = e.markdown_preview.as_ref().unwrap();
+        assert_eq!(md.row_of_line.len(), md.lines.len(), "scroll-sync rows");
+        assert_eq!(md.runnables.len(), 1);
+        assert_eq!(md.run_rows.len(), 1, "the new block's play glyph has a row");
     }
 
     /// Render into a fresh buffer and return the whole screen as one string.
@@ -33833,7 +34588,11 @@ mod tests {
             e.diagnostic_spans[0],
             vec![(11, 12, DiagnosticSeverity::Error)]
         );
-        assert_eq!(e.diagnostics_at(0, 11).len(), 1, "hovered at the row's end");
+        assert_eq!(
+            e.diagnostics_at(0, 11, Path::new("/tmp")).len(),
+            1,
+            "hovered at the row's end"
+        );
     }
 
     /// #911: a formatter's edit up to the end of that text keeps the final
@@ -36880,6 +37639,78 @@ mod tests {
         );
     }
 
+    /// #2020: the diff view paints code in its language's colours, on the
+    /// rows' red, green and plain backgrounds, as the editor does.
+    #[test]
+    fn the_diff_view_paints_code_in_its_syntax_colours() {
+        let file = |text: &str| {
+            let f = tempfile::Builder::new().suffix(".rs").tempfile().unwrap();
+            std::fs::write(f.path(), text).unwrap();
+            f
+        };
+        let f1 = file("fn main() {\n    let x = 1;\n}\n");
+        let f2 = file("fn main() {\n    let x = 2;\n}\n");
+        let mut t = EditorTabs::new();
+        t.open_diff(f1.path(), f2.path()).unwrap();
+        let idx = t.active_index();
+        t.editors[idx].diff.as_mut().unwrap().colour_syntax(None);
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 10,
+        };
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        ratatui::widgets::Widget::render(&mut t.editors[idx], area, &mut buf);
+        let ed = &t.editors[idx];
+        let inner = ed.last_inner;
+        let (l_text_x, unchanged) = left_text_at(&buf, inner, 3, "fn main() {");
+        assert_ne!(
+            buf[(l_text_x, unchanged)].fg,
+            buf[(l_text_x + 3, unchanged)].fg,
+            "the keyword `fn` and the name `main` read in different colours"
+        );
+        let (_, changed) = left_text_at(&buf, inner, 3, "    let x = 1;");
+        let r_text_x = inner.x + inner.width / 2 + 1 + 2 + 2;
+        assert_eq!(
+            row_text(&buf, changed, r_text_x, r_text_x + 14),
+            "    let x = 2;"
+        );
+        let removed_bg = ed.theme.ui(Color::Rgb(0x4a, 0x1f, 0x1f));
+        let added_bg = ed.theme.ui(Color::Rgb(0x1f, 0x42, 0x2a));
+        for (x, bg, side) in [
+            (l_text_x, removed_bg, "removed"),
+            (r_text_x, added_bg, "added"),
+        ] {
+            let keyword = &buf[(x + 4, changed)];
+            let name = &buf[(x + 8, changed)];
+            assert_eq!(keyword.symbol(), "l");
+            assert_ne!(
+                keyword.fg, name.fg,
+                "`let` and `x` differ on the {side} side"
+            );
+            assert_eq!(keyword.bg, bg, "the {side} row keeps its background");
+            assert_eq!(name.bg, bg);
+        }
+    }
+
+    /// A file with no grammar keeps the diff's own tints: red text on the
+    /// removed side, green on the added.
+    #[test]
+    fn a_diff_with_no_grammar_keeps_its_red_and_green_text() {
+        let (buf, inner, r_text_x) = render_wide_diff("x\nold line\n", "x\nnew line\n");
+        let (l_text_x, y) = left_text_at(&buf, inner, 2, "old line");
+        let theme = crate::theme::Theme::default();
+        assert_eq!(
+            buf[(l_text_x, y)].fg,
+            theme.ui(Color::Rgb(0xff, 0xb3, 0xb3))
+        );
+        assert_eq!(
+            buf[(r_text_x, y)].fg,
+            theme.ui(Color::Rgb(0xb6, 0xee, 0xc4))
+        );
+    }
+
     #[test]
     fn render_diff_paints_selection_band_over_selected_cells() {
         use crate::widgets::diff::DiffSide;
@@ -39659,6 +40490,94 @@ mod tests {
         assert_eq!(e.lines, vec!["Hello There World"]);
     }
 
+    /// #956: Enter, Enter inside a block leaves the first new line blank,
+    /// not holding the indentation, and the next line is still indented.
+    #[test]
+    fn enter_twice_leaves_no_indentation_on_the_blank_line() {
+        let mut e = editor_with("def area(w, h):\n    return w * h");
+        e.cursor_row = 1;
+        e.cursor_col = 16;
+        e.insert_newline();
+        assert_eq!(e.lines[2], "    ", "Enter indents the new line");
+        e.insert_newline();
+        for c in "total".chars() {
+            e.insert_char(c);
+        }
+        assert_eq!(
+            e.lines,
+            ["def area(w, h):", "    return w * h", "", "    total"]
+        );
+        // One Ctrl+Z per Enter, as before: the clear is part of the second.
+        e.undo();
+        e.undo();
+        assert_eq!(e.lines, ["def area(w, h):", "    return w * h", "    "]);
+    }
+
+    /// #956: leaving the indented line by moving off it clears it too; one
+    /// that got text keeps its indentation.
+    #[test]
+    fn leaving_an_indented_blank_line_clears_it_but_typing_keeps_it() {
+        let mut e = editor_with("if x:\n    a = 1\n    b = 2");
+        e.cursor_row = 1;
+        e.cursor_col = 9;
+        e.insert_newline();
+        e.move_down();
+        e.trim_auto_indent(false);
+        assert_eq!(e.lines[2], "", "moved off with nothing typed");
+        assert!(e.dirty);
+        let mut e = editor_with("if x:\n    a = 1\n    b = 2");
+        e.cursor_row = 1;
+        e.cursor_col = 9;
+        e.insert_newline();
+        e.insert_char('c');
+        e.move_down();
+        e.trim_auto_indent(false);
+        assert_eq!(e.lines[2], "    c", "typed-on lines keep their indentation");
+        // A selection from the line keeps its end on the line once cleared.
+        let mut e = editor_with("if x:\n    a = 1\n    b = 2");
+        e.cursor_row = 1;
+        e.cursor_col = 9;
+        e.insert_newline();
+        e.selection = Some(EditorSelection {
+            anchor: (2, 4),
+            head: (3, 4),
+        });
+        e.cursor_row = 3;
+        e.cursor_col = 4;
+        e.trim_auto_indent(false);
+        assert_eq!(e.lines[2], "");
+        assert_eq!(e.selection.map(|s| s.anchor), Some((2, 0)));
+        // Negative: staying on the line keeps the indent where the caret is.
+        let mut e = editor_with("if x:\n    a = 1");
+        e.cursor_row = 1;
+        e.cursor_col = 9;
+        e.insert_newline();
+        e.trim_auto_indent(false);
+        assert_eq!(e.lines[2], "    ");
+        assert_eq!(e.cursor_col, 4);
+    }
+
+    /// #1016: an apostrophe inside a word doesn't start a new one, so
+    /// contractions and possessives keep their lower-case tail; one that
+    /// opens a word (`'tis`) still capitalises the letter after it.
+    #[test]
+    fn title_case_keeps_contractions_whole() {
+        assert_eq!(
+            title_case("## don't stop believing: it's the journey's end"),
+            "## Don't Stop Believing: It's The Journey's End"
+        );
+        assert_eq!(
+            title_case("we'll be there by o'clock, won't we?"),
+            "We'll Be There By O'clock, Won't We?"
+        );
+        assert_eq!(
+            title_case("don\u{2019}t it\u{2019}s"),
+            "Don\u{2019}t It\u{2019}s"
+        );
+        assert_eq!(title_case("'tis the season"), "'Tis The Season");
+        assert_eq!(title_case("say 'hello' twice"), "Say 'Hello' Twice");
+    }
+
     /// #1573: the four naming styles, from each other.
     #[test]
     fn identifiers_change_naming_style() {
@@ -39963,7 +40882,8 @@ mod tests {
         }];
         e.transform_selection_case(CaseTransform::Upper);
         assert_eq!(e.lines, vec!["HELLO world"]);
-        assert_eq!(selected_texts(&e), vec!["HELLO", "L"]);
+        // One inside the other is an overlap: they come back as one (#1570).
+        assert_eq!(selected_texts(&e), vec!["HELLO"]);
     }
 
     #[test]
@@ -39979,8 +40899,10 @@ mod tests {
         }];
         e.transform_selection_case(CaseTransform::Upper);
         assert_eq!(e.lines, vec!["HELLO WOrld"]);
-        assert_eq!(selected_texts(&e), vec!["HELLO", "LO WO"]);
-        assert_eq!(e.selection.unwrap().head, (0, 3), "direction is kept");
+        // The two overlap, so they come back as one (#1570): kept apart,
+        // typing over them would edit the shared text twice.
+        assert_eq!(selected_texts(&e), vec!["HELLO WO"]);
+        assert_eq!(e.selection.unwrap().head, (0, 0), "direction is kept");
     }
 
     #[test]
