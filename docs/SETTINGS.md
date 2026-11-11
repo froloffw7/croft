@@ -453,6 +453,11 @@ Every interactive icon and heading highlights under the pointer the same way, in
 * `"hover_icon"` sets it for icons (the header icons of Explorer, Search, Source Control and the like, the open-tabs button, the layout toggles, the `+` / `-` / `⋯` buttons): `"accent"` (the default) turns the glyph to the theme's accent, `"color"` takes the colour of `"hover_icon_color"`, `"pill"` keeps the glyph's colour and shows a pill of the accent behind it.
 * `"hover_heading"` sets it for headings such as the PROBLEMS, OUTPUT and TERMINAL tabs of the panel: `"soft"` (the default) brightens the text to a soft white, `"color"` takes the colour of `"hover_heading_color"`, `"accent"` turns it to the theme's accent, `"pill"` adds a pill of the accent behind it.
 * `"hover_icon_color"` and `"hover_heading_color"` are the colours of the `"color"` modes: one of the active theme's 16 terminal colours by name (`black`, `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `white`, and the `bright_` forms; `gray` is `bright_black`), so it follows the theme, or a fixed `#rrggbb`. Empty or unknown means the theme's accent.
+* `"hover_icon_pill_color"` and `"hover_heading_pill_color"` are the fill of the `"pill"` modes, named the same way (empty: the theme's accent). The text on a chosen fill is black or white, whichever reads better.
+
+## Hint popup border
+
+`"popup_border"` sets the border of the hint popups (the LSP hover, signature help and completion list, and the tooltips over buttons): `"plain"` (the default), `"rounded"`, `"double"` or `"thick"`. A theme that frames its overlays itself (Black's gradient box, the card edge of the surface themes) draws that frame over it.
 
 Both are user-config only.
 

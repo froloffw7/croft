@@ -56,7 +56,11 @@ pub fn choices(key: &str) -> Option<Vec<String>> {
         "render_whitespace" => &["selection", "all", "none"],
         "hover_icon" => &["accent", "color", "pill"],
         "hover_heading" => &["soft", "color", "accent", "pill"],
-        "hover_icon_color" | "hover_heading_color" => {
+        "popup_border" => &["plain", "rounded", "double", "thick"],
+        "hover_icon_color"
+        | "hover_heading_color"
+        | "hover_icon_pill_color"
+        | "hover_heading_pill_color" => {
             return Some(
                 std::iter::once(String::new())
                     .chain(
@@ -511,6 +515,12 @@ mod tests {
             assert!(crate::widgets::hover::HoverColor::parse(c).is_some(), "{c}");
         }
         assert_eq!(choices("hover_heading_color").unwrap(), colours);
+        assert_eq!(choices("hover_icon_pill_color").unwrap(), colours);
+        assert_eq!(choices("hover_heading_pill_color").unwrap(), colours);
+        assert_eq!(
+            choices("popup_border").unwrap(),
+            ["plain", "rounded", "double", "thick"]
+        );
         // Each choice is what the setting parses, so none is ignored.
         for c in choices("hover_icon").unwrap() {
             let mode = crate::widgets::hover::IconHover::from_pref(&c);

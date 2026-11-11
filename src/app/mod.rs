@@ -70367,11 +70367,11 @@ impl App {
         self.editor.show_indent_guides = self.indent_guides_enabled;
         self.home_walks_rows = p.home_walks_wrapped_rows;
         crate::widgets::hover::set_settings(crate::widgets::hover::HoverSettings::from_prefs(
-            &p.hover_heading,
-            &p.hover_icon,
-            &p.hover_heading_color,
-            &p.hover_icon_color,
+            (&p.hover_heading, &p.hover_icon),
+            (&p.hover_heading_color, &p.hover_icon_color),
+            (&p.hover_heading_pill_color, &p.hover_icon_pill_color),
         ));
+        crate::widgets::hover::set_popup_border(&p.popup_border);
         self.bracket_colors_enabled = !p.disable_bracket_colors;
         self.editor.show_bracket_colors = self.bracket_colors_enabled;
         self.whitespace_mode =

@@ -130,6 +130,7 @@ impl Widget for &SignatureHelpPopup {
 
         let block = Block::default()
             .borders(Borders::ALL)
+            .border_type(crate::widgets::hover::popup_border_type())
             .border_style(Style::default().fg(self.theme.ui(Color::Rgb(0x4e, 0x9a, 0xff))))
             .title(Line::from(title_spans))
             .style(Style::default().bg(self.theme.ui(Color::Rgb(0x1e, 0x21, 0x2a))));

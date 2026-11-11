@@ -421,6 +421,20 @@ pub struct Prefs {
     /// `hover_heading_color`.
     #[serde(default)]
     pub hover_icon_color: String,
+    /// The fill of the "pill" hover mode for headings: an ANSI colour name of
+    /// the active theme or `#rrggbb`. The theme's accent when empty or
+    /// unknown. The text on it is black or white, whichever reads better.
+    #[serde(default)]
+    pub hover_heading_pill_color: String,
+    /// The fill of the "pill" hover mode for icons, as
+    /// `hover_heading_pill_color`.
+    #[serde(default)]
+    pub hover_icon_pill_color: String,
+    /// The border of the hint popups (LSP hover, signature help, completion
+    /// list, UI tooltips): "plain" (the default, also what an empty string
+    /// means), "rounded", "double" or "thick".
+    #[serde(default)]
+    pub popup_border: String,
     /// Gutter line numbers (#1576, VS Code's `editor.lineNumbers`): "on"
     /// (also what the empty string an older config deserializes to means),
     /// "relative", "interval" or "off". Parsed by `LineNumbers::from_pref`.
