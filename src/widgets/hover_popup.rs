@@ -140,6 +140,7 @@ impl Widget for &HoverPopup {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let block = Block::default()
             .borders(Borders::ALL)
+            .border_type(crate::widgets::hover::popup_border_type())
             .border_style(Style::default().fg(self.theme.ui(Color::Rgb(0x4e, 0x9a, 0xff))))
             .style(Style::default().bg(self.theme.ui(Color::Rgb(0x1e, 0x21, 0x2a))));
         let max = self.max_scroll(area);
@@ -255,6 +256,26 @@ mod tests {
             "with room above, the popup ends at or above the anchor row, got bottom {}",
             a.bottom()
         );
+    }
+
+    #[test]
+    fn the_popup_border_setting_shapes_the_corners() {
+        use ratatui::widgets::Widget;
+        let mut p = HoverPopup::new("tip".into(), (5, 5));
+        // A theme with a frame of its own draws that over the border.
+        p.theme = crate::theme::Theme::DARK_BLUE;
+        assert!(!p.theme.framed_overlays());
+        let area = Rect::new(0, 0, 12, 3);
+        let corner = |pref: &str| {
+            crate::widgets::hover::set_popup_border(pref);
+            let mut buf = Buffer::empty(area);
+            (&p).render(area, &mut buf);
+            buf[(0, 0)].symbol().to_string()
+        };
+        assert_eq!(corner(""), "\u{250c}");
+        assert_eq!(corner("rounded"), "\u{256d}");
+        assert_eq!(corner("double"), "\u{2554}");
+        crate::widgets::hover::set_popup_border("");
     }
 
     #[test]

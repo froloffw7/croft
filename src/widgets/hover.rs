@@ -176,16 +176,22 @@ pub struct HoverSettings {
     pub icon: IconHover,
     pub heading_color: Option<HoverColor>,
     pub icon_color: Option<HoverColor>,
+    /// The `pill` fill of a heading / an icon; the accent when unset.
+    pub heading_pill: Option<HoverColor>,
+    pub icon_pill: Option<HoverColor>,
 }
 
 impl HoverSettings {
-    /// From the four string settings.
-    pub fn from_prefs(heading: &str, icon: &str, heading_color: &str, icon_color: &str) -> Self {
+    /// From the string settings: the two modes, then the two `color`s, then
+    /// the two pill fills.
+    pub fn from_prefs(modes: (&str, &str), colors: (&str, &str), pills: (&str, &str)) -> Self {
         Self {
-            heading: HeadingHover::from_pref(heading),
-            icon: IconHover::from_pref(icon),
-            heading_color: HoverColor::parse(heading_color),
-            icon_color: HoverColor::parse(icon_color),
+            heading: HeadingHover::from_pref(modes.0),
+            icon: IconHover::from_pref(modes.1),
+            heading_color: HoverColor::parse(colors.0),
+            icon_color: HoverColor::parse(colors.1),
+            heading_pill: HoverColor::parse(pills.0),
+            icon_pill: HoverColor::parse(pills.1),
         }
     }
 }
@@ -197,6 +203,8 @@ thread_local! {
             icon: IconHover::Accent,
             heading_color: None,
             icon_color: None,
+            heading_pill: None,
+            icon_pill: None,
         })
     };
 }
@@ -222,6 +230,30 @@ fn settings() -> HoverSettings {
     SETTINGS.with(Cell::get)
 }
 
+thread_local! {
+    static POPUP_BORDER: Cell<ratatui::widgets::BorderType> =
+        const { Cell::new(ratatui::widgets::BorderType::Plain) };
+}
+
+/// The border of the hint popups (LSP hover, signature help, completion, the
+/// UI tooltips): the `popup_border` setting, `plain` (the default) or
+/// `rounded` / `double` / `thick`.
+pub fn popup_border_type() -> ratatui::widgets::BorderType {
+    POPUP_BORDER.with(Cell::get)
+}
+
+/// Apply the `popup_border` setting; anything unknown is plain.
+pub fn set_popup_border(pref: &str) {
+    use ratatui::widgets::BorderType;
+    let t = match pref.trim().to_ascii_lowercase().as_str() {
+        "rounded" => BorderType::Rounded,
+        "double" => BorderType::Double,
+        "thick" => BorderType::Thick,
+        _ => BorderType::Plain,
+    };
+    POPUP_BORDER.with(|c| c.set(t));
+}
+
 /// The soft white a hovered heading takes by default (the Black theme's own
 /// panel-title tone there), softer than any accent.
 pub fn text_hover_fg(theme: crate::theme::Theme) -> Color {
@@ -244,6 +276,11 @@ pub fn pill_bg(theme: crate::theme::Theme) -> Color {
     theme.accent()
 }
 
+/// The fill of a pill: the user's colour, the accent when none is set.
+fn pill_fill(theme: crate::theme::Theme, custom: Option<HoverColor>) -> Color {
+    custom.map_or_else(|| pill_bg(theme), |c| c.resolve(theme))
+}
+
 /// The user's colour for a `color` mode, the accent when none is set.
 fn custom_fg(theme: crate::theme::Theme, custom: Option<HoverColor>) -> Color {
     custom.map_or_else(|| icon_hover_fg(theme), |c| c.resolve(theme))
@@ -252,7 +289,24 @@ fn custom_fg(theme: crate::theme::Theme, custom: Option<HoverColor>) -> Color {
 /// `fg` as it is drawn on the hover pill. A high contrast theme (#1548) takes
 /// whichever of black or white reads better on its pill (black on High
 /// Contrast's orange); the other themes keep their own ink.
-fn ink_on_pill(theme: crate::theme::Theme, fg: Color, pill: Color) -> Color {
+fn ink_on_pill(
+    theme: crate::theme::Theme,
+    fg: Color,
+    pill: Color,
+    custom: Option<HoverColor>,
+) -> Color {
+    if custom.is_some()
+        && let Color::Rgb(r, g, b) = pill
+    {
+        // A fill the user chose: whichever of black or white reads better.
+        return if crate::theme::contrast_ratio((r, g, b), (0, 0, 0))
+            > crate::theme::contrast_ratio((r, g, b), (0xff, 0xff, 0xff))
+        {
+            Color::Black
+        } else {
+            Color::White
+        };
+    }
     match pill {
         Color::Rgb(r, g, b)
             if theme.high_contrast()
@@ -270,12 +324,13 @@ fn ink_on_pill(theme: crate::theme::Theme, fg: Color, pill: Color) -> Color {
 /// heading's soft hover colour and `custom` the user's `color`.
 pub fn heading_style_in(
     mode: HeadingHover,
-    custom: Option<HoverColor>,
+    custom: (Option<HoverColor>, Option<HoverColor>),
     theme: crate::theme::Theme,
     rest: Style,
     hover_fg: Color,
     hovered: bool,
 ) -> Style {
+    let (custom, pill_custom) = custom;
     if !hovered {
         return rest;
     }
@@ -284,8 +339,9 @@ pub fn heading_style_in(
         HeadingHover::Color => rest.fg(custom_fg(theme, custom)),
         HeadingHover::Accent => rest.fg(icon_hover_fg(theme)),
         HeadingHover::Pill => {
-            let pill = pill_bg(theme);
-            rest.fg(ink_on_pill(theme, hover_fg, pill)).bg(pill)
+            let pill = pill_fill(theme, pill_custom);
+            rest.fg(ink_on_pill(theme, hover_fg, pill, pill_custom))
+                .bg(pill)
         }
     }
 }
@@ -298,18 +354,20 @@ pub fn heading_style(
     hovered: bool,
 ) -> Style {
     let s = settings();
-    heading_style_in(s.heading, s.heading_color, theme, rest, hover_fg, hovered)
+    let colors = (s.heading_color, s.heading_pill);
+    heading_style_in(s.heading, colors, theme, rest, hover_fg, hovered)
 }
 
 /// `rest` for an icon as drawn while hovered per `mode`; `custom` is the
 /// user's `color`.
 pub fn icon_style_in(
     mode: IconHover,
-    custom: Option<HoverColor>,
+    custom: (Option<HoverColor>, Option<HoverColor>),
     theme: crate::theme::Theme,
     rest: Style,
     hovered: bool,
 ) -> Style {
+    let (custom, pill_custom) = custom;
     if !hovered {
         return rest;
     }
@@ -317,10 +375,10 @@ pub fn icon_style_in(
         IconHover::Accent => rest.fg(icon_hover_fg(theme)),
         IconHover::Color => rest.fg(custom_fg(theme, custom)),
         IconHover::Pill => {
-            let pill = pill_bg(theme);
+            let pill = pill_fill(theme, pill_custom);
             let fg = rest
                 .fg
-                .map_or(Color::White, |c| ink_on_pill(theme, c, pill));
+                .map_or(Color::White, |c| ink_on_pill(theme, c, pill, pill_custom));
             rest.fg(fg).bg(pill)
         }
     }
@@ -334,6 +392,7 @@ pub fn icon_backdrop_in(
     buf: &mut ratatui::buffer::Buffer,
     area: Rect,
     theme: crate::theme::Theme,
+    pill: Option<HoverColor>,
     hovered: bool,
 ) {
     if !hovered || mode != IconHover::Pill {
@@ -342,7 +401,7 @@ pub fn icon_backdrop_in(
     let area = area.intersection(buf.area);
     for y in area.top()..area.bottom() {
         for x in area.left()..area.right() {
-            buf[(x, y)].set_bg(pill_bg(theme));
+            buf[(x, y)].set_bg(pill_fill(theme, pill));
         }
     }
 }
@@ -354,13 +413,20 @@ pub fn icon_backdrop(
     theme: crate::theme::Theme,
     hovered: bool,
 ) {
-    icon_backdrop_in(settings().icon, buf, area, theme, hovered);
+    icon_backdrop_in(
+        settings().icon,
+        buf,
+        area,
+        theme,
+        settings().icon_pill,
+        hovered,
+    );
 }
 
 /// [`icon_style_in`] under the `hover_icon` setting.
 pub fn icon_style(theme: crate::theme::Theme, rest: Style, hovered: bool) -> Style {
     let s = settings();
-    icon_style_in(s.icon, s.icon_color, theme, rest, hovered)
+    icon_style_in(s.icon, (s.icon_color, s.icon_pill), theme, rest, hovered)
 }
 
 #[cfg(test)]
@@ -421,19 +487,19 @@ mod tests {
             let pill = pill_bg(theme);
             assert_eq!(pill, acc, "the pill is the accent too");
             assert_eq!(
-                icon_style_in(IconHover::Accent, None, theme, rest, false),
+                icon_style_in(IconHover::Accent, (None, None), theme, rest, false),
                 rest
             );
-            let s = icon_style_in(IconHover::Accent, None, theme, rest, true);
+            let s = icon_style_in(IconHover::Accent, (None, None), theme, rest, true);
             assert_eq!((s.fg, s.bg), (Some(acc), None));
             assert!(s.add_modifier.contains(Modifier::BOLD), "bold is kept");
             // `color` without a colour falls back to the accent.
-            let s = icon_style_in(IconHover::Color, None, theme, rest, true);
+            let s = icon_style_in(IconHover::Color, (None, None), theme, rest, true);
             assert_eq!((s.fg, s.bg), (Some(acc), None));
             let red = HoverColor::parse("red");
-            let s = icon_style_in(IconHover::Color, red, theme, rest, true);
+            let s = icon_style_in(IconHover::Color, (red, None), theme, rest, true);
             assert_eq!(s.fg, Some(red.unwrap().resolve(theme)));
-            let s = icon_style_in(IconHover::Pill, None, theme, rest, true);
+            let s = icon_style_in(IconHover::Pill, (None, None), theme, rest, true);
             assert_eq!((s.fg, s.bg), (Some(Color::Gray), Some(pill)));
         }
         assert_ne!(
@@ -451,15 +517,15 @@ mod tests {
         let target = Rect::new(0, 0, 4, 1); // a glyph with a cell either side
         let bg = |buf: &ratatui::buffer::Buffer, x| buf[(x, 0)].bg;
         let mut buf = ratatui::buffer::Buffer::empty(area);
-        icon_backdrop_in(IconHover::Pill, &mut buf, target, theme, true);
+        icon_backdrop_in(IconHover::Pill, &mut buf, target, theme, None, true);
         for x in 0..4 {
             assert_eq!(bg(&buf, x), pill_bg(theme), "cell {x}");
         }
         assert_ne!(bg(&buf, 4), pill_bg(theme));
         let mut buf = ratatui::buffer::Buffer::empty(area);
-        icon_backdrop_in(IconHover::Accent, &mut buf, target, theme, true);
-        icon_backdrop_in(IconHover::Color, &mut buf, target, theme, true);
-        icon_backdrop_in(IconHover::Pill, &mut buf, target, theme, false);
+        icon_backdrop_in(IconHover::Accent, &mut buf, target, theme, None, true);
+        icon_backdrop_in(IconHover::Color, &mut buf, target, theme, None, true);
+        icon_backdrop_in(IconHover::Pill, &mut buf, target, theme, None, false);
         assert_ne!(
             bg(&buf, 0),
             pill_bg(theme),
@@ -471,6 +537,7 @@ mod tests {
             &mut buf,
             Rect::new(4, 0, 9, 3),
             theme,
+            None,
             true,
         );
     }
@@ -483,19 +550,67 @@ mod tests {
         let up = Color::White;
         let cyan = HoverColor::parse("bright_cyan");
         assert_eq!(
-            heading_style_in(HeadingHover::Soft, None, theme, rest, up, false),
+            heading_style_in(HeadingHover::Soft, (None, None), theme, rest, up, false),
             rest
         );
-        let s = heading_style_in(HeadingHover::Soft, cyan, theme, rest, up, true);
+        let s = heading_style_in(HeadingHover::Soft, (cyan, None), theme, rest, up, true);
         assert_eq!((s.fg, s.bg), (Some(up), None), "soft ignores the colour");
-        let s = heading_style_in(HeadingHover::Color, cyan, theme, rest, up, true);
+        let s = heading_style_in(HeadingHover::Color, (cyan, None), theme, rest, up, true);
         assert_eq!((s.fg, s.bg), (Some(cyan.unwrap().resolve(theme)), None));
-        let s = heading_style_in(HeadingHover::Color, None, theme, rest, up, true);
+        let s = heading_style_in(HeadingHover::Color, (None, None), theme, rest, up, true);
         assert_eq!(s.fg, Some(theme.accent()), "unset falls back to accent");
-        let s = heading_style_in(HeadingHover::Pill, None, theme, rest, up, true);
+        let s = heading_style_in(HeadingHover::Pill, (None, None), theme, rest, up, true);
         assert_eq!((s.fg, s.bg), (Some(up), Some(theme.accent())));
-        let s = heading_style_in(HeadingHover::Accent, None, theme, rest, up, true);
+        let s = heading_style_in(HeadingHover::Accent, (None, None), theme, rest, up, true);
         assert_eq!((s.fg, s.bg), (Some(theme.accent()), None));
+    }
+
+    #[test]
+    fn the_popup_border_parses_and_falls_back_to_plain() {
+        use ratatui::widgets::BorderType;
+        for (pref, want) in [
+            ("", BorderType::Plain),
+            ("Rounded", BorderType::Rounded),
+            ("double", BorderType::Double),
+            ("thick", BorderType::Thick),
+            ("wavy", BorderType::Plain),
+        ] {
+            set_popup_border(pref);
+            assert_eq!(popup_border_type(), want, "{pref:?}");
+        }
+        set_popup_border("");
+    }
+
+    #[test]
+    fn a_chosen_pill_fill_replaces_the_accent_and_its_ink_follows_it() {
+        use crate::theme::Theme;
+        let theme = Theme::DARK_BLUE;
+        let rest = Style::default().fg(Color::Gray);
+        let yellow = HoverColor::parse("#ffee00");
+        let s = icon_style_in(IconHover::Pill, (None, yellow), theme, rest, true);
+        assert_eq!(s.bg, Some(Color::Rgb(0xff, 0xee, 0x00)));
+        assert_eq!(s.fg, Some(Color::Black), "dark ink on a light fill");
+        let navy = HoverColor::parse("#000080");
+        let s = heading_style_in(
+            HeadingHover::Pill,
+            (None, navy),
+            theme,
+            rest,
+            Color::Gray,
+            true,
+        );
+        assert_eq!(s.bg, Some(Color::Rgb(0, 0, 0x80)));
+        assert_eq!(s.fg, Some(Color::White), "light ink on a dark fill");
+        let mut buf = ratatui::buffer::Buffer::empty(Rect::new(0, 0, 2, 1));
+        icon_backdrop_in(
+            IconHover::Pill,
+            &mut buf,
+            Rect::new(0, 0, 2, 1),
+            theme,
+            yellow,
+            true,
+        );
+        assert_eq!(buf[(1, 0)].bg, Color::Rgb(0xff, 0xee, 0x00));
     }
 
     #[test]
@@ -535,10 +650,12 @@ mod tests {
             HoverColor::Ansi(2).resolve(Theme::BLACK),
             Color::Rgb(r, g, b)
         );
-        let s = HoverSettings::from_prefs("pill", "color", "red", "#102030");
+        let s = HoverSettings::from_prefs(("pill", "color"), ("red", "#102030"), ("blue", ""));
         assert_eq!(s.heading, HeadingHover::Pill);
         assert_eq!(s.icon, IconHover::Color);
         assert_eq!(s.heading_color, Some(HoverColor::Ansi(1)));
         assert_eq!(s.icon_color, Some(HoverColor::Rgb(0x10, 0x20, 0x30)));
+        assert_eq!(s.heading_pill, Some(HoverColor::Ansi(4)));
+        assert_eq!(s.icon_pill, None);
     }
 }
