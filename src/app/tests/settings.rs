@@ -1211,6 +1211,32 @@ fn workspace_settings_layer_applies_at_startup_and_reloads_live() {
 }
 
 #[test]
+fn the_hover_settings_apply_from_the_loaded_prefs_not_only_on_a_reload() {
+    use crate::widgets::hover::{popup_border_type, set_popup_border, set_settings};
+    use ratatui::widgets::BorderType;
+    // `App::new` runs this on the loaded prefs; they are user-layer keys, so
+    // the workspace layer (all a test build reads) cannot carry them.
+    let prefs: crate::prefs::Prefs = serde_json::from_str(
+        r#"{"hover_icon":"pill","hover_icon_pill_color":"red","popup_border":"rounded"}"#,
+    )
+    .unwrap();
+    set_settings(Default::default());
+    set_popup_border("");
+    super::super::apply_hover_prefs(&prefs);
+    let theme = crate::theme::Theme::DARK_BLUE;
+    let area = ratatui::layout::Rect::new(0, 0, 2, 1);
+    let mut buf = ratatui::buffer::Buffer::empty(area);
+    crate::widgets::hover::icon_backdrop(&mut buf, area, theme, true);
+    assert_eq!(
+        buf[(0, 0)].bg,
+        crate::widgets::hover::HoverColor::Ansi(1).resolve(theme)
+    );
+    assert_eq!(popup_border_type(), BorderType::Rounded);
+    set_settings(Default::default());
+    set_popup_border("");
+}
+
+#[test]
 fn settings_hub_shows_provenance_and_the_layer_rows() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(tmp.path().join(".croft")).unwrap();
