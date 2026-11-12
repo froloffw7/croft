@@ -7172,6 +7172,17 @@ fn config_watch_paths(settings_chain: &[PathBuf]) -> Vec<PathBuf> {
     paths
 }
 
+/// Put the hover and popup-border settings in force. They live in the UI
+/// thread's statics, so the constructor applies them too, not only a reload.
+fn apply_hover_prefs(p: &crate::prefs::Prefs) {
+    crate::widgets::hover::set_settings(crate::widgets::hover::HoverSettings::from_prefs(
+        (&p.hover_heading, &p.hover_icon),
+        (&p.hover_heading_color, &p.hover_icon_color),
+        (&p.hover_heading_pill_color, &p.hover_icon_pill_color),
+    ));
+    crate::widgets::hover::set_popup_border(&p.popup_border);
+}
+
 impl App {
     pub fn new(root: PathBuf) -> Result<Self> {
         // Reap any js-debug adapter tree a previous croft left orphaned (a
@@ -7228,6 +7239,7 @@ impl App {
         // the process-wide default from each would race the tests that
         // read it; those call `seed_log_highlight_default` explicitly.
         seed_log_highlight_default_at_startup(!loaded_prefs.disable_log_highlight);
+        apply_hover_prefs(&loaded_prefs);
         // Same treatment for keybindings: a row croft refused (an unknown
         // command id, a gesture that can never fire, a reserved bare click)
         // used to vanish silently, which reads as croft being broken rather
@@ -70558,12 +70570,7 @@ impl App {
         self.indent_guides_enabled = !p.disable_indent_guides;
         self.editor.show_indent_guides = self.indent_guides_enabled;
         self.home_walks_rows = p.home_walks_wrapped_rows;
-        crate::widgets::hover::set_settings(crate::widgets::hover::HoverSettings::from_prefs(
-            (&p.hover_heading, &p.hover_icon),
-            (&p.hover_heading_color, &p.hover_icon_color),
-            (&p.hover_heading_pill_color, &p.hover_icon_pill_color),
-        ));
-        crate::widgets::hover::set_popup_border(&p.popup_border);
+        apply_hover_prefs(p);
         self.bracket_colors_enabled = !p.disable_bracket_colors;
         self.editor.show_bracket_colors = self.bracket_colors_enabled;
         self.whitespace_mode =
