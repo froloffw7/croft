@@ -3919,6 +3919,13 @@ pub struct Editor {
     /// the buffer after each edit. `semantic_path` records which file the
     /// batch is for, so a stale batch is ignored after a tab switch.
     semantic_data: Vec<u32>,
+    /// The lines the overlay was decoded against. An edit carries the overlay
+    /// through the change like the syntax spans (`carry_highlights`), never
+    /// re-decodes the old batch against the new text: its positions are the
+    /// old text's, and until the server answers (a big file can take long, or
+    /// never) they would colour the wrong characters.
+    semantic_base: PackedLines,
+    semantic_carry_brackets: BracketColors,
     semantic_legend: Option<std::sync::Arc<Vec<String>>>,
     semantic_path: Option<PathBuf>,
     /// Whether the retained batch covers the WHOLE document (a
@@ -4280,6 +4287,8 @@ impl Editor {
             highlight_generation: 0,
             semantic_overlay: Vec::new(),
             semantic_data: Vec::new(),
+            semantic_base: PackedLines::default(),
+            semantic_carry_brackets: Vec::new(),
             semantic_legend: None,
             semantic_path: None,
             semantic_is_full: false,
@@ -6472,6 +6481,7 @@ impl Editor {
         // batch triggered by the seq bump arrives.
         self.semantic_data = Vec::new();
         self.semantic_overlay = Vec::new();
+        self.semantic_base = PackedLines::default();
         self.semantic_is_full = false;
         // Same for inlay hints: anchors measured against another file's text
         // must never splice into this one.
@@ -8141,7 +8151,7 @@ impl Editor {
         self.semantic_data = data;
         self.semantic_legend = Some(legend);
         self.semantic_is_full = is_full;
-        self.recompute_semantic_overlay();
+        self.decode_semantic_overlay();
     }
 
     /// Store a fresh inlay-hint set from the LSP and decode it into per-line
@@ -8552,18 +8562,21 @@ impl Editor {
         self.diagnostic_tag_spans = tag_spans;
     }
 
-    /// Re-decode the retained semantic-token batch against the current
-    /// buffer. A no-op (clears the overlay) unless the batch belongs to
-    /// the file currently loaded, so a stale batch never colors the wrong
-    /// file after a tab switch.
-    fn recompute_semantic_overlay(&mut self) {
+    /// Decode the semantic-token batch just received against the current
+    /// buffer (the reply is only applied while the text is the one it was
+    /// measured on). Clears the overlay unless the batch belongs to the file
+    /// currently loaded, so a stale batch never colors the wrong file after a
+    /// tab switch.
+    fn decode_semantic_overlay(&mut self) {
         let same_file = self.semantic_path.as_deref() == self.path.as_deref();
         let Some(legend) = self.semantic_legend.as_ref().filter(|_| same_file) else {
             self.semantic_overlay = Vec::new();
+            self.semantic_base = PackedLines::default();
             return;
         };
         if self.semantic_data.is_empty() {
             self.semantic_overlay = Vec::new();
+            self.semantic_base = PackedLines::default();
             return;
         }
         let text = self.lines.join("\n");
@@ -8571,6 +8584,29 @@ impl Editor {
         let line_starts = compute_line_starts(bytes);
         self.semantic_overlay =
             decode_semantic_tokens(&self.semantic_data, legend, bytes, &line_starts);
+        self.semantic_base = PackedLines::from(&self.lines[..]);
+        self.semantic_carry_brackets = vec![Vec::new(); self.lines.len()];
+    }
+
+    /// After an edit: move the overlay with the text it was decoded for. Lines
+    /// the edit touched keep the tokens of their unchanged stretches, new
+    /// text has none (the syntax colours show) until the server answers.
+    fn recompute_semantic_overlay(&mut self) {
+        if self.semantic_overlay.is_empty() && self.semantic_base.len() == 0 {
+            return;
+        }
+        if self.semantic_path.as_deref() != self.path.as_deref() {
+            // Saved under another name: the batch is another file's.
+            self.semantic_overlay = Vec::new();
+            self.semantic_base = PackedLines::default();
+            return;
+        }
+        carry_highlights(
+            &mut self.semantic_base,
+            &mut self.semantic_overlay,
+            &mut self.semantic_carry_brackets,
+            &self.lines,
+        );
     }
 
     /// Where the buffer ends, as an LSP position: the end of an inlay-hint
@@ -30511,6 +30547,29 @@ mod tests {
             out.push('\n');
         }
         out
+    }
+
+    #[test]
+    fn semantic_tokens_move_with_an_edit_instead_of_being_decoded_against_the_new_text() {
+        let mut e = editor_with("fn f() {\n    return 1;\n}\n");
+        let p = std::path::PathBuf::from("/tmp/sem_edit.rs");
+        e.path = Some(p.clone());
+        let legend = std::sync::Arc::new(vec!["keyword".to_string()]);
+        // `return` on line 1, columns 4..10.
+        e.apply_semantic_tokens(p, vec![1, 4, 6, 0, 0], legend, true);
+        assert_eq!(e.semantic_overlay_for_test()[1].len(), 1);
+        // Comment the line out: "    // return 1;". The old batch, decoded
+        // over the new text, would tint "// ret" at 4..10.
+        e.lines[1] = String::from("    // return 1;");
+        e.recompute_highlights();
+        for span in &e.semantic_overlay_for_test()[1] {
+            let text = &e.lines[1][span.start as usize..span.end as usize];
+            assert_eq!(text, "return", "the token follows its word, got {text:?}");
+        }
+        // Any edit leaves the other lines' tokens alone.
+        e.lines[0] = String::from("fn  f() {");
+        e.recompute_highlights();
+        assert_eq!(e.semantic_overlay_for_test().len(), e.lines.len());
     }
 
     #[test]
