@@ -1396,6 +1396,7 @@ impl App {
         self.indent_guides_enabled = !p.disable_indent_guides;
         self.editor.show_indent_guides = self.indent_guides_enabled;
         self.home_walks_rows = p.home_walks_wrapped_rows;
+        apply_hover_prefs(p);
         self.bracket_colors_enabled = !p.disable_bracket_colors;
         self.editor.show_bracket_colors = self.bracket_colors_enabled;
         self.whitespace_mode =
