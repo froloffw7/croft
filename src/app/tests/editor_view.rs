@@ -2511,6 +2511,135 @@ fn line_numbers_reach_every_split_group() {
     assert_eq!(modes(&app), [LineNumbers::Off, LineNumbers::Off]);
 }
 
+/// OSC 22: the pointer is an I-beam over the editor's text and the arrow over
+/// the rest of the editor (gutter, tab strip) and the chrome around it.
+#[test]
+fn the_pointer_is_an_i_beam_over_editor_text_only() {
+    use crate::pointer_shape::PointerShape::{Arrow, Text};
+    let (app, _tmp, col, row) = app_with_open_file_and_editor_cell();
+    assert_eq!(app.pointer_shape_at(col, row), Text, "over the text");
+    // The gutter, left of the text, is not text.
+    let gutter = app.editor.last_inner.x;
+    assert_eq!(app.pointer_shape_at(gutter, row), Arrow, "over the gutter");
+    // The tab strip above the pane is not text either.
+    assert_eq!(
+        app.pointer_shape_at(col, app.editor.last_inner.y.saturating_sub(1)),
+        Arrow,
+        "over the tab strip"
+    );
+    // Nor is the sidebar.
+    assert_eq!(app.pointer_shape_at(0, row), Arrow, "over the sidebar");
+}
+
+/// A menu on top of the text wins: over it the pointer stays the arrow.
+#[test]
+fn an_open_menu_keeps_the_pointer_an_arrow_over_the_text() {
+    use crate::pointer_shape::PointerShape::{Arrow, Text};
+    let (mut app, _tmp, col, row) = app_with_open_file_and_editor_cell();
+    assert_eq!(app.pointer_shape_at(col, row), Text);
+    app.open_command_palette();
+    assert!(app.command_palette.is_some(), "the palette opened");
+    assert_eq!(app.pointer_shape_at(col, row), Arrow);
+}
+
+/// The shape is requested once per change, and never before the terminal said
+/// it can draw one.
+#[test]
+fn the_pointer_shape_is_tracked_only_for_a_terminal_that_answered() {
+    use crate::pointer_shape::PointerShape::{Arrow, Text};
+    let (mut app, _tmp, col, row) = app_with_open_file_and_editor_cell();
+    app.sync_pointer_shape(col, row);
+    assert_eq!(
+        app.pointer_shape, Arrow,
+        "no answer to the probe: untouched"
+    );
+    app.pointer_shapes = true;
+    app.sync_pointer_shape(col, row);
+    assert_eq!(app.pointer_shape, Text);
+    app.sync_pointer_shape(0, row);
+    assert_eq!(app.pointer_shape, Arrow);
+}
+
+/// A key that moves the layout under a still mouse sends no mouse event: the
+/// shape is decided again after the redraw, from where the pointer last was.
+#[test]
+fn the_pointer_shape_follows_a_layout_change_under_a_still_mouse() {
+    use crate::pointer_shape::PointerShape::{Arrow, Text};
+    let (mut app, _tmp, col, row) = app_with_open_file_and_editor_cell();
+    app.pointer_shapes = true;
+    app.sync_pointer_shape(col, row);
+    assert_eq!(app.pointer_shape, Text);
+    // The editor grows: its horizontal scrollbar now sits under the pointer.
+    app.editor.last_hscrollbar = ratatui::layout::Rect::new(col, row, 5, 1);
+    app.resync_pointer_shape();
+    assert_eq!(app.pointer_shape, Arrow, "the bar keeps the arrow");
+}
+
+#[test]
+fn a_hidden_panel_leaves_the_editor_scrollbar_its_arrow() {
+    // The panel's last rect must not claim cells the editor now occupies.
+    use crate::pointer_shape::PointerShape::Arrow;
+    let tmp = tempfile::tempdir().unwrap();
+    let f = tmp.path().join("long.txt");
+    std::fs::write(&f, format!("{}\nshort\n", "x".repeat(400))).unwrap();
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    app.editor.open(&f).unwrap();
+    let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+    for hidden in [false, true] {
+        app.show_terminal = !hidden;
+        term.draw(|fr| app.render(fr)).unwrap();
+        let bar = app.editor.last_hscrollbar;
+        assert!(bar.width > 0, "the long line shows the bar");
+        for x in bar.x..bar.x + bar.width {
+            assert_eq!(
+                app.pointer_shape_at(x, bar.y),
+                Arrow,
+                "hidden={hidden} x={x}"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_pointer_is_an_i_beam_over_a_popup_value_row_and_a_search_field() {
+    use crate::pointer_shape::PointerShape::{Arrow, Text};
+    use crate::widgets::input_prompt::{InputPrompt, InputPurpose};
+    let tmp = tempfile::tempdir().unwrap();
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+
+    // New File: the value row is the popup's first inner row.
+    app.open_create_prompt(CreateKind::File, tmp.path().to_path_buf());
+    term.draw(|f| app.render(f)).unwrap();
+    let rect = super::super::prompt_rect(ratatui::layout::Rect::new(0, 0, 100, 30), false);
+    assert_eq!(app.pointer_shape_at(rect.x + 5, rect.y + 1), Text);
+    assert_eq!(
+        app.pointer_shape_at(rect.x + 5, rect.y + 3),
+        Arrow,
+        "the hint row"
+    );
+    app.prompt = None;
+
+    // An input prompt: the same row, from the rect it last drew.
+    app.open_input_prompt(InputPrompt::new(
+        InputPurpose::FleetCommand,
+        "Fleet command",
+        "command",
+    ));
+    term.draw(|f| app.render(f)).unwrap();
+    let r = app.input_prompt.as_ref().unwrap().last_rect;
+    assert_eq!(app.pointer_shape_at(r.x + 4, r.y + 1), Text);
+    assert_eq!(app.pointer_shape_at(r.x, r.y + 1), Arrow, "the border");
+    app.input_prompt = None;
+
+    // The Search view's query box.
+    app.set_sidebar_view(SidebarView::Search);
+    term.draw(|f| app.render(f)).unwrap();
+    let q = app.search.query_input_rect;
+    assert!(q.width > 0, "the query box is on screen");
+    assert_eq!(app.pointer_shape_at(q.x + 1, q.y), Text);
+}
+
 fn overwrite_app(text: &str) -> (tempfile::TempDir, App) {
     let tmp = tempfile::tempdir().unwrap();
     let mut app = App::new(tmp.path().to_path_buf()).unwrap();
