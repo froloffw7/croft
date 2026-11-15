@@ -1152,19 +1152,19 @@ fn due_ask(app: &App) -> Option<CompletionTrigger> {
 fn a_word_begun_in_code_opens_completion_as_it_is_typed() {
     let (_tmp, mut app) = typing_completion_app("x = ", ".");
     let path = app.editor.path.clone().unwrap();
-    type_into_editor(&mut app, "p");
+    type_keys(&mut app, "p");
     assert_eq!(due_ask(&app), Some(CompletionTrigger::Invoked));
     assert_eq!(app.completion_request_id, None, "asked after the sync");
-    type_into_editor(&mut app, "ri");
+    type_keys(&mut app, "ri");
     app.send_due_completion_ask();
     let id = app.completion_request_id.expect("one ask for the word");
     app.apply_completion_result(completion_reply(id, &path, &["print", "property"]));
     assert_eq!(popup_labels(&app), ["print"]);
-    type_into_editor(&mut app, "n");
+    type_keys(&mut app, "n");
     assert_eq!(due_ask(&app), None, "a later letter only filters");
     app.handle_key(key(KeyCode::Esc, KeyModifiers::NONE))
         .unwrap();
-    type_into_editor(&mut app, "t");
+    type_keys(&mut app, "t");
     assert_eq!(
         (due_ask(&app), app.completion_popup.is_none()),
         (None, true)
@@ -1178,18 +1178,18 @@ fn a_word_begun_in_code_opens_completion_as_it_is_typed() {
 fn quick_suggestions_stay_out_of_comments_strings_and_numbers() {
     for (text, typed) in [("x = 1  # ", "p"), ("x = '", "p"), ("x = ", "1")] {
         let (_tmp, mut app) = typing_completion_app(text, ".");
-        type_into_editor(&mut app, typed);
+        type_keys(&mut app, typed);
         assert_eq!(due_ask(&app), None, "{text}{typed}");
     }
     let (_tmp, mut app) = typing_completion_app("x = ab", ".");
     app.editor.cursor_col = 4;
-    type_into_editor(&mut app, "p");
+    type_keys(&mut app, "p");
     assert_eq!(due_ask(&app), None, "the middle of a word");
     app.quick_suggestions = false;
     app.editor.cursor_col = 7;
-    type_into_editor(&mut app, " os");
+    type_keys(&mut app, " os");
     assert_eq!(due_ask(&app), None);
-    type_into_editor(&mut app, ".");
+    type_keys(&mut app, ".");
     assert_eq!(due_ask(&app), Some(CompletionTrigger::Character('.')));
 }
 
@@ -1205,11 +1205,11 @@ fn the_server_s_trigger_characters_open_completion() {
     app.trigger_completion();
     let id = app.completion_request_id.unwrap();
     app.apply_completion_result(completion_reply(id, &path, &["os"]));
-    type_into_editor(&mut app, ".");
+    type_keys(&mut app, ".");
     assert_eq!(due_ask(&app), Some(CompletionTrigger::Character('.')));
     app.send_due_completion_ask();
     let id = app.completion_request_id.expect("the trigger asked");
-    type_into_editor(&mut app, "zz");
+    type_keys(&mut app, "zz");
     app.apply_completion_result(completion_reply(id, &path, &["path"]));
     assert!(app.completion_popup.is_none());
     assert!(
@@ -1217,16 +1217,16 @@ fn the_server_s_trigger_characters_open_completion() {
         "{}",
         app.status
     );
-    type_into_editor(&mut app, ".");
+    type_keys(&mut app, ".");
     app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE))
         .unwrap();
     app.send_due_completion_ask();
     assert_eq!(app.completion_request_id, None, "the caret left the line");
 
     let (_tmp, mut app) = typing_completion_app("x = os", "/");
-    type_into_editor(&mut app, ".");
+    type_keys(&mut app, ".");
     assert_eq!(due_ask(&app), None);
-    type_into_editor(&mut app, "/");
+    type_keys(&mut app, "/");
     assert_eq!(due_ask(&app), Some(CompletionTrigger::Character('/')));
 }
 
@@ -1748,7 +1748,7 @@ fn a_completion_accepted_in_a_vim_change_undoes_with_it() {
     let accept = || {
         let (tmp, path, mut app, tx) = completion_reply_app();
         app.vim.enabled = true;
-        vim_feed(&mut app, 'A');
+        type_char(&mut app, 'A');
         app.trigger_completion();
         let request_id = app.completion_request_id.unwrap();
         draw(&mut app, 100, 30);
@@ -1759,7 +1759,7 @@ fn a_completion_accepted_in_a_vim_change_undoes_with_it() {
         popup.items[0].resolve = Some(std::sync::Arc::default());
         app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE))
             .unwrap();
-        vim_feed(&mut app, ';');
+        type_char(&mut app, ';');
         let pending = app.completion_resolve.as_ref().expect("a resolve went out");
         let mut reply = completion_reply(pending.request_id, &path, &["load"]);
         reply.items[0].additional_edits = vec![crate::widgets::editor::TextSpanEdit {
@@ -1780,7 +1780,7 @@ fn a_completion_accepted_in_a_vim_change_undoes_with_it() {
     assert!(app.drain_lsp_completion());
     esc(&mut app);
     assert_eq!(app.editor.lines, [import, "import load;"]);
-    vim_feed(&mut app, 'u');
+    type_char(&mut app, 'u');
     assert_eq!(
         app.editor.lines,
         ["import lo"],
@@ -1791,7 +1791,7 @@ fn a_completion_accepted_in_a_vim_change_undoes_with_it() {
     esc(&mut app);
     tx.send(reply).unwrap();
     assert!(app.drain_lsp_completion());
-    vim_feed(&mut app, 'u');
+    type_char(&mut app, 'u');
     assert_eq!(
         app.editor.lines,
         ["import lo"],
@@ -1800,12 +1800,12 @@ fn a_completion_accepted_in_a_vim_change_undoes_with_it() {
 
     let (_tmp, mut app, tx, reply) = accept();
     esc(&mut app);
-    vim_feed_str(&mut app, "Ax");
+    type_keys(&mut app, "Ax");
     tx.send(reply).unwrap();
     assert!(app.drain_lsp_completion());
     esc(&mut app);
     assert_eq!(app.editor.lines, [import, "import load;x"]);
-    vim_feed(&mut app, 'u');
+    type_char(&mut app, 'u');
     assert_eq!(
         app.editor.lines,
         ["import load;x"],
@@ -1906,6 +1906,38 @@ fn change_all_occurrences_key_accepts_cmd_ctrl_or_alt_f2() {
         KeyCode::F(2),
         KeyModifiers::NONE
     )));
+}
+
+#[test]
+fn the_references_picker_starts_on_the_reference_under_the_caret() {
+    let tmp = tempfile::tempdir().unwrap();
+    let a = tmp.path().join("a.rs");
+    std::fs::write(&a, "let x = x + x;\nfoo(x);\n").unwrap();
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    app.editor.open(&a).unwrap();
+    let targets = vec![
+        (a.clone(), 0, 4),
+        (a.clone(), 0, 8),
+        (a.clone(), 0, 12),
+        (a.clone(), 1, 4),
+        (tmp.path().join("b.rs"), 1, 4),
+    ];
+    // On the second `x` of line 1 (col 8..9, caret inside it).
+    app.editor.cursor_row = 0;
+    app.editor.cursor_col = 9;
+    app.open_location_picker(targets.clone(), "references");
+    assert_eq!(app.context_menu.as_ref().unwrap().selected, 1);
+    // Another file's reference on the same line is not this one.
+    app.context_menu = None;
+    app.editor.cursor_row = 1;
+    app.editor.cursor_col = 4;
+    app.open_location_picker(targets.clone(), "references");
+    assert_eq!(app.context_menu.as_ref().unwrap().selected, 3);
+    // A caret on a line with no reference leaves the highlight on top.
+    app.context_menu = None;
+    app.editor.cursor_row = 5;
+    app.open_location_picker(targets, "references");
+    assert_eq!(app.context_menu.as_ref().unwrap().selected, 0);
 }
 
 #[test]
@@ -2690,6 +2722,7 @@ fn a_cancelled_rename_disarms_the_in_flight_prepare_request() {
     app.prompt = Some(Prompt {
         label: String::from("Rename Symbol 'value'"),
         buffer: String::from("value"),
+        caret: usize::MAX,
         kind: PromptKind::RenameSymbol {
             path: path.clone(),
             row: 1,
@@ -3864,11 +3897,14 @@ fn app_with_week_notes(tmp: &tempfile::TempDir) -> (App, PathBuf) {
         "# shopping list\nmilk\neggs\n# todo\ncall bob\npay rent\n",
     );
     let file = app.editor.path.clone().unwrap();
-    type_at_line_end(&mut app, 1, "\nbread");
+    insert_at_line_end(&mut app, 1, "\nbread");
     (app, file)
 }
 
-fn type_at_line_end(app: &mut App, row: usize, text: &str) {
+/// Puts the caret at the end of `row` and inserts `text` straight into the
+/// editor's buffer, `\n` as a new line. No keystroke goes through
+/// `App::handle_key`, as it does with [`type_keys`].
+fn insert_at_line_end(app: &mut App, row: usize, text: &str) {
     app.editor.cursor_row = row;
     app.editor.cursor_col = app.editor.lines[row].chars().count();
     for c in text.chars() {
@@ -3908,7 +3944,7 @@ fn a_format_on_save_reply_for_a_buffer_typed_into_since_saves_it_unformatted() {
     let tmp = tempfile::tempdir().unwrap();
     let (mut app, file) = app_with_week_notes(&tmp);
     send_format_request(&mut app, &file, true);
-    type_at_line_end(&mut app, 2, "\nbutter");
+    insert_at_line_end(&mut app, 2, "\nbutter");
     app.land_format(Some(uppercase_headings()), false, Some(file.clone()), None);
     let typed = "# shopping list\nmilk\nbread\nbutter\neggs\n# todo\ncall bob\npay rent";
     assert_eq!(app.editor.lines.join("\n"), typed, "eggs survives");
@@ -3929,7 +3965,7 @@ fn a_format_document_reply_for_a_buffer_typed_into_since_is_dropped() {
     let tmp = tempfile::tempdir().unwrap();
     let (mut app, file) = app_with_week_notes(&tmp);
     send_format_request(&mut app, &file, false);
-    type_at_line_end(&mut app, 2, "\nbutter");
+    insert_at_line_end(&mut app, 2, "\nbutter");
     let before = app.editor.lines.clone();
     app.land_format(Some(uppercase_headings()), false, Some(file.clone()), None);
     assert_eq!(app.editor.lines, before);
@@ -3982,7 +4018,7 @@ fn the_language_servers_get_the_files_final_newline() {
     let synced = |app: &App| app.lsp.as_ref().unwrap().synced_text_for_test(&file);
     app.sync_lsp();
     assert_eq!(synced(&app).as_deref(), Some(SHOP_PY));
-    type_at_line_end(&mut app, 1, "  # all");
+    insert_at_line_end(&mut app, 1, "  # all");
     app.sync_lsp();
     assert_eq!(
         synced(&app).as_deref(),
@@ -5000,9 +5036,7 @@ fn app_with_long_hover() -> (
         doc,
         (col, row),
     ));
-    let backend = ratatui::backend::TestBackend::new(100, 30);
-    let mut term = ratatui::Terminal::new(backend).unwrap();
-    term.draw(|frame| app.render(frame)).unwrap();
+    let term = draw_terminal(&mut app, 100, 30);
     (app, tmp, term)
 }
 

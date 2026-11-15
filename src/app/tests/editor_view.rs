@@ -1543,16 +1543,6 @@ fn timestamps_gutter_toggles_on_and_shows_arrival_times() {
                 .any(|l| l.starts_with("gutter-row-9"))
         },
     );
-    fn screen_rows(term: &ratatui::Terminal<ratatui::backend::TestBackend>) -> Vec<String> {
-        let buf = term.backend().buffer();
-        (0..buf.area.height)
-            .map(|y| {
-                (0..buf.area.width)
-                    .map(|x| buf[(x, y)].symbol().chars().next().unwrap_or(' '))
-                    .collect()
-            })
-            .collect()
-    }
     fn gutter_of(rows: &[String], needle: &str) -> Option<String> {
         let row = rows.iter().find(|r| r.contains(needle))?;
         let inner = row.trim_end().trim_end_matches(['│', '┃']);
@@ -1572,7 +1562,7 @@ fn timestamps_gutter_toggles_on_and_shows_arrival_times() {
 
     // Off by default: the row ends with its own text, no clock.
     term.draw(|f| app.render(f)).unwrap();
-    let g = gutter_of(&screen_rows(&term), "gutter-row-9").unwrap_or_default();
+    let g = gutter_of(&screen_char_rows(&term), "gutter-row-9").unwrap_or_default();
     assert!(
         !g.chars().filter(|c| *c == ':').count().eq(&2),
         "no gutter while the toggle is off: {g:?}"
@@ -1581,7 +1571,7 @@ fn timestamps_gutter_toggles_on_and_shows_arrival_times() {
     app.toggle_terminal_timestamps();
     assert!(app.show_terminal_timestamps);
     term.draw(|f| app.render(f)).unwrap();
-    let g = gutter_of(&screen_rows(&term), "gutter-row-9").expect("row still on screen");
+    let g = gutter_of(&screen_char_rows(&term), "gutter-row-9").expect("row still on screen");
     let looks_like_clock = g.len() == 8
         && g.as_bytes()[2] == b':'
         && g.as_bytes()[5] == b':'
@@ -1593,7 +1583,7 @@ fn timestamps_gutter_toggles_on_and_shows_arrival_times() {
 
     app.toggle_terminal_timestamps();
     term.draw(|f| app.render(f)).unwrap();
-    let g = gutter_of(&screen_rows(&term), "gutter-row-9").unwrap_or_default();
+    let g = gutter_of(&screen_char_rows(&term), "gutter-row-9").unwrap_or_default();
     assert!(
         !(g.len() == 8 && g.as_bytes()[2] == b':' && g.as_bytes()[5] == b':'),
         "toggling off removes the gutter: {g:?}"
@@ -1620,23 +1610,13 @@ fn sticky_command_header_pins_the_command_while_scrolled_into_its_output() {
         "the command to finish",
         || !app.terminals[0].command_decorations().is_empty(),
     );
-    fn screen_rows(term: &ratatui::Terminal<ratatui::backend::TestBackend>) -> Vec<String> {
-        let buf = term.backend().buffer();
-        (0..buf.area.height)
-            .map(|y| {
-                (0..buf.area.width)
-                    .map(|x| buf[(x, y)].symbol().chars().next().unwrap_or(' '))
-                    .collect()
-            })
-            .collect()
-    }
     let backend = ratatui::backend::TestBackend::new(120, 40);
     let mut term = ratatui::Terminal::new(backend).unwrap();
     term.draw(|f| app.render(f)).unwrap();
     let inner = app.terminals[0].last_inner;
 
     // At the live bottom nothing pins.
-    let rows = screen_rows(&term);
+    let rows = screen_char_rows(&term);
     assert!(
         !rows[inner.y as usize].contains("build-it-77"),
         "no header at the live bottom: {:?}",
@@ -1650,7 +1630,7 @@ fn sticky_command_header_pins_the_command_while_scrolled_into_its_output() {
         app.terminals[0].scroll_down(1);
     }
     term.draw(|f| app.render(f)).unwrap();
-    let rows = screen_rows(&term);
+    let rows = screen_char_rows(&term);
     assert!(
         rows[inner.y as usize].contains("build-it-77 now"),
         "the command must pin to the pane's top row: {:?}",
@@ -1660,7 +1640,7 @@ fn sticky_command_header_pins_the_command_while_scrolled_into_its_output() {
     // Back at the live bottom the header unpins.
     app.terminals[0].reset_scrollback();
     term.draw(|f| app.render(f)).unwrap();
-    let rows = screen_rows(&term);
+    let rows = screen_char_rows(&term);
     assert!(
         !rows[inner.y as usize].contains("build-it-77"),
         "the header unpins at the live bottom: {:?}",
@@ -1695,6 +1675,8 @@ fn drag_target_over_the_sticky_band_is_the_pinned_directory() {
     }
     std::fs::write(tmp.path().join("loose.txt"), "x\n").unwrap();
     let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    // Three pinned rows, not the compact row `outer/inner` (#1486).
+    app.tree.set_compact_folders(false);
     let outer = app
         .tree
         .nodes
@@ -2234,6 +2216,90 @@ fn the_minimap_draws_as_braille_without_inline_images() {
     );
 }
 
+/// On Croft Loch the tab strip's chrome runs through the minimap's column
+/// to the right edge instead of stopping a black column short, and the seam
+/// under the breadcrumbs crosses the column too.
+#[test]
+fn a_loch_tab_strip_and_header_seam_run_through_the_minimap_column() {
+    let (_tmp, mut app) = text_minimap_app();
+    let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(160, 40)).unwrap();
+    term.draw(|f| app.render(f)).unwrap();
+    let t = crate::widgets::surface::tones(app.theme).expect("Loch is the default");
+    let strip = app.minimap_img_rect;
+    let top = app.editor.last_full_area.y;
+    let seam_y = app.editor.last_body.y;
+    let buf = term.backend().buffer();
+    for x in strip.x..strip.x + strip.width {
+        assert_eq!(buf[(x, top)].bg, app.theme.tab_strip_bg(), "column {x}");
+        assert_eq!(buf[(x, seam_y)].symbol(), "\u{2594}", "column {x}");
+        assert_eq!(buf[(x, seam_y)].fg, t.hairline());
+    }
+}
+
+/// While a modal quick input has the keyboard, Croft Loch takes the accent
+/// lip off the editor's top seam (a hairline remains); focus itself stays
+/// on the editor, and the lip returns when the palette closes.
+#[test]
+fn a_modal_quick_input_takes_the_accent_off_the_editor_seam() {
+    let (_tmp, mut app) = text_minimap_app();
+    app.focus_pane(Pane::Editor);
+    let t = crate::widgets::surface::tones(app.theme).expect("Loch is the default");
+    let seam = |app: &mut App| {
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(160, 40)).unwrap();
+        term.draw(|f| app.render(f)).unwrap();
+        let body = app.editor.last_body;
+        term.backend().buffer()[(body.x, body.y)].fg
+    };
+    // The palette's scrim sinks everything behind the card, the seam
+    // included, so the palette-open seam is the hairline as the scrim
+    // leaves it on the black canvas.
+    let theme = app.theme;
+    let behind_scrim = |c: ratatui::style::Color| {
+        let mut b = ratatui::buffer::Buffer::empty(Rect::new(0, 0, 1, 1));
+        b[(0, 0)].set_fg(c).set_bg(t.canvas());
+        crate::widgets::surface::dim_backdrop(&mut b, Rect::default(), theme);
+        b[(0, 0)].fg
+    };
+    assert_eq!(seam(&mut app), t.accent(), "the focused editor's lip");
+    app.open_command_palette();
+    let palette_open = seam(&mut app);
+    assert_eq!(
+        palette_open,
+        behind_scrim(t.hairline()),
+        "the palette has the keyboard"
+    );
+    assert_ne!(palette_open, behind_scrim(t.accent()));
+    assert!(app.focus == Pane::Editor && app.editor.focused);
+    app.command_palette = None;
+    assert_eq!(seam(&mut app), t.accent());
+}
+
+/// Croft Loch's layout icons are header actions: muted at rest, and under
+/// the pointer the strong ink on a faint chip across the two-cell slot,
+/// never the accent.
+#[test]
+fn loch_layout_icons_rest_muted_and_lift_on_a_chip() {
+    let (_tmp, mut app) = text_minimap_app();
+    app.chrome_bake = None;
+    app.overlays.activity.clear_images();
+    draw(&mut app, 160, 40);
+    let t = crate::widgets::surface::tones(app.theme).expect("Loch is the default");
+    let side = app.layout_icon_areas.toggle_side_bar;
+    let cust = app.layout_icon_areas.customize;
+    assert!(side.width == 2 && cust.width == 2);
+    app.pointer_cell = Some((cust.x, cust.y));
+    let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(160, 40)).unwrap();
+    term.draw(|f| app.render(f)).unwrap();
+    let buf = term.backend().buffer();
+    let idle = &buf[(side.x + 1, side.y)];
+    assert_eq!(idle.fg, t.muted());
+    assert_eq!(idle.bg, app.theme.tab_strip_bg(), "no chip at rest");
+    let chip = t.hover_on(t.chrome);
+    assert_eq!(buf[(cust.x + 1, cust.y)].fg, t.strong());
+    assert_eq!(buf[(cust.x, cust.y)].bg, chip);
+    assert_eq!(buf[(cust.x + 1, cust.y)].bg, chip);
+}
+
 #[test]
 fn a_click_on_the_text_minimap_jumps_to_that_part_of_the_file() {
     let (_tmp, mut app) = text_minimap_app();
@@ -2641,6 +2707,21 @@ fn overwrite_mode_is_shown_by_a_glyph_after_the_workspace_cap_not_in_the_positio
         "overwrite glyph after the workspace cap: {over}"
     );
     assert!(!over.contains("OVR"), "the Ln/Col segment stays unchanged");
+}
+
+#[test]
+fn centring_a_line_before_the_first_render_leaves_context_above() {
+    // A file opened for the first time has no viewport yet (zero text rows),
+    // so there is no middle to centre on: the target must still be brought
+    // near the top instead of staying at scroll 0 (a Global Search hit).
+    let mut e = crate::widgets::editor::Editor::new();
+    e.lines = (0..200).map(|i| format!("line {i}")).collect();
+    assert_eq!(e.text_rows(), 0, "precondition: not rendered yet");
+    e.goto_line_centered(100);
+    assert_eq!(e.cursor_row, 100);
+    assert_eq!(e.scroll, 95, "five lines of context above the target");
+    e.goto_line_centered(2);
+    assert_eq!(e.scroll, 0, "near the top it saturates at 0");
 }
 
 #[test]

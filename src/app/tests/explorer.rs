@@ -61,6 +61,46 @@ fn poll_classifies_a_secondary_root_against_the_root_that_owns_it() {
     );
 }
 
+/// #1486: the poll stamps every folder a compact row folds in, so a file
+/// added to `main` splits `src/main/java/com/acme` with no watcher, and
+/// `disable_compact_folders` lists every level again at once.
+#[test]
+fn the_poll_splits_a_compact_row_and_the_setting_unfolds_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    std::fs::create_dir_all(src.join("main/java/com/acme")).unwrap();
+    std::fs::write(src.join("main/java/com/acme/App.java"), "").unwrap();
+    std::fs::write(tmp.path().join("README.md"), "").unwrap();
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    app.fs_watch.disable();
+    let row = app.tree.row_of(&src).unwrap();
+    app.tree.select(row);
+    app.tree.expand_selected();
+    assert_eq!(app.tree.nodes[row].label(), "src/main/java/com/acme");
+    app.focus_pane(Pane::Tree);
+    assert_eq!(
+        app.a11y_snapshot().item.as_deref(),
+        Some("src/main/java/com/acme"),
+        "a screen reader hears the row as shown"
+    );
+    app.fs_watch.force_poll_due();
+    let _ = app.fs_watch.poll(&mut app.tree, &[]);
+
+    std::fs::write(src.join("main/Other.java"), "").unwrap();
+    app.fs_watch.force_poll_due();
+    assert!(app.fs_watch.poll(&mut app.tree, &[]).dirs_changed);
+    let label = |app: &App, path: &Path| app.tree.nodes[app.tree.row_of(path).unwrap()].label();
+    assert_eq!(label(&app, &src), "src/main");
+    assert_eq!(label(&app, &src.join("main/java")), "java/com/acme");
+
+    app.apply_merged_settings(&crate::prefs::Prefs {
+        disable_compact_folders: true,
+        ..Default::default()
+    });
+    assert_eq!(label(&app, &src), "src");
+    assert_eq!(label(&app, &src.join("main/java/com")), "com");
+}
+
 fn dir_node(path: &Path) -> crate::widgets::file_tree::Node {
     crate::widgets::file_tree::Node {
         path: path.to_path_buf(),
@@ -68,6 +108,7 @@ fn dir_node(path: &Path) -> crate::widgets::file_tree::Node {
         is_dir: true,
         expanded: false,
         loaded: false,
+        folded: 0,
     }
 }
 
@@ -1128,11 +1169,13 @@ fn picking_a_nested_file_via_cmd_p_expands_every_parent_dir_in_the_explorer_and_
         selected, target,
         "the explorer cursor must land on the picked file, not stay on whichever row was selected before — got {selected:?}"
     );
+    // A compact row (#1486) shows every folder it folds in.
     let visible_paths: Vec<String> = app
         .tree
         .nodes
         .iter()
-        .map(|n| n.path.display().to_string())
+        .flat_map(|n| n.shown_paths())
+        .map(|p| p.display().to_string())
         .collect();
     for expected_parent in [
         tmp.path().join("packages"),
@@ -2487,25 +2530,11 @@ fn focusing_a_secondary_roots_file_flips_source_control_to_its_repo() {
         vec!["config", "user.email", "a@b"],
         vec!["config", "user.name", "a"],
     ] {
-        let ok = std::process::Command::new("git")
-            .args(["-C"])
-            .arg(&repo)
-            .args(&args)
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-        assert!(ok, "git setup step failed: {args:?}");
+        git_ok(&repo, &args);
     }
     std::fs::write(repo.join("seed.txt"), "one\n").unwrap();
     for args in [vec!["add", "."], vec!["commit", "-qm", "init"]] {
-        let ok = std::process::Command::new("git")
-            .args(["-C"])
-            .arg(&repo)
-            .args(&args)
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-        assert!(ok, "git setup step failed: {args:?}");
+        git_ok(&repo, &args);
     }
     std::fs::write(repo.join("seed.txt"), "one\ntwo\n").unwrap();
 
@@ -2557,15 +2586,9 @@ fn focusing_a_secondary_roots_file_flips_source_control_to_its_repo() {
     app.source_control.message = String::from("from the panel");
     app.commit_staged_source_control();
     wait_for_git_net(&mut app);
-    let log = std::process::Command::new("git")
-        .args(["-C"])
-        .arg(&repo)
-        .args(["log", "--oneline"])
-        .output()
-        .unwrap();
-    assert!(log.status.success());
+    let log = git_ok(&repo, &["log", "--oneline"]);
     assert!(
-        String::from_utf8_lossy(&log.stdout).contains("from the panel"),
+        log.contains("from the panel"),
         "the commit lands in the ACTIVE repo, the one the panel shows"
     );
 }
@@ -3253,4 +3276,119 @@ fn a_click_on_the_explorer_outline_still_jumps_with_the_secondary_bar_up() {
         app.editor.cursor_row, 8,
         "the caret moves to sym_004's line"
     );
+}
+
+fn new_file_prompt(app: &mut App, tmp: &std::path::Path) {
+    app.open_create_prompt(CreateKind::File, tmp.to_path_buf());
+}
+
+fn type_into_prompt(app: &mut App, text: &str) {
+    for c in text.chars() {
+        app.handle_key(key(KeyCode::Char(c), KeyModifiers::NONE))
+            .unwrap();
+    }
+}
+
+#[test]
+fn the_new_file_prompt_edits_at_a_caret() {
+    // New File, New Folder and Rename used to append and pop at the end only:
+    // a typo in the middle of a name meant retyping the tail.
+    let tmp = tempfile::tempdir().unwrap();
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    new_file_prompt(&mut app, tmp.path());
+    type_into_prompt(&mut app, "mian.rs");
+    // Six Lefts put the caret after the "m"; drop the "i", step over the "a"
+    // and put the "i" back where it belongs.
+    for _ in 0..6 {
+        app.handle_key(key(KeyCode::Left, KeyModifiers::NONE))
+            .unwrap();
+    }
+    app.handle_key(key(KeyCode::Delete, KeyModifiers::NONE))
+        .unwrap();
+    app.handle_key(key(KeyCode::Right, KeyModifiers::NONE))
+        .unwrap();
+    type_into_prompt(&mut app, "i");
+    let p = app.prompt.as_ref().expect("prompt stays open");
+    assert_eq!(p.buffer, "main.rs");
+    app.handle_key(key(KeyCode::Home, KeyModifiers::NONE))
+        .unwrap();
+    app.handle_key(key(KeyCode::Delete, KeyModifiers::NONE))
+        .unwrap();
+    app.handle_key(key(KeyCode::End, KeyModifiers::NONE))
+        .unwrap();
+    app.handle_key(key(KeyCode::Backspace, KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(app.prompt.as_ref().unwrap().buffer, "ain.r");
+}
+
+#[test]
+fn the_new_file_prompt_walks_and_deletes_by_word_and_takes_a_paste_at_the_caret() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    new_file_prompt(&mut app, tmp.path());
+    type_into_prompt(&mut app, "docs/old name.md");
+    app.handle_key(key(KeyCode::Backspace, KeyModifiers::CONTROL))
+        .unwrap();
+    assert_eq!(app.prompt.as_ref().unwrap().buffer, "docs/old name.");
+    app.handle_key(key(KeyCode::Left, KeyModifiers::CONTROL))
+        .unwrap();
+    app.handle_paste("X\nY");
+    let p = app.prompt.as_ref().unwrap();
+    assert_eq!(
+        p.buffer, "docs/old XYname.",
+        "paste drops the newline and lands at the caret"
+    );
+}
+
+#[test]
+fn a_paste_with_quick_open_over_the_new_file_prompt_goes_to_quick_open() {
+    // Quick Open opens over a prompt without closing it and takes the keys
+    // typed into it; a paste must follow the keys, not change the name the
+    // prompt is holding underneath.
+    let tmp = tempfile::tempdir().unwrap();
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    new_file_prompt(&mut app, tmp.path());
+    type_into_prompt(&mut app, "main.rs");
+    app.handle_key(key(KeyCode::Char('p'), KeyModifiers::CONTROL))
+        .unwrap();
+    assert!(app.file_finder.is_some(), "Ctrl+P opens Quick Open");
+    assert!(app.prompt.is_some(), "the prompt stays open underneath");
+    app.handle_paste("lib.rs");
+    assert_eq!(app.file_finder.as_ref().unwrap().query, "lib.rs");
+    assert_eq!(app.prompt.as_ref().unwrap().buffer, "main.rs");
+}
+
+#[test]
+fn a_paste_with_a_modal_over_the_new_file_prompt_leaves_the_name_alone() {
+    // A picker or dialog with no text field of its own, opened over a
+    // prompt, takes its keys; a paste then must not edit the hidden name.
+    let tmp = tempfile::tempdir().unwrap();
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    new_file_prompt(&mut app, tmp.path());
+    type_into_prompt(&mut app, "main.rs");
+    app.open_shortcuts_modal();
+    app.handle_paste("lib.rs");
+    assert_eq!(app.prompt.as_ref().unwrap().buffer, "main.rs");
+    assert!(
+        !app.editor.lines.join("\n").contains("lib.rs"),
+        "nor does the paste fall through to the editor behind"
+    );
+}
+
+#[test]
+fn ctrl_v_as_a_key_pastes_into_the_new_file_prompt_at_the_caret() {
+    // A host with bracketed paste off sends Ctrl/Cmd+V as a key; the prompt
+    // reads the clipboard itself, as Quick Open does, instead of dropping it.
+    let tmp = tempfile::tempdir().unwrap();
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    app.clipboard_reader = || Some(String::from("lib\n"));
+    new_file_prompt(&mut app, tmp.path());
+    type_into_prompt(&mut app, "src/.rs");
+    for _ in 0..3 {
+        app.handle_key(key(KeyCode::Left, KeyModifiers::NONE))
+            .unwrap();
+    }
+    app.handle_key(key(KeyCode::Char('v'), KeyModifiers::CONTROL))
+        .unwrap();
+    assert_eq!(app.prompt.as_ref().unwrap().buffer, "src/lib.rs");
 }
