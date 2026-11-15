@@ -425,12 +425,15 @@ fn an_overlay_over_the_card_takes_the_clicks_on_it() {
                 .map(|(r, _)| *r)
         };
         let at = skip(&app).expect("Skip, while nothing covers it");
+        // The default theme's pill ends are half blocks.
+        let uncovered = term.backend().buffer()[(at.x, at.y)].symbol().to_string();
+        assert_eq!(uncovered, crate::widgets::update_popup::HALF_CAP_L);
 
         // A menu opened over the card's button row.
         app.open_status_indent_menu(at.x, at.y - 2);
         term.draw(|f| app.render(f)).unwrap();
         let cap = term.backend().buffer()[(at.x, at.y)].symbol().to_string();
-        assert_ne!(cap, "\u{e0b6}", "the menu covers Skip's cap");
+        assert_ne!(cap, uncovered, "the menu covers Skip's cap");
         assert_eq!(skip(&app), None, "a covered button is no target");
         left_click(&mut app, at.x + 1, at.y);
         assert!(app.update_toast.is_some(), "the click was the menu's");
@@ -877,6 +880,47 @@ fn install_fallback_proceeds_only_on_an_explicit_yes() {
     }
 }
 
+/// #950 review: a yes is not taken while the window is too short to show
+/// what a remote compile installs and the answer box under it; once the
+/// whole question has been drawn, it is.
+#[test]
+fn install_fallback_holds_a_yes_until_the_notes_have_been_shown() {
+    use crate::widgets::connect_dialog::{ConnectDialog, DialogPhase};
+    let tmp = tempfile::tempdir().unwrap();
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    let mut dialog = ConnectDialog::new("devbox".to_string());
+    dialog.set_fallback_prompt(
+        "no cross toolchain",
+        &crate::remote::REMOTE_COMPILE_SIDE_EFFECTS,
+    );
+    app.connect_dialog = Some(dialog);
+    let render = |app: &mut App, h: u16| {
+        let area = Rect::new(0, 0, 80, h);
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        ratatui::widgets::Widget::render(app.connect_dialog.as_mut().unwrap(), area, &mut buf);
+    };
+    let answer_y = |app: &mut App| {
+        app.handle_connect_dialog_key(key(KeyCode::Char('y'), KeyModifiers::NONE));
+        app.handle_connect_dialog_key(key(KeyCode::Enter, KeyModifiers::NONE));
+    };
+    render(&mut app, 12);
+    answer_y(&mut app);
+    let dialog = app.connect_dialog.as_ref().expect("still asking");
+    assert_eq!(dialog.phase, DialogPhase::AwaitingFallbackConfirmation);
+    assert!(
+        dialog
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("taller"))
+    );
+    render(&mut app, 30);
+    answer_y(&mut app);
+    assert_eq!(
+        app.connect_dialog.as_ref().unwrap().phase,
+        DialogPhase::Installing
+    );
+}
+
 #[test]
 fn install_fallback_declines_and_tears_down_on_anything_else() {
     let tmp = tempfile::tempdir().unwrap();
@@ -951,28 +995,9 @@ fn drift_hint_arms_the_updater_only_while_idle() {
 #[test]
 fn drift_probe_verdict_arms_the_rebuild_hint() {
     let repo = tempfile::tempdir().unwrap();
-    let git = |args: &[&str]| {
-        let out = std::process::Command::new("git")
-            .arg("-C")
-            .arg(repo.path())
-            .args(args)
-            .output()
-            .unwrap();
-        assert!(out.status.success(), "git {args:?} failed");
-        String::from_utf8(out.stdout).unwrap().trim().to_string()
-    };
-    git(&["init", "-q"]);
-    git(&[
-        "-c",
-        "user.email=t@t",
-        "-c",
-        "user.name=t",
-        "commit",
-        "-q",
-        "--allow-empty",
-        "-m",
-        "one",
-    ]);
+    let git = |args: &[&str]| git_ok(repo.path(), args);
+    git_init(repo.path());
+    git(&["commit", "-q", "--allow-empty", "-m", "one"]);
     let head = git(&["rev-parse", "--short", "HEAD"]);
 
     let tmp = tempfile::tempdir().unwrap();

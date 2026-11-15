@@ -51,22 +51,36 @@ fn cmd_shift_b_runs_the_projects_build_task_in_a_named_pane() {
 #[test]
 fn rerunning_a_task_reuses_its_pane_instead_of_stacking_new_ones() {
     let tmp = tempfile::tempdir().unwrap();
-    std::fs::write(tmp.path().join("Makefile"), "build:\n\ttrue\n").unwrap();
+    // The recipe prints a sum only the build's shell works out, so the
+    // pane shows `built_42` once the build has run and never before: the
+    // typed `make build` line cannot contain it.
+    std::fs::write(
+        tmp.path().join("Makefile"),
+        "build:\n\t@echo built_$$((40 + 2))\n",
+    )
+    .unwrap();
     let mut app = App::new(tmp.path().to_path_buf()).unwrap();
     let chord = key(
         KeyCode::Char('B'),
         KeyModifiers::SUPER | KeyModifiers::SHIFT,
     );
     app.handle_key(chord).unwrap();
-    // Wait for the pane's shell to come back to its prompt so the rerun
-    // path sees an idle pane (a busy pane legitimately gets a new one).
-    // Load-scaled and LOUD (#397): the fixed 5000ms loop broke out silently
-    // on timeout, so under suite load the next step met a pane still busy
-    // and the assertion after it misreported the timeout as its own failure.
+    // Wait for the build to finish and the pane's shell to come back to
+    // its prompt, so the rerun path sees an idle pane (a busy pane
+    // legitimately gets a new one). The shell alone is not enough: a fresh
+    // pane's shell owns the foreground before it has even started the
+    // build, so under load the wait passed at once and the rerun met the
+    // build still running. Load-scaled and LOUD (#397): the fixed 5000ms
+    // loop broke out silently on timeout, so under suite load the next step
+    // met a pane still busy and the assertion after it misreported the
+    // timeout as its own failure.
     crate::test_budget::await_spawned(
         crate::test_budget::tests::TASK_PANE_PROMPT_BASE,
-        "the task pane's shell to return to its prompt",
-        || app.terminals[app.active_terminal].foreground_is_shell(),
+        "the build to run and the task pane's shell to return to its prompt",
+        || {
+            let pane = &app.terminals[app.active_terminal];
+            pane.visible_text().contains("built_42") && pane.foreground_is_shell()
+        },
     );
     let after_first = app.terminals.len();
     app.handle_key(chord).unwrap();
@@ -321,6 +335,18 @@ fn run_spec_for_node_picks_node_for_dot_js() {
     let spec = App::run_spec_for(&f, tmp.path()).unwrap();
     assert_eq!(spec.program, "node");
     assert_eq!(spec.args, vec![f.to_string_lossy().into_owned()]);
+}
+
+#[test]
+fn run_spec_for_typescript_modules_picks_tsx_as_for_dot_ts() {
+    // #1162: `.mts` / `.cts` are TypeScript, so Run starts them with `tsx`.
+    let tmp = tempfile::tempdir().unwrap();
+    for name in ["mod.ts", "mod.mts", "mod.cts"] {
+        let f = tmp.path().join(name);
+        std::fs::write(&f, b"").unwrap();
+        let spec = App::run_spec_for(&f, tmp.path()).unwrap();
+        assert_eq!(spec.program, "tsx", "{name}");
+    }
 }
 
 #[test]
@@ -798,6 +824,11 @@ fn fence_command_shapes_the_typed_block() {
     assert!(
         super::fence_command("sh", "echo a\necho b\n", &scripts, "/bin/sh").starts_with("eval ")
     );
+    // #1367: a comment, alone or trailing, goes through eval too.
+    for code in ["# c\necho hi", "# c", "echo hi # c"] {
+        let cmd = super::fence_command("sh", code, &scripts, "/bin/zsh");
+        assert!(cmd.starts_with("eval "), "{cmd:?}");
+    }
     assert!(!scripts.exists(), "a shell block is typed, not written");
     // #1630: any other language is read from a private file on stdin, never
     // typed as a heredoc, which fish has no syntax for.
@@ -863,6 +894,56 @@ fn fence_blocks_with_tabs_or_bangs_run_exactly_as_shown() {
     assert!(sh.starts_with("eval \"$(printf '%b' "), "{sh}");
     let probe = format!("{}; pwd", sh.trim_end_matches('\r'));
     assert_eq!(run_typed_line(&probe, tmp.path()), "hi!\n/\n");
+}
+
+/// #1367: zsh at its prompt reads `#` as a word unless `interactive_comments`
+/// is set, and it is off by default, so a one-line block's comment printed
+/// or failed with exit 127. Typed into an interactive zsh with no startup
+/// files, as a pane's prompt reads it, the block's comment is a comment, and
+/// a `#` inside a word or quotes is kept.
+#[test]
+fn a_shell_block_with_a_comment_runs_in_an_interactive_zsh() {
+    let tmp = tempfile::tempdir().unwrap();
+    let scripts = tmp.path().join("blocks");
+    let mut typed = String::new();
+    for code in [
+        "echo done  # trailing note\n",
+        "# setup\n",
+        "echo '#a' b#c\n",
+    ] {
+        typed += super::fence_command("sh", code, &scripts, "/bin/zsh").trim_end_matches('\r');
+        typed += "\necho exit=$?\n";
+    }
+    // Prompts and the partial-line mark blanked, so the output compared is
+    // only what the blocks print, whatever this zsh's defaults are.
+    let Ok(mut zsh) = std::process::Command::new("zsh")
+        .args(["-f", "-i"])
+        .env("HOME", tmp.path())
+        .env("PS1", "")
+        .env("PS2", "")
+        .env("RPS1", "")
+        .env("PROMPT_EOL_MARK", "")
+        .current_dir(tmp.path())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    else {
+        return;
+    };
+    use std::io::Write;
+    zsh.stdin
+        .take()
+        .unwrap()
+        .write_all(typed.as_bytes())
+        .unwrap();
+    let out = zsh.wait_with_output().unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "done\nexit=0\nexit=0\n#a b#c\nexit=0\n",
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 /// #920: a shell block of several lines reaches the shell as ONE command
@@ -1038,6 +1119,7 @@ fn task_matcher_hints_stay_out_of_the_problems_list_and_its_count() {
         message: String::from("m"),
         source: String::from("task"),
         code: None,
+        related: Vec::new(),
     };
     app.build_diagnostics.insert(
         a.clone(),
@@ -1173,7 +1255,12 @@ fn a_task_problem_matcher_owns_its_pane_and_watch_publishes_win() {
     // A watch publish replaces the pane's batch wholesale — and the
     // watcher's own exit (a FinishedCommand rescan over its whole
     // history) must not resurrect old cycles: that one scan is skipped.
-    assert!(app.install_build_diags(7, Some(&cwd), Vec::new()));
+    assert!(app.install_build_diags(
+        7,
+        Some(&cwd),
+        Vec::new(),
+        crate::build_matchers::DEFAULT_TABSTOP
+    ));
     assert!(app.problems.groups().is_empty(), "empty batch clears");
     app.watch_published_panes.insert(7);
     assert!(

@@ -119,22 +119,94 @@ fn reset_session_bg_seq_restores_profile_default() {
 }
 
 #[test]
-fn brand_spans_render_the_cr_ft_wordmark_with_orange_brackets() {
-    let spans = brand_spans(crate::theme::Theme::default());
+fn workspace_cap_carries_the_brand_mark_and_the_folder_name() {
+    let theme = crate::theme::Theme::default();
+    let spans = workspace_cap_spans(theme, "proj");
     let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
-    assert_eq!(text, " cr<>ft ");
-    // The "<>" (the stylised "o") carries the logo orange; letters stay white.
+    assert_eq!(text, " <> proj \u{e0b4}");
+    // The "<>" (the logo's stylised "o") carries the logo orange, on the
+    // selection tint the whole cap shares; the rounded end is drawn in it.
     let bracket = spans.iter().find(|s| s.content == "<>").unwrap();
     assert_eq!(bracket.style.fg, Some(BRAND_ORANGE));
-    assert_eq!(spans[0].style.fg, Some(Color::White));
+    assert_eq!(bracket.style.bg, Some(theme.selection()));
+    let cap = spans.iter().find(|s| s.content == PILL_CAP_R).unwrap();
+    assert_eq!(cap.style.fg, Some(theme.selection()));
+}
+
+#[test]
+fn workspace_cap_elides_a_long_folder_name() {
+    let long = "a-workspace-folder-name-far-too-long-for-the-bar";
+    let text: String = workspace_cap_spans(crate::theme::Theme::default(), long)
+        .iter()
+        .map(|s| s.content.as_ref())
+        .collect();
+    let name = text
+        .trim()
+        .trim_start_matches("<> ")
+        .trim_end_matches('\u{e0b4}');
+    assert_eq!(name.trim().chars().count(), WORKSPACE_CAP_MAX, "{text}");
+    assert!(name.trim().ends_with('\u{2026}'), "{text}");
+}
+
+#[test]
+fn workspace_cap_elides_a_wide_name_by_the_cells_it_paints() {
+    // Thirty double-width chars: sixty cells, cut to fit the cap's
+    // WORKSPACE_CAP_MAX cells with the ellipsis, not its char count.
+    let wide = "\u{9879}".repeat(30);
+    let spans = workspace_cap_spans(crate::theme::Theme::default(), &wide);
+    let name = spans
+        .iter()
+        .find(|s| s.content.contains('\u{9879}'))
+        .map(|s| s.content.trim().to_string())
+        .unwrap();
+    assert!(name.ends_with('\u{2026}'), "{name}");
+    assert!(status_cells(&name) as usize <= WORKSPACE_CAP_MAX, "{name}");
+}
+
+#[test]
+fn high_contrast_themes_keep_the_status_bar_text_at_full_strength() {
+    // #1548: a high contrast theme resolves dim chrome text to its full
+    // foreground; the status bar's dim tone must not blend that back down.
+    let hc: Vec<_> = crate::theme::Theme::all()
+        .iter()
+        .filter(|t| t.high_contrast())
+        .collect();
+    assert!(!hc.is_empty(), "the bundled themes include high contrast");
+    for theme in hc {
+        let tones = StatusTones::new(*theme, status_bar_bg(*theme));
+        assert_eq!(tones.dim, tones.muted, "{}", theme.label());
+    }
+}
+
+#[test]
+fn workspace_relative_shortens_paths_inside_the_workspace() {
+    let root = std::path::Path::new("/home/me/proj");
+    assert_eq!(
+        workspace_relative("Saved /home/me/proj/src/main.rs", root),
+        "Saved src/main.rs"
+    );
+    // Quoted, and more than once.
+    assert_eq!(
+        workspace_relative("Moved '/home/me/proj/a.rs' to /home/me/proj/b/a.rs", root),
+        "Moved 'a.rs' to b/a.rs"
+    );
+    // The root alone, a sibling folder, and the root inside another path
+    // are all left as they are.
+    for kept in [
+        "Opened /home/me/proj",
+        "Saved /home/me/proj2/x.rs",
+        "Saved /mnt/home/me/proj/x.rs",
+    ] {
+        assert_eq!(workspace_relative(kept, root), kept);
+    }
 }
 
 #[test]
 fn no_stale_tcode_pill_literal_in_source() {
-    let src = include_str!("../mod.rs");
+    let src = app_source();
     assert!(
         !src.contains("\" tcode \""),
-        "stale ` tcode ` pill literal still present in src/app/mod.rs"
+        "stale ` tcode ` pill literal still present in the app's source"
     );
 }
 
@@ -450,7 +522,7 @@ fn an_unknowable_cwd_still_allows_reuse_but_a_wrong_one_does_not() {
 /// catches a SEVENTH writer being added later without one.
 #[test]
 fn every_post_draw_overlay_writer_checks_the_screen_bound() {
-    let src = include_str!("../mod.rs");
+    let src = app_source();
     let guards = src.matches("app.overlay_fits_on_screen(").count();
     assert_eq!(
         guards, 5,
@@ -648,7 +720,8 @@ fn a_recorded_frame_masks_secrets_even_while_revealed() {
 }
 
 /// #694: Developer: Show Memory Usage opens a tab attributing memory to
-/// each subsystem, with the stored diagnostics counted per server.
+/// each subsystem, with the stored diagnostics counted per server. The tab
+/// is the rendered report, so typing into it changes nothing.
 #[test]
 fn show_memory_usage_opens_a_per_subsystem_report() {
     use crate::lsp::manager::DiagnosticSeverity;
@@ -671,5 +744,66 @@ fn show_memory_usage_opens_a_per_subsystem_report() {
     for section in ["Terminal panes", "Undo history", "OUTPUT channels"] {
         assert!(text.contains(section), "{text}");
     }
-    assert!(text.contains("ruff: 2 diagnostics in 1 files"), "{text}");
+    assert!(text.contains("`ruff`: 2 diagnostics in 1 files"), "{text}");
+
+    assert!(
+        app.editor.markdown_preview.is_some(),
+        "the report opens rendered"
+    );
+    draw(&mut app, 120, 40);
+    // The server section is last: End scrolls the rendered report to it.
+    app.handle_key(key(KeyCode::End, KeyModifiers::NONE))
+        .unwrap();
+    draw(&mut app, 120, 40);
+    let shown = |app: &App| {
+        let md = app.editor.markdown_preview.as_ref().unwrap();
+        md.rows
+            .iter()
+            .map(|r| r.concat())
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert!(
+        shown(&app).contains("ruff: 2 diagnostics in 1 files"),
+        "{}",
+        shown(&app)
+    );
+    type_keys(&mut app, "zz");
+    app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    app.handle_key(key(KeyCode::Backspace, KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(
+        app.editor.lines.join("\n"),
+        text,
+        "typing leaves the report alone"
+    );
+    assert!(!app.editor.dirty, "nothing was edited");
+}
+
+/// #694: the rendered report wears the active theme from its first frame.
+/// Its tab is created with the default theme, and the preview bakes its
+/// colours when it is built.
+#[test]
+fn show_memory_usage_renders_in_the_active_theme() {
+    use crate::widgets::command_palette::Command;
+    let tmp = tempfile::tempdir().unwrap();
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    let light = crate::theme::Theme::from_id("light");
+    assert_ne!(light.accent(), crate::theme::Theme::default().accent());
+    app.apply_theme(light);
+    app.run_command(Command::DeveloperShowMemoryUsage);
+    let md = app
+        .editor
+        .markdown_preview
+        .as_ref()
+        .expect("opens rendered");
+    let title = (md.lines.iter().flat_map(|l| &l.spans))
+        .find(|s| s.content.contains("croft memory usage"))
+        .expect("the title is built");
+    assert_eq!(
+        title.style.fg,
+        Some(light.accent()),
+        "the title is in the theme's accent"
+    );
 }

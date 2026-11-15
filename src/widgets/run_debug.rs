@@ -7,8 +7,6 @@ use ratatui::{
 };
 use std::path::PathBuf;
 
-const BUTTON_BG_RGB: (u8, u8, u8) = (0x09, 0x67, 0xb8);
-const BUTTON_FG_RGB: (u8, u8, u8) = (0xff, 0xff, 0xff);
 const BODY_FG_RGB: (u8, u8, u8) = (0xb0, 0xb8, 0xc8);
 const TITLE_FG_RGB: (u8, u8, u8) = (0xff, 0xff, 0xff);
 const FOCUS_BORDER_RGB: (u8, u8, u8) = (0x4e, 0x9a, 0xff);
@@ -125,6 +123,43 @@ fn with_bg(style: Style, bg: Option<Color>) -> Style {
         Some(c) => style.bg(c),
         None => style,
     }
+}
+
+/// Word-wrap the panel's feedback line to rows at most `width` display
+/// columns wide (#944): a launch error is the message most worth reading and
+/// is usually far wider than the sidebar, so it gets as many rows as it
+/// needs instead of running across the border into the editor. A word wider
+/// than a row is split at the row's edge.
+fn wrap_feedback(text: &str, width: usize) -> Vec<String> {
+    use unicode_width::UnicodeWidthChar;
+    let width = width.max(1);
+    let mut rows = Vec::new();
+    let mut row = String::new();
+    let mut used = 0;
+    for word in text.split_whitespace() {
+        let w: usize = word.chars().map(|c| c.width().unwrap_or(0)).sum();
+        if used > 0 && used + 1 + w > width {
+            rows.push(std::mem::take(&mut row));
+            used = 0;
+        }
+        if used > 0 {
+            row.push(' ');
+            used += 1;
+        }
+        for c in word.chars() {
+            let cw = c.width().unwrap_or(0);
+            if used + cw > width && used > 0 {
+                rows.push(std::mem::take(&mut row));
+                used = 0;
+            }
+            row.push(c);
+            used += cw;
+        }
+    }
+    if !row.is_empty() {
+        rows.push(row);
+    }
+    rows
 }
 
 /// One wrapped console row: runs of text, each in the style its program
@@ -410,6 +445,10 @@ pub struct RunDebugPanel {
     /// session's console output on screen instead of wiping straight back to the
     /// Run button, so a fast-exiting program's output/errors stay readable.
     pub session_ended: bool,
+    /// The cell under the mouse pointer this frame, fed by the app like
+    /// every other side panel's, so the Run and Debug button lifts under it
+    /// the way Source Control's buttons do (a boxed theme ignores it).
+    pub hover_pointer: Option<(u16, u16)>,
 }
 
 impl RunDebugPanel {
@@ -444,6 +483,7 @@ impl RunDebugPanel {
             feedback: None,
             feedback_is_error: false,
             session_ended: false,
+            hover_pointer: None,
         }
     }
 
@@ -1288,18 +1328,18 @@ impl Widget for &mut RunDebugPanel {
             height: BUTTON_H,
         };
         self.last_button_area = button_area;
-        // Black theme: brand-teal button fill; Croft Dark keeps VS Code blue.
-        let button_bg = if self.focus_gradient {
-            crate::gradient::rgb_color(crate::gradient::PRIMARY_BTN_BG)
-        } else {
-            Color::Rgb(BUTTON_BG_RGB.0, BUTTON_BG_RGB.1, BUTTON_BG_RGB.2)
-        };
-        crate::widgets::source_control::render_rounded_button(
+        // Black theme: brand-teal button fill; Croft Dark keeps VS Code blue;
+        // Croft Loch draws the shared pill, lifted under the pointer.
+        let (button_bg, button_fg) =
+            crate::widgets::source_control::primary_button_colors(self.theme, self.focus_gradient);
+        crate::widgets::source_control::render_button(
             buf,
             button_area,
             label.as_str(),
             button_bg,
-            Color::Rgb(BUTTON_FG_RGB.0, BUTTON_FG_RGB.1, BUTTON_FG_RGB.2),
+            button_fg,
+            self.theme,
+            crate::widgets::hover::contains(button_area, self.hover_pointer),
         );
 
         let mut next_y = button_area.y + button_area.height + 1;
@@ -1332,8 +1372,14 @@ impl Widget for &mut RunDebugPanel {
             } else {
                 Style::default().fg(self.theme.ui(Color::Rgb(0xa3, 0xbe, 0x8c)))
             };
-            buf.set_string(inner.x + 1, next_y, msg.as_str(), style);
-            next_y = next_y.saturating_add(1);
+            let room = inner.width.saturating_sub(2) as usize;
+            for row in wrap_feedback(msg, room) {
+                if next_y >= inner.y + inner.height {
+                    break;
+                }
+                buf.set_stringn(inner.x + 1, next_y, &row, room, style);
+                next_y = next_y.saturating_add(1);
+            }
         }
         // BREAKPOINTS (#250): listed at rest too, so they can be found and
         // cleared without starting a session.
@@ -1988,7 +2034,10 @@ mod tests {
 
     #[test]
     fn run_and_debug_button_uses_rounded_border_corners() {
+        // The line-art corners are the boxed themes'; Croft Loch's soft
+        // slab is checked below.
         let mut panel = RunDebugPanel::new();
+        panel.theme = crate::theme::Theme::BLACK;
         let area = Rect {
             x: 0,
             y: 0,
@@ -2023,6 +2072,37 @@ mod tests {
         );
     }
 
+    /// Croft Loch: the Run and Debug button is the shared one-row pill, the
+    /// brand teal face on its middle row between half-block caps, the rows
+    /// above and below left as the panel's surface, rather than `╭╮╰╯` arcs
+    /// on the chrome; the pointer anywhere on its three-row target lifts it.
+    #[test]
+    fn croft_loch_run_and_debug_button_is_a_one_row_pill() {
+        let mut panel = RunDebugPanel::new();
+        panel.theme = crate::theme::Theme::LOCH;
+        let area = Rect::new(0, 0, 36, 24);
+        let mut buf = Buffer::empty(area);
+        Widget::render(&mut panel, area, &mut buf);
+        let b = panel.last_button_area;
+        assert!(b.height == 3 && b.width >= 4, "button must be laid out");
+        let teal = crate::gradient::rgb_color(crate::gradient::PRIMARY_BTN_BG);
+        let face_y = b.y + 1;
+        assert_eq!(buf[(b.x, face_y)].symbol(), "\u{2590}");
+        assert_eq!(buf[(b.x, face_y)].fg, teal);
+        assert_eq!(buf[(b.right() - 1, face_y)].symbol(), "\u{258c}");
+        assert_eq!(buf[(b.x + b.width / 2, face_y)].bg, teal);
+        for y in [b.y, b.bottom() - 1] {
+            for x in b.x..b.right() {
+                assert_eq!(buf[(x, y)].symbol(), " ", "no band at ({x}, {y})");
+                assert_ne!(buf[(x, y)].bg, teal, "no slab at ({x}, {y})");
+            }
+        }
+        panel.hover_pointer = Some((b.x + 1, b.y));
+        let mut buf = Buffer::empty(area);
+        Widget::render(&mut panel, area, &mut buf);
+        assert_ne!(buf[(b.x + b.width / 2, face_y)].bg, teal, "the face lifts");
+    }
+
     #[test]
     fn rendering_at_narrow_widths_does_not_panic() {
         // Repro for the user-reported crash: dragging the sidebar
@@ -2049,6 +2129,62 @@ mod tests {
                 Widget::render(&mut panel, area, &mut buf);
             }
         }
+    }
+
+    /// #944: a feedback message wider than the panel wraps onto as many
+    /// rows as it needs, and nothing is painted past the panel's right edge
+    /// into the editor beside it.
+    #[test]
+    fn long_feedback_wraps_inside_the_panel() {
+        let msg =
+            "config \"Run server\": a go launch needs a \"program\" (a package directory or file)";
+        let mut panel = RunDebugPanel::new();
+        panel.set_active_file(Some(PathBuf::from("/work/run_me.py")));
+        panel.runnable = true;
+        panel.feedback = Some(String::from(msg));
+        panel.feedback_is_error = true;
+        let panel_area = Rect {
+            x: 0,
+            y: 0,
+            width: 28,
+            height: 40,
+        };
+        // A wider buffer stands in for the editor to the panel's right.
+        let mut buf = Buffer::empty(Rect {
+            width: 60,
+            ..panel_area
+        });
+        Widget::render(&mut panel, panel_area, &mut buf);
+        let row_text = |y: u16, xs: std::ops::Range<u16>| -> String {
+            xs.map(|x| buf[(x, y)].symbol().to_string()).collect()
+        };
+        for y in 0..40 {
+            assert_eq!(
+                row_text(y, 28..60).trim(),
+                "",
+                "row {y} painted past the panel"
+            );
+        }
+        let shown: Vec<String> = (0..40)
+            .map(|y| row_text(y, 0..28))
+            .filter(|r| r.contains("config") || r.contains("launch") || r.contains("file)"))
+            .collect();
+        assert!(shown.len() >= 2, "the message wraps: {shown:?}");
+        let words: String = (0..40)
+            .map(|y| row_text(y, 1..27).trim().to_string())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            words.contains("directory or file)"),
+            "the end is shown: {words}"
+        );
+    }
+
+    #[test]
+    fn feedback_wraps_on_words_and_splits_a_word_wider_than_a_row() {
+        assert_eq!(wrap_feedback("aa bb cc", 5), vec!["aa bb", "cc"]);
+        assert_eq!(wrap_feedback("abcdefgh", 3), vec!["abc", "def", "gh"]);
+        assert_eq!(wrap_feedback("", 10), Vec::<String>::new());
     }
 
     #[test]

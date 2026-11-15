@@ -50,6 +50,35 @@ fn opening_a_search_hit_marks_the_active_match_so_the_renderer_paints_it_orange(
 }
 
 #[test]
+fn opening_a_search_hit_scrolls_the_hit_line_into_view() {
+    // The hit's line is seated with the Go to Line scroll, not left wherever
+    // the preview's scroll was: a hit far down a file must move the view.
+    let tmp = tempfile::tempdir().unwrap();
+    let f = tmp.path().join("long.rs");
+    let mut body = String::new();
+    for i in 0..120 {
+        if i == 99 {
+            body.push_str("let needle_here = 1;\n");
+        } else {
+            body.push_str("let filler = 0;\n");
+        }
+    }
+    std::fs::write(&f, body).unwrap();
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    app.set_sidebar_view(SidebarView::Search);
+    app.search.query = String::from("needle_here");
+    app.search.run_query();
+    let hit = app.search.selected_hit().cloned().expect("a hit");
+    app.open_search_hit(&hit);
+    assert_eq!(app.editor.cursor_row, 99);
+    assert!(
+        app.editor.scroll > 0,
+        "a hit on line 100 must scroll the editor, got scroll {}",
+        app.editor.scroll
+    );
+}
+
+#[test]
 fn typing_after_reactivating_search_replaces_instead_of_appending() {
     let tmp = tempfile::tempdir().unwrap();
     let mut app = App::new(tmp.path().to_path_buf()).unwrap();
@@ -956,6 +985,144 @@ fn double_clicking_a_search_hit_pins_the_tab_so_the_next_hit_opens_beside_it() {
     );
 }
 
+/// #2008: a result row names only the file, so hits in same-named files read
+/// the same. Resting the pointer on a row arms a hint with that hit's full
+/// path, and moving to the next row re-arms it with the other file's.
+#[test]
+fn resting_on_a_search_result_arms_a_hint_with_its_full_path() {
+    let tmp = tempfile::tempdir().unwrap();
+    for dir in ["one", "two"] {
+        std::fs::create_dir_all(tmp.path().join(dir)).unwrap();
+        std::fs::write(tmp.path().join(dir).join("mod.rs"), "needle\n").unwrap();
+    }
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    app.set_sidebar_view(SidebarView::Search);
+    app.search.query = String::from("needle");
+    app.search.run_query();
+    let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 40)).unwrap();
+    term.draw(|f| app.render(f)).unwrap();
+    let rows: Vec<(u16, u16)> = {
+        let buf = term.backend().buffer();
+        (0..buf.area.height)
+            .filter_map(|y| {
+                let line: String = (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect();
+                line.find(" mod.rs:1:")
+                    .map(|at| (line[..at].chars().count() as u16 + 2, y))
+            })
+            .collect()
+    };
+    assert_eq!(rows.len(), 2, "precondition: one row per mod.rs");
+    let canon = |dir: &str| {
+        let path = &app.search.hits[usize::from(dir == "two")].path;
+        assert!(path.ends_with(format!("{dir}/mod.rs")));
+        path.display().to_string()
+    };
+    let (one, two) = (canon("one"), canon("two"));
+
+    point_at(&mut app, rows[0]);
+    assert_eq!(app.ui_tooltip_label.as_deref(), Some(one.as_str()));
+    point_at(&mut app, rows[1]);
+    assert_eq!(app.ui_tooltip_label.as_deref(), Some(two.as_str()));
+
+    // Hidden behind a closed side bar, the rows it last drew have no hint.
+    app.show_tree = false;
+    point_at(&mut app, rows[0]);
+    assert_eq!(app.ui_tooltip_label, None);
+}
+
+fn point_at(app: &mut App, (column, row): (u16, u16)) {
+    app.handle_mouse(crossterm::event::MouseEvent {
+        kind: crossterm::event::MouseEventKind::Moved,
+        column,
+        row,
+        modifiers: KeyModifiers::NONE,
+    });
+}
+
+/// #2008: the rows move under a pointer that rests on one, as hits stream in
+/// or the list scrolls, and empty when the search is cleared. The hint
+/// follows the row under the pointer, not the file that was there.
+#[test]
+fn a_search_result_hint_follows_the_rows_that_move_under_a_resting_pointer() {
+    use crate::widgets::search::{SearchEvent, SearchHit};
+    let tmp = tempfile::tempdir().unwrap();
+    let hit = |name: &str| SearchHit {
+        path: tmp.path().join(name).join("mod.rs"),
+        line_no: 1,
+        line_text: String::from("needle"),
+        matches: 1,
+    };
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    app.set_sidebar_view(SidebarView::Search);
+    app.search.query = String::from("needle");
+    app.search
+        .add_hits((0..60).map(|i| hit(&format!("f{i:02}"))).collect());
+    let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 40)).unwrap();
+    term.draw(|f| app.render(f)).unwrap();
+    let inner = app.search.last_inner;
+    let cell = (inner.x + 3, inner.y + app.search.results_start_offset + 2);
+    let row_path = |app: &App| {
+        app.search.hits[app.search.scroll + 2]
+            .path
+            .display()
+            .to_string()
+    };
+    point_at(&mut app, cell);
+    assert_eq!(
+        app.ui_tooltip_label.as_deref(),
+        Some(row_path(&app).as_str())
+    );
+
+    // The wheel scrolls another file under the pointer.
+    app.handle_mouse(crossterm::event::MouseEvent {
+        kind: crossterm::event::MouseEventKind::ScrollDown,
+        column: cell.0,
+        row: cell.1,
+        modifiers: KeyModifiers::NONE,
+    });
+    assert!(app.search.scroll > 0, "precondition: the list scrolled");
+    app.poll_ui_tooltip();
+    assert_eq!(
+        app.ui_tooltip_label.as_deref(),
+        Some(row_path(&app).as_str())
+    );
+
+    // A file that sorts first streams in and shifts every row down one.
+    let before = row_path(&app);
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.search_results_rx = rx;
+    tx.send(SearchEvent::Hits(
+        app.search.query.clone(),
+        app.search.opts,
+        vec![hit("a")],
+    ))
+    .unwrap();
+    assert!(app.drain_search_results());
+    app.poll_ui_tooltip();
+    assert_ne!(row_path(&app), before);
+    assert_eq!(
+        app.ui_tooltip_label.as_deref(),
+        Some(row_path(&app).as_str())
+    );
+
+    // Cleared, as a new workspace root clears it: nothing is under it.
+    app.search.hits.clear();
+    app.search.scroll = 0;
+    app.poll_ui_tooltip();
+    assert_eq!(app.ui_tooltip_label, None);
+
+    // A hit that fills the empty row under the pointer gets its hint.
+    app.search
+        .add_hits((0..5).map(|i| hit(&format!("g{i}"))).collect());
+    app.poll_ui_tooltip();
+    assert_eq!(
+        app.ui_tooltip_label.as_deref(),
+        Some(row_path(&app).as_str())
+    );
+}
+
 // --- Split editor (side-by-side panes) -----------------------------------
 
 /// Seeding the Search panel from a terminal command must describe THAT
@@ -1458,7 +1625,10 @@ fn find_in_selection_without_a_selection_takes_the_caret_line() {
     let tmp = tempfile::tempdir().unwrap();
     let mut app = app_with_open_file(tmp.path(), "f.py", FIND_IN_SELECTION_SRC);
     (app.editor.cursor_row, app.editor.cursor_col) = (7, 0);
-    assert!(run_from_palette(&mut app, "Find: Toggle Find in Selection"));
+    assert!(run_palette_row_titled(
+        &mut app,
+        "Find: Toggle Find in Selection"
+    ));
     let state = app.editor_find.as_ref().expect("the bar opened");
     assert_eq!(state.in_selection, Some(((7, 0), (7, 16))));
     for c in "x".chars() {
@@ -2534,7 +2704,7 @@ fn find_seeds_the_whole_word_and_typing_replaces_it() {
     let (mut app, _tmp) = find_seed_app(0, 10);
     app.handle_key(ctrl('f')).unwrap();
     assert_eq!(find_query(&app), "loadOrders");
-    type_str(&mut app, "save");
+    type_keys(&mut app, "save");
     assert_eq!(find_query(&app), "save");
     assert!(app.editor_find.as_ref().unwrap().match_count >= 1);
 }
@@ -2554,9 +2724,9 @@ fn find_seeds_the_word_the_caret_just_left() {
 fn ctrl_f_on_an_open_bar_selects_its_query_again() {
     let (mut app, _tmp) = find_seed_app(0, 10);
     app.handle_key(ctrl('f')).unwrap();
-    type_str(&mut app, "save");
+    type_keys(&mut app, "save");
     app.handle_key(ctrl('f')).unwrap();
-    type_str(&mut app, "write");
+    type_keys(&mut app, "write");
     assert_eq!(find_query(&app), "write");
 }
 
@@ -2567,14 +2737,14 @@ fn an_unseeded_or_deselected_query_still_appends() {
     let (mut app, _tmp) = find_seed_app(2, 0);
     app.handle_key(ctrl('f')).unwrap();
     assert_eq!(find_query(&app), "");
-    type_str(&mut app, "sa");
-    type_str(&mut app, "ve");
+    type_keys(&mut app, "sa");
+    type_keys(&mut app, "ve");
     assert_eq!(find_query(&app), "save");
     let (mut app, _tmp) = find_seed_app(0, 10);
     app.handle_key(ctrl('f')).unwrap();
     app.handle_key(key(KeyCode::End, KeyModifiers::NONE))
         .unwrap();
-    type_str(&mut app, "X");
+    type_keys(&mut app, "X");
     assert_eq!(find_query(&app), "loadOrdersX");
 }
 
@@ -2622,4 +2792,225 @@ fn search_announces_every_match_on_a_line() {
         matches: 2,
     }];
     assert_eq!(app.a11y_snapshot().focus, "Search, 2 matches in 1 file");
+}
+
+#[test]
+fn opening_a_search_hit_in_a_fresh_file_scrolls_to_it() {
+    // The file was never drawn, so the editor has no viewport to centre in;
+    // the hit must still end up in view rather than at the top of the file.
+    let tmp = tempfile::tempdir().unwrap();
+    let f = tmp.path().join("long.txt");
+    let body: String = (0..300)
+        .map(|i| {
+            if i == 200 {
+                "needle\n".to_string()
+            } else {
+                format!("line {i}\n")
+            }
+        })
+        .collect();
+    std::fs::write(&f, body).unwrap();
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    app.set_sidebar_view(SidebarView::Search);
+    app.search.query = String::from("needle");
+    app.search.run_query();
+    let hit = app.search.selected_hit().cloned().expect("a hit");
+    app.open_search_hit(&hit);
+    assert_eq!(app.editor.cursor_row, 200);
+    assert!(
+        app.editor.scroll > 150 && app.editor.scroll <= 200,
+        "the hit is scrolled into reach, scroll = {}",
+        app.editor.scroll
+    );
+}
+
+/// #1729: the global search inputs are real input lines: Left/Right/Home/End
+/// move inside the field, typing and Backspace/Delete act at the caret, and
+/// Ctrl walks by a word.
+#[test]
+fn search_input_edits_at_the_caret() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    app.set_sidebar_view(SidebarView::Search);
+    app.search.query = String::from("helo world");
+    let k = |c, m| key(c, m);
+    // The caret follows the end of a text set from outside; Left x7 reaches
+    // the gap between `l` and `o`, and the typed `l` lands there.
+    for _ in 0..7 {
+        app.handle_search_key(k(KeyCode::Left, KeyModifiers::NONE));
+    }
+    app.handle_search_key(k(KeyCode::Char('l'), KeyModifiers::NONE));
+    assert_eq!(app.search.query, "hello world");
+    assert_eq!(app.search.caret(), 4);
+    // Delete removes ahead, Backspace behind.
+    app.handle_search_key(k(KeyCode::Delete, KeyModifiers::NONE));
+    assert_eq!(app.search.query, "hell world");
+    app.handle_search_key(k(KeyCode::Backspace, KeyModifiers::NONE));
+    assert_eq!(app.search.query, "hel world");
+    // Home / End.
+    app.handle_search_key(k(KeyCode::Home, KeyModifiers::NONE));
+    app.handle_search_key(k(KeyCode::Char('>'), KeyModifiers::NONE));
+    assert_eq!(app.search.query, ">hel world");
+    app.handle_search_key(k(KeyCode::End, KeyModifiers::NONE));
+    app.handle_search_key(k(KeyCode::Char('!'), KeyModifiers::NONE));
+    assert_eq!(app.search.query, ">hel world!");
+    // Ctrl+Left walks a word, Ctrl+Backspace cuts one.
+    app.handle_search_key(k(KeyCode::Left, KeyModifiers::CONTROL));
+    assert_eq!(app.search.caret(), 5, "before `world`");
+    app.handle_search_key(k(KeyCode::Backspace, KeyModifiers::CONTROL));
+    assert_eq!(app.search.query, ">world!");
+    assert_eq!(app.search.caret(), 1);
+}
+
+#[test]
+fn search_fields_keep_their_own_carets_and_paste_at_the_caret() {
+    use crate::widgets::search::SearchField;
+    let tmp = tempfile::tempdir().unwrap();
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    app.set_sidebar_view(SidebarView::Search);
+    app.search.query = String::from("ac");
+    app.handle_search_key(key(KeyCode::Left, KeyModifiers::NONE));
+    // Pasting goes in at the caret, not at the end.
+    app.paste_clipboard_into_search(Some("b"));
+    assert_eq!(app.search.query, "abc");
+    assert_eq!(app.search.caret(), 2);
+    // Another field has a caret of its own, and the query keeps its.
+    app.search.open_replace();
+    app.search.focus_field(SearchField::Replace);
+    app.handle_search_key(key(KeyCode::Char('x'), KeyModifiers::NONE));
+    app.handle_search_key(key(KeyCode::Char('z'), KeyModifiers::NONE));
+    app.handle_search_key(key(KeyCode::Left, KeyModifiers::NONE));
+    app.handle_search_key(key(KeyCode::Char('y'), KeyModifiers::NONE));
+    assert_eq!(app.search.replace, "xyz");
+    app.search.focus_field(SearchField::Query);
+    assert_eq!(app.search.caret(), 2, "the query's caret did not move");
+}
+
+#[test]
+fn a_selected_search_query_is_replaced_by_typing_and_leaves_the_caret_there() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    app.set_sidebar_view(SidebarView::Search);
+    app.search.query = String::from("alpha");
+    app.handle_search_key(key(KeyCode::Char('a'), KeyModifiers::SUPER));
+    app.handle_search_key(key(KeyCode::Char('b'), KeyModifiers::NONE));
+    assert_eq!(app.search.query, "b");
+    assert_eq!(app.search.caret(), 1);
+    // Left drops a selection and moves from its end.
+    app.handle_search_key(key(KeyCode::Char('a'), KeyModifiers::SUPER));
+    app.handle_search_key(key(KeyCode::Left, KeyModifiers::NONE));
+    assert_eq!(app.search.selection_range(), None);
+}
+
+/// #1729: the find bar's Replace row has a caret of its own, and a long
+/// query scrolls so the caret stays on screen.
+#[test]
+fn find_bar_replace_field_edits_at_its_caret() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("a.txt");
+    std::fs::write(&file, "foo\n").unwrap();
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    app.editor.open_pinned(&file).unwrap();
+    app.focus_pane(Pane::Editor);
+    app.open_editor_replace();
+    app.handle_editor_find_key(key(KeyCode::Char('f'), KeyModifiers::NONE));
+    app.handle_editor_find_key(key(KeyCode::Tab, KeyModifiers::NONE));
+    for c in "ac".chars() {
+        app.handle_editor_find_key(key(KeyCode::Char(c), KeyModifiers::NONE));
+    }
+    app.handle_editor_find_key(key(KeyCode::Left, KeyModifiers::NONE));
+    app.handle_editor_find_key(key(KeyCode::Char('b'), KeyModifiers::NONE));
+    let st = app.editor_find.as_ref().unwrap();
+    assert_eq!(st.replace, "abc");
+    assert_eq!(st.replace_caret(), 2);
+    assert_eq!(st.query, "f", "the query row was left alone");
+}
+
+#[test]
+fn bracketed_paste_goes_into_the_focused_search_field_at_its_caret() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    app.set_sidebar_view(SidebarView::Search);
+    app.search.query = String::from("query");
+    app.search.replace = String::from("ac");
+    app.search
+        .focus_field(crate::widgets::search::SearchField::Replace);
+    app.search.move_caret(|_, _| 1);
+    app.handle_paste("b");
+    assert_eq!(
+        app.search.replace, "abc",
+        "the paste lands in Replace, at its caret"
+    );
+    assert_eq!(app.search.query, "query", "and never in the Query field");
+}
+
+#[test]
+fn a_click_on_the_find_bar_puts_the_caret_under_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    let mut find = crate::widgets::editor_find::EditorFind::new(
+        String::from("needle"),
+        crate::widgets::search::SearchOpts::default(),
+    );
+    find.last_rect = ratatui::layout::Rect {
+        x: 10,
+        y: 2,
+        width: 48,
+        height: 3,
+    };
+    app.editor_find = Some(find);
+    // The text starts after the border and the two-cell marker: column 13.
+    app.handle_mouse(mouse(
+        crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        15,
+        3,
+    ));
+    assert_eq!(app.editor_find.as_ref().unwrap().caret(), 2);
+}
+
+/// #1729: the find bar takes the keys only while the editor has focus, so a
+/// click on it from another pane moves focus to the editor as well, or what
+/// is typed next would go to the pane that kept it.
+#[test]
+fn a_click_on_the_find_bar_from_another_pane_focuses_the_editor() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    let mut find = crate::widgets::editor_find::EditorFind::new(
+        String::from("needle"),
+        crate::widgets::search::SearchOpts::default(),
+    );
+    find.last_rect = ratatui::layout::Rect {
+        x: 10,
+        y: 2,
+        width: 48,
+        height: 3,
+    };
+    app.editor_find = Some(find);
+    app.focus = Pane::Tree;
+    app.handle_mouse(mouse(
+        crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        15,
+        3,
+    ));
+    assert!(
+        app.focus == Pane::Editor,
+        "the click moved focus to the editor"
+    );
+    assert_eq!(app.editor_find.as_ref().unwrap().caret(), 2);
+}
+
+/// #1729: a whole-query replacement longer than the query it replaces puts
+/// the caret at its end, not where the old query ended.
+#[test]
+fn a_longer_whole_query_puts_the_find_caret_at_its_end() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    app.editor_find = Some(crate::widgets::editor_find::EditorFind::new(
+        String::from("ab"),
+        crate::widgets::search::SearchOpts::default(),
+    ));
+    app.editor_find_set_query(String::from("abcdef"));
+    let st = app.editor_find.as_ref().unwrap();
+    assert_eq!(st.query, "abcdef");
+    assert_eq!(st.caret(), 6);
 }

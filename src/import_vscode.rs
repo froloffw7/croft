@@ -383,6 +383,11 @@ const SETTINGS: &[SettingMap] = &[
         convert: as_bool,
     },
     SettingMap {
+        vscode: "explorer.compactFolders",
+        croft: "disable_compact_folders",
+        convert: negated,
+    },
+    SettingMap {
         vscode: "files.exclude",
         croft: "files_exclude",
         convert: as_enabled_globs,
@@ -410,9 +415,10 @@ const SETTINGS: &[SettingMap] = &[
 /// does the same thing; a VS Code command with no true counterpart is left
 /// out so the import reports it rather than binding the user's chord to
 /// something that merely sounds similar.
-/// `editor.action.showHover` is deliberately ABSENT, having been mapped and
-/// then removed: it is not `peek_definition`, which opens a different thing
-/// entirely. `editor.action.revealDefinition` was once mapped to
+/// `editor.action.showHover` was once mapped to `peek_definition`, which
+/// opens a different thing entirely, then left out until croft had a hover
+/// command of its own: it maps to `show_hover` (#1518).
+/// `editor.action.revealDefinition` was once mapped to
 /// `mouse_go_to_definition_at_click`, which reads the last POINTER position;
 /// it now maps to the caret-driven `go_to_definition` (#1212).
 const COMMANDS: &[(&str, &str)] = &[
@@ -446,6 +452,10 @@ const COMMANDS: &[(&str, &str)] = &[
     ("workbench.action.quickOpen", "quick_open"),
     ("workbench.action.editor.nextChange", "next_change"),
     ("workbench.action.editor.previousChange", "previous_change"),
+    ("editor.action.marker.next", "next_problem"),
+    ("editor.action.marker.nextInFiles", "next_problem"),
+    ("editor.action.marker.prev", "previous_problem"),
+    ("editor.action.marker.prevInFiles", "previous_problem"),
     ("workbench.action.gotoSymbol", "go_to_symbol"),
     ("workbench.action.showAllSymbols", "go_to_workspace_symbol"),
     ("workbench.action.closeActiveEditor", "close_editor"),
@@ -575,6 +585,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ("editor.action.goToImplementation", "go_to_implementations"),
     ("editor.action.rename", "rename_symbol"),
     ("editor.action.triggerSuggest", "trigger_suggest"),
+    ("editor.action.showHover", "show_hover"),
     (
         "editor.action.triggerParameterHints",
         "trigger_parameter_hints",
@@ -641,6 +652,7 @@ const COMMANDS: &[(&str, &str)] = &[
         "editor.action.insertCursorAtEndOfEachLineSelected",
         "add_cursors_to_line_ends",
     ),
+    ("expandLineSelection", "expand_line_selection"),
     ("editor.action.smartSelect.expand", "expand_selection"),
     ("editor.action.smartSelect.shrink", "shrink_selection"),
     ("editor.action.jumpToBracket", "jump_to_bracket"),
@@ -658,6 +670,10 @@ const COMMANDS: &[(&str, &str)] = &[
     ("editor.foldRecursively", "fold_recursively"),
     ("editor.unfoldRecursively", "unfold_recursively"),
     ("markdown.showPreview", "toggle_markdown_preview"),
+    (
+        "markdown.showPreviewToSide",
+        "open_markdown_preview_to_side",
+    ),
     ("workbench.action.tasks.build", "run_build_task"),
     ("workbench.action.tasks.runTask", "run_task"),
     ("workbench.action.tasks.reRunTask", "rerun_last_task"),
@@ -851,11 +867,11 @@ fn read_jsonc(path: &Path) -> Result<Option<Value>> {
     }
     let raw =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    // `crate::tasks::strip_jsonc` walks CHARS. The copy that used to live in
+    // `crate::jsonc::strip_jsonc` walks CHARS. The copy that used to live in
     // `workspace.rs` walked bytes and mangled any non-ASCII value (#396),
     // which a settings file carries routinely in paths and snippet bodies;
     // it was deleted in favour of this one rather than repaired.
-    let stripped = crate::tasks::strip_jsonc(&raw);
+    let stripped = crate::jsonc::strip_jsonc(&raw);
     if stripped.trim().is_empty() {
         return Ok(None);
     }
@@ -1412,7 +1428,7 @@ fn carries_jsonc_extras(path: &Path) -> bool {
     let Ok(raw) = std::fs::read_to_string(path) else {
         return false;
     };
-    raw != crate::tasks::strip_jsonc(&raw)
+    raw != crate::jsonc::strip_jsonc(&raw)
 }
 
 /// Read a config file for merging, turning a PARSE failure into a per-file
@@ -1453,7 +1469,7 @@ fn read_or_refuse(path: &Path, report: &mut Report) -> (Option<Value>, bool) {
 /// leaving it alone is also what makes a second run a no-op.
 pub fn apply(report: &mut Report) -> Result<Vec<PathBuf>> {
     apply_into_dirs(
-        &crate::prefs::config_dir(),
+        &crate::paths::config_dir(),
         &crate::lsp::manifest::user_extensions_dir(),
         report,
     )
@@ -1728,6 +1744,7 @@ mod tests {
             "editor.bracketPairColorization.enabled": false,
             "editor.autoClosingBrackets": "never",
             "editor.renderWhitespace": "all",
+            "explorer.compactFolders": false,
             "terminal.integrated.scrollback": 20000,
             "editor.fontFamily": "Fira Code",
             "workbench.iconTheme": "material-icon-theme"
@@ -1736,6 +1753,7 @@ mod tests {
         convert_settings(&doc, &mut report);
 
         assert_eq!(report.settings["format_on_save"], json!(true));
+        assert_eq!(report.settings["disable_compact_folders"], json!(true));
         assert_eq!(
             report.settings["disable_bracket_colors"],
             json!(true),
@@ -2244,10 +2262,10 @@ mod tests {
         assert!(warnings.is_empty(), "{warnings:?}");
     }
 
-    /// The hover and peek commands still import as they did: `showHover` has
-    /// no croft counterpart and is reported, `peekDefinition` stays peek.
+    /// `showHover` imports onto croft's own Show or Focus Hover (#1518), not
+    /// onto peek, and `peekDefinition` still imports as peek.
     #[test]
-    fn hover_is_still_dropped_and_peek_still_imports_as_peek() {
+    fn hover_imports_as_show_hover_and_peek_still_imports_as_peek() {
         let doc = json!([
             { "key": "ctrl+alt+h", "command": "editor.action.showHover" },
             { "key": "ctrl+alt+p", "command": "editor.action.peekDefinition" }
@@ -2256,14 +2274,20 @@ mod tests {
         convert_keybindings(&doc, &mut report);
         assert_eq!(
             report.keybindings,
-            vec![(
-                String::from("ctrl+alt+p"),
-                String::from("peek_definition"),
-                None
-            )]
+            vec![
+                (String::from("ctrl+alt+h"), String::from("show_hover"), None),
+                (
+                    String::from("ctrl+alt+p"),
+                    String::from("peek_definition"),
+                    None
+                ),
+            ]
         );
-        assert_eq!(report.dropped_keybindings.len(), 1);
-        assert!(report.dropped_keybindings[0].contains("editor.action.showHover"));
+        assert!(
+            report.dropped_keybindings.is_empty(),
+            "{:?}",
+            report.dropped_keybindings
+        );
     }
 
     /// #852 (comment 3): VS Code's editor-tab commands import onto croft's
@@ -3824,6 +3848,22 @@ mod tests {
             [(
                 String::from("ctrl+alt+i"),
                 String::from("toggle_find_in_selection"),
+                None
+            )]
+        );
+    }
+
+    /// #1570: VS Code's Expand Line Selection chord imports onto croft's.
+    #[test]
+    fn expand_line_selection_imports() {
+        let doc = json!([{ "key": "ctrl+alt+l", "command": "expandLineSelection" }]);
+        let mut report = Report::default();
+        convert_keybindings(&doc, &mut report);
+        assert_eq!(
+            report.keybindings,
+            [(
+                String::from("ctrl+alt+l"),
+                String::from("expand_line_selection"),
                 None
             )]
         );

@@ -601,7 +601,7 @@ fn sarif_info_tab_shows_rule_help_tags_and_related_locations() {
     let (tmp, log) = sarif_flow_fixture();
     let mut app = App::new(tmp.path().to_path_buf()).unwrap();
     app.editor.open(&log).unwrap();
-    let screen = draw_screen(&mut app);
+    let screen = draw_screen(&mut app, 160, 40);
     assert!(
         screen.contains("Use parameters instead."),
         "rule help:\n{screen}"
@@ -619,7 +619,7 @@ fn sarif_steps_tab_walks_the_code_flow_in_the_editor() {
     let mut app = App::new(tmp.path().to_path_buf()).unwrap();
     app.editor.open_preview(&log).unwrap();
     app.handle_sarif_key(key(KeyCode::Char('d'), KeyModifiers::NONE));
-    let screen = draw_screen(&mut app);
+    let screen = draw_screen(&mut app, 160, 40);
     assert!(screen.contains("Steps"), "{screen}");
     assert!(
         screen.contains("source") && screen.contains("sink"),
@@ -653,17 +653,17 @@ fn sarif_stacks_and_raw_tabs() {
     app.editor.open(&log).unwrap();
     app.handle_sarif_key(key(KeyCode::Char('d'), KeyModifiers::NONE));
     app.handle_sarif_key(key(KeyCode::Char('d'), KeyModifiers::NONE));
-    let screen = draw_screen(&mut app);
+    let screen = draw_screen(&mut app, 160, 40);
     assert!(screen.contains("frame zero"), "stacks tab:\n{screen}");
     assert!(
         screen.contains("src/db.rs:3:2"),
         "frame location with its column:\n{screen}"
     );
     app.handle_sarif_key(key(KeyCode::Char('d'), KeyModifiers::NONE));
-    let screen = draw_screen(&mut app);
+    let screen = draw_screen(&mut app, 160, 40);
     assert!(screen.contains("\"ruleId\": \"R1\""), "raw tab:\n{screen}");
     app.handle_sarif_key(key(KeyCode::Char('D'), KeyModifiers::NONE));
-    let screen = draw_screen(&mut app);
+    let screen = draw_screen(&mut app, 160, 40);
     assert!(
         screen.contains("frame zero"),
         "D goes back a tab:\n{screen}"
@@ -791,7 +791,7 @@ fn sarif_fix_tab_previews_and_f_applies_the_fix_as_an_unsaved_edit() {
         for _ in 0..4 {
             app.handle_sarif_key(key(KeyCode::Char('d'), KeyModifiers::NONE));
         }
-        let screen = draw_screen(&mut app);
+        let screen = draw_screen(&mut app, 160, 40);
         assert!(
             screen.contains("Sanitise it"),
             "the fix's description:\n{screen}"
@@ -837,6 +837,109 @@ fn sarif_fix_tab_previews_and_f_applies_the_fix_as_an_unsaved_edit() {
                 .get(&tmp.path().join("q.rs"))
                 .is_none_or(|m| m.values().all(|v| v.is_empty())),
             "fixed results are withdrawn from the editor"
+        );
+    });
+}
+
+/// A log with two fixes for one file, as ruff writes them: the first splits
+/// line 1 in two, which moves the code the second points at down a line.
+fn sarif_two_fixes_fixture() -> (tempfile::TempDir, std::path::PathBuf) {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("util.py");
+    std::fs::write(
+        &file,
+        "import os, sys\ndef long_function_name(x):\n    if x == None:\n",
+    )
+    .unwrap();
+    let log = tmp.path().join("ruff.sarif");
+    let result = |rule: &str, line: u32, (from, to): (u32, u32), text: &str| {
+        format!(
+            r#"{{"ruleId":"{rule}","level":"error","message":{{"text":"{rule}"}},
+            "locations":[{{"physicalLocation":{{"artifactLocation":{{"uri":"util.py"}},"region":{{"startLine":{line},"startColumn":{from}}}}}}}],
+            "fixes":[{{"description":{{"text":"fix {rule}"}},"artifactChanges":[{{"artifactLocation":{{"uri":"util.py"}},
+              "replacements":[{{"deletedRegion":{{"startLine":{line},"startColumn":{from},"endColumn":{to}}},"insertedContent":{{"text":"{text}"}}}}]}}]}}]}}"#
+        )
+    };
+    std::fs::write(
+        &log,
+        format!(
+            r#"{{"version":"2.1.0","runs":[{{"tool":{{"driver":{{"name":"ruff"}}}},"columnKind":"unicodeCodePoints","results":[{},{}]}}]}}"#,
+            result("E401", 1, (1, 15), "import os\\nimport sys"),
+            result("E711", 3, (8, 17), "x is None"),
+        ),
+    )
+    .unwrap();
+    // Scanned, then logged.
+    for (path, secs) in [(&file, 1_000), (&log, 2_000)] {
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs))
+            .unwrap();
+    }
+    (tmp, log)
+}
+
+/// #1094: once a file has changed since the analysis, a fix's line and
+/// column numbers point at other code. Applying the second fix after the
+/// first used to turn `def long_function_name(x):` into
+/// `def lonx is Noneion_name(x):` and report success. It is refused, and the
+/// buffer is left alone, both while the first fix is unsaved and after it
+/// is saved.
+#[test]
+fn a_sarif_fix_for_a_file_changed_since_the_log_is_refused() {
+    let _guard = relay_test_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let home = tempfile::tempdir().unwrap();
+    with_relay_home(home.path(), || {
+        let (tmp, log) = sarif_two_fixes_fixture();
+        let util = tmp.path().join("util.py");
+        let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+        app.editor.open(&log).unwrap();
+        let fix = |app: &mut App, entry: usize| {
+            let viewer = (0..app.editor.tab_count())
+                .find(|&i| app.editor.tab_path(i).as_deref() == Some(log.as_path()))
+                .unwrap();
+            app.editor.select(viewer);
+            let view = app.editor.sarif.as_mut().unwrap();
+            view.selected = view
+                .rows()
+                .iter()
+                .position(|r| *r == crate::sarif::view::Row::Item { entry })
+                .unwrap();
+            app.handle_sarif_key(key(KeyCode::Char('f'), KeyModifiers::NONE));
+        };
+        fix(&mut app, 0);
+        assert_eq!(app.editor.path.as_deref(), Some(util.as_path()));
+        assert_eq!(
+            app.editor.lines[..3],
+            ["import os", "import sys", "def long_function_name(x):"]
+        );
+
+        fix(&mut app, 1);
+        assert_eq!(
+            app.status,
+            "Fix not applied: util.py changed since the analysis; re-run the analyzer"
+        );
+        assert!(!app.editor.sarif.as_ref().unwrap().entries[1].fixed);
+        let util_tab = (0..app.editor.tab_count())
+            .find(|&i| app.editor.tab_path(i).as_deref() == Some(util.as_path()))
+            .unwrap();
+        app.editor.select(util_tab);
+        assert_eq!(app.editor.lines[2], "def long_function_name(x):");
+
+        // Saved, the file is newer than the log: still refused.
+        app.save();
+        assert!(!app.editor.dirty, "{}", app.status);
+        fix(&mut app, 1);
+        assert!(
+            app.status.contains("util.py changed since the analysis"),
+            "{}",
+            app.status
+        );
+        assert_eq!(
+            std::fs::read_to_string(&util).unwrap(),
+            "import os\nimport sys\ndef long_function_name(x):\n    if x == None:\n"
         );
     });
 }
@@ -939,7 +1042,7 @@ fn the_run_tab_shows_the_tool_its_invocation_and_notifications() {
         app.editor.sarif.as_ref().unwrap().tab,
         crate::sarif::view::Tab::Run
     );
-    let screen = draw_screen(&mut app);
+    let screen = draw_screen(&mut app, 160, 40);
     for want in [
         "CodeQL 2.19.3",
         "https://codeql.github.com",
@@ -994,7 +1097,7 @@ fn the_sarif_key_legend_names_the_fix_log_baseline_and_export_keys() {
     let (tmp, log) = sarif_fixture();
     let mut app = App::new(tmp.path().to_path_buf()).unwrap();
     app.editor.open(&log).unwrap();
-    let screen = draw_screen(&mut app);
+    let screen = draw_screen(&mut app, 160, 40);
     for want in ["f fix", "o add log", "b baseline", "E export"] {
         assert!(screen.contains(want), "{want} missing:\n{screen}");
     }
@@ -1169,7 +1272,7 @@ fn the_info_tab_lists_the_results_taxa() {
     let mut app = App::new(tmp.path().to_path_buf()).unwrap();
     app.editor.open(&log).unwrap();
     app.editor.sarif.as_mut().unwrap().selected = 1;
-    let screen = draw_screen(&mut app);
+    let screen = draw_screen(&mut app, 160, 40);
     assert!(screen.contains("CWE CWE-89: SqlInjection"), "{screen}");
 }
 
@@ -1285,19 +1388,8 @@ fn code_scanning_follows_the_branch_when_on_and_only_says_so_when_prompting() {
     let home = tempfile::tempdir().unwrap();
     with_relay_home(home.path(), || {
         let tmp = tempfile::tempdir().unwrap();
-        let git = |args: &[&str]| {
-            let out = std::process::Command::new("git")
-                .arg("-C")
-                .arg(tmp.path())
-                .args(args)
-                .output()
-                .unwrap();
-            assert!(out.status.success(), "git {args:?}");
-            String::from_utf8_lossy(&out.stdout).trim().to_string()
-        };
-        git(&["init", "-q", "-b", "main"]);
-        git(&["config", "user.email", "a@b"]);
-        git(&["config", "user.name", "a"]);
+        let git = |args: &[&str]| git_ok(tmp.path(), args);
+        git_init_with_identity(tmp.path());
         std::fs::write(tmp.path().join("a.txt"), "a").unwrap();
         git(&["add", "."]);
         git(&["commit", "-q", "-m", "scanned"]);

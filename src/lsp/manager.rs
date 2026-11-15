@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
@@ -30,7 +30,7 @@ use crate::lsp::config::{Language, ServerConfig};
 use crate::lsp::log_file;
 use crate::lsp::registry::ServerRegistry;
 use crate::lsp::runtime::LspRuntime;
-use crate::widgets::editor::TextSpanEdit;
+use crate::text_edit::TextSpanEdit;
 
 #[derive(Debug, Clone, Default)]
 pub struct CompletionItem {
@@ -635,6 +635,23 @@ pub struct LinkedEditingResult {
     pub ranges: Vec<(u32, u32, u32, u32)>,
 }
 
+/// One `textDocument/inlineCompletion` answer (LSP 3.18, #607): the
+/// server's first suggestion, or `None` when it had nothing or failed.
+#[derive(Debug)]
+pub struct InlineCompletionResult {
+    pub request_id: u64,
+    pub item: Option<InlineItem>,
+}
+
+/// An inline completion as plain text, and the UTF-16 span
+/// `(start_line, start_char, end_line, end_char)` it replaces when the
+/// server gave one.
+#[derive(Debug, PartialEq, Eq)]
+pub struct InlineItem {
+    pub text: String,
+    pub range: Option<(u32, u32, u32, u32)>,
+}
+
 /// One `textDocument/selectionRange` answer (#254): a strictly-ordered
 /// smallest-first chain of UTF-16 spans per requested position (the
 /// server's parent links flattened), index-aligned with the request's
@@ -685,7 +702,9 @@ pub struct Diagnostic {
 /// Two diagnostics are the same finding when everything croft shows of them
 /// matches. `origin` is left out: a server that reports one finding both
 /// pushed and pulled may give each copy different `data`, and the copies
-/// must still collapse into one row (`diagnostics_by_source`).
+/// must still collapse into one row (`diagnostics_by_source`). The related
+/// locations read from it are shown, though (#1523), so they count: a copy
+/// that names them is never dropped for one that does not.
 impl PartialEq for Diagnostic {
     fn eq(&self, other: &Self) -> bool {
         let Diagnostic {
@@ -708,6 +727,7 @@ impl PartialEq for Diagnostic {
             )
             && (severity, message, tags, code)
                 == (&other.severity, &other.message, &other.tags, &other.code)
+            && self.related() == other.related()
     }
 }
 
@@ -719,6 +739,65 @@ impl PartialEq for Diagnostic {
 pub struct DiagnosticOrigin {
     pub server: String,
     pub wire: lsp_types::Diagnostic,
+}
+
+impl Diagnostic {
+    /// The places the server points at to explain this diagnostic (#1523):
+    /// rustc's "immutable borrow occurs here", TypeScript's "'foo' is
+    /// declared here". Not stored on croft's diagnostic: built on demand
+    /// from the server's own, kept in `origin`; one croft made itself has
+    /// none.
+    pub fn related(&self) -> Vec<RelatedLocation> {
+        let Some(origin) = self.origin.as_deref() else {
+            return Vec::new();
+        };
+        origin
+            .wire
+            .related_information
+            .iter()
+            .flatten()
+            .filter_map(|r| {
+                Some(RelatedLocation {
+                    path: r.location.uri.to_file_path().ok()?,
+                    line: r.location.range.start.line,
+                    character: r.location.range.start.character,
+                    message: r.message.clone(),
+                })
+            })
+            .collect()
+    }
+}
+
+/// One of a diagnostic's related locations (#1523): where its range starts,
+/// zero-based with a UTF-16 column like the diagnostic's own position.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelatedLocation {
+    pub path: PathBuf,
+    pub line: u32,
+    pub character: u32,
+    pub message: String,
+}
+
+impl RelatedLocation {
+    /// `file(line, col): message`, one-based, as VS Code appends it to the
+    /// diagnostic's hover, with the file relative to `root`.
+    pub fn label(&self, root: &Path) -> String {
+        let file = self.path.strip_prefix(root).unwrap_or(&self.path);
+        format!(
+            "{}({}, {}): {}",
+            file.display(),
+            self.line + 1,
+            self.character + 1,
+            one_line(&self.message)
+        )
+    }
+}
+
+/// `text` on one line, each line break (`\r\n`, `\n` or `\r`) a space: a
+/// related location's message, which the hover and PROBLEMS show one
+/// location to a line (#1523).
+pub fn one_line(text: &str) -> String {
+    text.replace("\r\n", " ").replace(['\r', '\n'], " ")
 }
 
 /// A diagnostic's rule code with the server's `source` and the rule's
@@ -1047,6 +1126,12 @@ enum Cmd {
         line: u32,
         character: u32,
     },
+    RequestInlineCompletion {
+        request_id: u64,
+        path: PathBuf,
+        line: u32,
+        character: u32,
+    },
     RequestSelectionRanges {
         request_id: u64,
         path: PathBuf,
@@ -1150,6 +1235,10 @@ struct LangCapabilitySupport {
     formatting: HashMap<Language, bool>,
     code_action: HashMap<Language, bool>,
     call_hierarchy: HashMap<Language, bool>,
+    /// The server instances, by (language, project root) as
+    /// `request_inline_completion` picks them, one of whose running servers
+    /// offers inline completions (#607).
+    inline_completion: HashSet<ClientKey>,
     /// Whether a server for the language wants `willRenameFiles` (#610).
     will_rename: HashMap<Language, bool>,
     /// Concatenated on-type trigger characters per language (#254);
@@ -1203,6 +1292,10 @@ pub struct LspManager {
     completion_rx: std_mpsc::Receiver<CompletionResult>,
     signature_help_rx: std_mpsc::Receiver<SignatureHelpResult>,
     hover_rx: std_mpsc::Receiver<HoverResult>,
+    /// Test hook: a sender into `hover_rx`, so app tests can answer a
+    /// hover request without a server.
+    #[cfg(test)]
+    hover_test_tx: std_mpsc::Sender<HoverResult>,
     rust_analyzer_rx: std_mpsc::Receiver<RustAnalyzerResult>,
     def_rx: std_mpsc::Receiver<DefinitionResult>,
     /// Test hooks: senders into the three jump channels, so app tests can
@@ -1225,6 +1318,11 @@ pub struct LspManager {
     /// answer a linkedEditingRange request without a server.
     #[cfg(test)]
     linked_editing_test_tx: std_mpsc::Sender<LinkedEditingResult>,
+    inline_completion_rx: std_mpsc::Receiver<InlineCompletionResult>,
+    /// Test hook: a sender into `inline_completion_rx`, so app tests can
+    /// answer an inlineCompletion request without a server.
+    #[cfg(test)]
+    inline_completion_test_tx: std_mpsc::Sender<InlineCompletionResult>,
     /// Test hook: the text each document was last opened or changed with.
     #[cfg(test)]
     synced_texts: std::sync::Mutex<HashMap<PathBuf, String>>,
@@ -1309,6 +1407,8 @@ impl LspManager {
         let (completion_tx, completion_rx) = std_mpsc::channel();
         let (signature_help_tx, signature_help_rx) = std_mpsc::channel();
         let (hover_tx, hover_rx) = std_mpsc::channel();
+        #[cfg(test)]
+        let hover_test_tx = hover_tx.clone();
         let (rust_analyzer_tx, rust_analyzer_rx) = std_mpsc::channel();
         let (def_tx, def_rx) = std_mpsc::channel();
         let (doc_symbols_tx, doc_symbols_rx) = std_mpsc::channel();
@@ -1322,6 +1422,9 @@ impl LspManager {
         let (linked_editing_tx, linked_editing_rx) = std_mpsc::channel();
         #[cfg(test)]
         let linked_editing_test_tx = linked_editing_tx.clone();
+        let (inline_completion_tx, inline_completion_rx) = std_mpsc::channel();
+        #[cfg(test)]
+        let inline_completion_test_tx = inline_completion_tx.clone();
         let (selection_ranges_tx, selection_ranges_rx) = std_mpsc::channel();
         let (calls_tx, calls_rx) = std_mpsc::channel();
         let (ws_symbols_tx, ws_symbols_rx) = std_mpsc::channel();
@@ -1384,6 +1487,7 @@ impl LspManager {
                 references: ref_tx,
                 document_highlights: doc_highlights_tx,
                 linked_editing: linked_editing_tx,
+                inline_completion: inline_completion_tx,
                 selection_ranges: selection_ranges_tx,
                 call_hierarchy: calls_tx,
                 workspace_symbols: ws_symbols_tx,
@@ -1416,6 +1520,8 @@ impl LspManager {
             completion_rx,
             signature_help_rx,
             hover_rx,
+            #[cfg(test)]
+            hover_test_tx,
             rust_analyzer_rx,
             def_rx,
             #[cfg(test)]
@@ -1429,6 +1535,9 @@ impl LspManager {
             linked_editing_rx,
             #[cfg(test)]
             linked_editing_test_tx,
+            inline_completion_rx,
+            #[cfg(test)]
+            inline_completion_test_tx,
             #[cfg(test)]
             synced_texts: Default::default(),
             selection_ranges_rx,
@@ -1628,6 +1737,12 @@ impl LspManager {
 
     pub fn drain_hover(&self) -> Option<HoverResult> {
         self.hover_rx.try_recv().ok()
+    }
+
+    /// Test hook: deliver a hover reply as if a server had answered.
+    #[cfg(test)]
+    pub fn push_hover_for_test(&self, result: HoverResult) {
+        self.hover_test_tx.send(result).expect("hover channel open");
     }
 
     /// Send one of rust-analyzer's own requests (#1626) for the caret at
@@ -2016,6 +2131,28 @@ impl LspManager {
         let _ = self.linked_editing_test_tx.send(result);
     }
 
+    /// Ask the server that offers inline completions for ghost text at the
+    /// caret (#607). Returns the id the reply echoes; no reply arrives for a
+    /// document no such server has.
+    pub fn request_inline_completion(&mut self, path: PathBuf, line: u32, character: u32) -> u64 {
+        self.send_request(|request_id| Cmd::RequestInlineCompletion {
+            request_id,
+            path,
+            line,
+            character,
+        })
+    }
+
+    pub fn drain_inline_completion(&self) -> Option<InlineCompletionResult> {
+        self.inline_completion_rx.try_recv().ok()
+    }
+
+    /// Test hook: deliver `result` as if a server had answered.
+    #[cfg(test)]
+    pub fn push_inline_completion_for_test(&self, result: InlineCompletionResult) {
+        let _ = self.inline_completion_test_tx.send(result);
+    }
+
     pub fn drain_selection_ranges(&self) -> Option<SelectionRangesResult> {
         self.selection_ranges_rx.try_recv().ok()
     }
@@ -2159,6 +2296,36 @@ impl LspManager {
     /// no server has reported yet. Drives the right-click menu rows.
     pub fn language_supports_call_hierarchy(&self, lang: Language) -> Option<bool> {
         self.language_supports(lang, |s| &s.call_hierarchy)
+    }
+
+    /// Whether a running server at `path`'s project root offers inline
+    /// completions (#607), so the app asks it rather than a model.
+    pub fn document_offers_inline_completion(&self, path: &Path) -> bool {
+        let Some(lang) = path_to_language(path) else {
+            return false;
+        };
+        self.capability_support.lock().is_ok_and(|support| {
+            support
+                .document_roots
+                .get(path)
+                .is_some_and(|root| support.inline_completion.contains(&(lang, root.clone())))
+        })
+    }
+
+    /// Test hook: `path` is open at its directory, whose servers offer
+    /// inline completions, unstarted.
+    #[cfg(test)]
+    pub fn set_inline_completion_for_test(&self, path: &Path) {
+        let Some(lang) = path_to_language(path) else {
+            return;
+        };
+        let root = path.parent().unwrap_or(path).to_path_buf();
+        if let Ok(mut support) = self.capability_support.lock() {
+            support
+                .document_roots
+                .insert(path.to_path_buf(), root.clone());
+            support.inline_completion.insert((lang, root));
+        }
     }
 
     /// Whether the server for `lang` implements `textDocument/declaration`.
@@ -2505,6 +2672,8 @@ struct ManagedClient {
     supports_references: bool,
     supports_document_highlight: bool,
     supports_linked_editing: bool,
+    /// Offers `textDocument/inlineCompletion` (#607).
+    supports_inline_completion: bool,
     supports_selection_range: bool,
     supports_call_hierarchy: bool,
     supports_type_hierarchy: bool,
@@ -2556,7 +2725,8 @@ type ClientKey = (Language, PathBuf);
 /// Why [`WorkerState::pick_server`] found no server to ask.
 enum NoServer {
     /// The file is not open, or no server set exists for its language and
-    /// root: the request is dropped without a reply.
+    /// root: the request is dropped without a reply (a hover gets an empty
+    /// one).
     Unknown,
     /// Servers run for the file, but none carries the method.
     Unsupported,
@@ -2661,6 +2831,7 @@ struct ResultSenders {
     references: std_mpsc::Sender<ReferencesResult>,
     document_highlights: std_mpsc::Sender<DocumentHighlightsResult>,
     linked_editing: std_mpsc::Sender<LinkedEditingResult>,
+    inline_completion: std_mpsc::Sender<InlineCompletionResult>,
     selection_ranges: std_mpsc::Sender<SelectionRangesResult>,
     call_hierarchy: std_mpsc::Sender<CallHierarchyResult>,
     workspace_symbols: std_mpsc::Sender<WorkspaceSymbolsResult>,
@@ -2994,6 +3165,22 @@ async fn worker_loop(
             } => {
                 state
                     .request_linked_editing(request_id, path, line, character, &tx.linked_editing)
+                    .await
+            }
+            Cmd::RequestInlineCompletion {
+                request_id,
+                path,
+                line,
+                character,
+            } => {
+                state
+                    .request_inline_completion(
+                        request_id,
+                        path,
+                        line,
+                        character,
+                        &tx.inline_completion,
+                    )
                     .await
             }
             Cmd::RequestSelectionRanges {
@@ -3380,6 +3567,7 @@ impl WorkerState {
                 }
             }
             support.completion_triggers.remove(key);
+            support.inline_completion.remove(key);
         }
         self.docs
             .retain(|_, doc| (doc.language, doc.project_root.clone()) != *key);
@@ -3564,6 +3752,8 @@ impl WorkerState {
                             one_of_supported(&caps.document_highlight_provider);
                         let supports_linked_editing =
                             linked_editing_supported(&caps.linked_editing_range_provider);
+                        let supports_inline_completion =
+                            one_of_supported(&caps.inline_completion_provider);
                         let supports_selection_range =
                             selection_range_supported(&caps.selection_range_provider);
                         let supports_call_hierarchy =
@@ -3652,6 +3842,7 @@ impl WorkerState {
                             supports_references,
                             supports_document_highlight,
                             supports_linked_editing,
+                            supports_inline_completion,
                             supports_selection_range,
                             supports_call_hierarchy,
                             supports_type_hierarchy,
@@ -3723,6 +3914,11 @@ impl WorkerState {
                 };
                 support.code_action.insert(lang, supports_code_action);
                 support.call_hierarchy.insert(lang, supports_call_hierarchy);
+                if spawned.iter().any(|c| c.supports_inline_completion) {
+                    support.inline_completion.insert(key.clone());
+                } else {
+                    support.inline_completion.remove(&key);
+                }
                 support
                     .will_rename
                     .insert(lang, spawned.iter().any(|c| c.will_rename.is_some()));
@@ -4302,19 +4498,21 @@ impl WorkerState {
         character: u32,
         tx: &std_mpsc::Sender<HoverResult>,
     ) {
+        // Every hover is answered, an empty answer when no server can give
+        // one: the app holds a problem's message until the reply, and Show
+        // Hover says when there is nothing (#1518).
+        let none = || {
+            let _ = tx.send(HoverResult {
+                request_id,
+                text: None,
+            });
+        };
         let (server_name, client_arc) = match self.pick_server(&path, |c| c.supports_hover).await {
             Ok(picked) => picked,
-            Err(NoServer::Unsupported) => {
-                let _ = tx.send(HoverResult {
-                    request_id,
-                    text: None,
-                });
-                return;
-            }
-            Err(NoServer::Unknown) => return,
+            Err(NoServer::Unsupported | NoServer::Unknown) => return none(),
         };
         let Ok(uri) = Url::from_file_path(&path) else {
-            return;
+            return none();
         };
         let tx = tx.clone();
         log_file::log(&format!(
@@ -5324,6 +5522,43 @@ impl WorkerState {
                 }
             };
             let _ = tx.send(LinkedEditingResult { request_id, ranges });
+        });
+    }
+
+    /// Inline completion at the caret (#607). Silent on every early-out,
+    /// like linked editing: the app asks once per caret and edit, and a
+    /// request left unanswered is simply replaced by the next one.
+    async fn request_inline_completion(
+        &mut self,
+        request_id: u64,
+        path: PathBuf,
+        line: u32,
+        character: u32,
+        tx: &std_mpsc::Sender<InlineCompletionResult>,
+    ) {
+        let Ok((server_name, client_arc)) = self
+            .pick_server(&path, |c| c.supports_inline_completion)
+            .await
+        else {
+            return;
+        };
+        let Ok(uri) = Url::from_file_path(&path) else {
+            return;
+        };
+        let tx = tx.clone();
+        tokio::spawn(async move {
+            let mut client = client_arc.lock().await.requests();
+            let resp = client.inline_completion(uri, line, character).await;
+            drop(client);
+            let item = match resp {
+                Ok(Some(answer)) => first_inline_item(answer),
+                Ok(None) => None,
+                Err(e) => {
+                    log_file::log(&format!("lsp[{server_name}] inlineCompletion error: {e:#}"));
+                    None
+                }
+            };
+            let _ = tx.send(InlineCompletionResult { request_id, item });
         });
     }
 
@@ -6443,6 +6678,29 @@ fn code_action_supported(cap: &Option<CodeActionProviderCapability>) -> bool {
         Some(CodeActionProviderCapability::Options(_)) => true,
         None => false,
     }
+}
+
+/// The first inline completion with any text (#607), as plain text: a
+/// snippet's placeholders become their defaults, since ghost text has no
+/// tab stops. Its range is kept only when it stays on one line, as the
+/// protocol requires.
+fn first_inline_item(answer: lsp_types::InlineCompletionResponse) -> Option<InlineItem> {
+    let items = match answer {
+        lsp_types::InlineCompletionResponse::Array(items) => items,
+        lsp_types::InlineCompletionResponse::List(list) => list.items,
+    };
+    items.into_iter().find_map(|item| {
+        let text = if item.insert_text_format == Some(lsp_types::InsertTextFormat::SNIPPET) {
+            crate::snippets::parse_body(&item.insert_text, &|_| None).text
+        } else {
+            item.insert_text
+        };
+        let range = match item.range {
+            Some(r) if r.start.line != r.end.line => return None,
+            r => r.map(|r| (r.start.line, r.start.character, r.end.line, r.end.character)),
+        };
+        (!text.trim().is_empty()).then_some(InlineItem { text, range })
+    })
 }
 
 /// Whether the server advertises a usable `textDocument/linkedEditingRange`
@@ -7879,6 +8137,11 @@ fn build_client_capabilities() -> ClientCapabilities {
             linked_editing_range: Some(lsp_types::LinkedEditingRangeClientCapabilities {
                 dynamic_registration: Some(false),
             }),
+            // LSP 3.18, still "proposed" in lsp-types (#607): a server that
+            // offers ghost-text suggestions (Copilot's) answers for its files.
+            inline_completion: Some(lsp_types::InlineCompletionClientCapabilities {
+                dynamic_registration: Some(false),
+            }),
             selection_range: Some(lsp_types::SelectionRangeClientCapabilities {
                 dynamic_registration: Some(false),
             }),
@@ -8192,7 +8455,7 @@ fn missing_servers_note(
     }
     let label = crate::highlight::lang_for_language_id(lang.lsp_id())
         .map_or(lang.lsp_id(), |kind| {
-            crate::widgets::editor::language_label(Some(kind))
+            crate::highlight::language_label(Some(kind))
         });
     Some(format!(
         "{label}: no language server, so no diagnostics or completion ({})",
@@ -9045,6 +9308,7 @@ while True:
             supports_references: false,
             supports_document_highlight: false,
             supports_linked_editing: false,
+            supports_inline_completion: false,
             supports_selection_range: false,
             supports_call_hierarchy: false,
             supports_type_hierarchy: false,
@@ -9911,6 +10175,22 @@ while True:
         );
     }
 
+    /// #1523: a related location takes one line of the hover, whatever
+    /// line breaks its message holds.
+    #[test]
+    fn a_related_location_label_is_one_line() {
+        let related = RelatedLocation {
+            path: PathBuf::from("/w/src/a.ts"),
+            line: 1,
+            character: 2,
+            message: "'foo'\ris\r\ndeclared\nhere.".into(),
+        };
+        assert_eq!(
+            related.label(Path::new("/w")),
+            "src/a.ts(2, 3): 'foo' is declared here."
+        );
+    }
+
     #[test]
     fn a_tagged_diagnostic_rides_back_to_code_actions_with_its_tags() {
         let d = |tags: DiagnosticTags| Diagnostic {
@@ -10499,7 +10779,7 @@ esac
             assert_eq!(lang, Some(jsonc), "{path}");
             assert_eq!(lang.unwrap().lsp_id(), "jsonc");
         }
-        let keybindings = crate::prefs::config_dir().join("keybindings.json");
+        let keybindings = crate::paths::config_dir().join("keybindings.json");
         assert_eq!(path_to_language(&keybindings), Some(jsonc));
         assert_eq!(
             path_to_language(Path::new("/repo/package.json")),
@@ -11665,6 +11945,45 @@ while True:
         assert!(linked_editing_supported(&Some(L::Options(
             lsp_types::LinkedEditingRangeOptions::default()
         ))));
+    }
+
+    /// #607: the first inline completion with text is taken, a snippet as
+    /// its plain text, and one whose range spans lines is skipped.
+    #[test]
+    fn the_first_usable_inline_completion_is_read_as_plain_text() {
+        let item = |text: &str, lines: (u32, u32), snippet: bool| {
+            serde_json::from_value::<lsp_types::InlineCompletionItem>(serde_json::json!({
+                "insertText": text,
+                "range": {
+                    "start": {"line": lines.0, "character": 0},
+                    "end": {"line": lines.1, "character": 3},
+                },
+                "insertTextFormat": if snippet { 2 } else { 1 },
+            }))
+            .unwrap()
+        };
+        let answer = lsp_types::InlineCompletionResponse::List(lsp_types::InlineCompletionList {
+            items: vec![
+                item("  ", (4, 4), false),
+                item("two lines", (4, 5), false),
+                item("foo(${1:x})$0", (4, 4), true),
+            ],
+        });
+        assert_eq!(
+            first_inline_item(answer),
+            Some(InlineItem {
+                text: String::from("foo(x)"),
+                range: Some((4, 0, 4, 3)),
+            })
+        );
+        let bare = serde_json::from_value(serde_json::json!([{"insertText": "bar"}])).unwrap();
+        assert_eq!(
+            first_inline_item(bare),
+            Some(InlineItem {
+                text: String::from("bar"),
+                range: None,
+            })
+        );
     }
 
     #[test]

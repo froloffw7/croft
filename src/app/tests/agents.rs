@@ -2,6 +2,7 @@
 //! resident pair navigator.
 
 use super::*;
+use crate::inline_complete::Ghost;
 
 #[test]
 fn mcp_success_opens_a_scratch_tab_and_tells_the_user_where() {
@@ -2453,17 +2454,8 @@ fn closing_a_lane_refuses_while_a_sheet_cell_in_it_is_being_typed_into() {
     let repo = tmp.path().join("repo");
     init_lane_repo(&repo);
     std::fs::write(repo.join("stock.csv"), "item,qty\nbolt,4\n").unwrap();
-    let git = |args: &[&str]| {
-        let st = std::process::Command::new("git")
-            .arg("-C")
-            .arg(&repo)
-            .args(args)
-            .status()
-            .unwrap();
-        assert!(st.success(), "git {args:?}");
-    };
-    git(&["add", "."]);
-    git(&["commit", "-q", "-m", "stock"]);
+    git_ok(&repo, &["add", "."]);
+    git_ok(&repo, &["commit", "-q", "-m", "stock"]);
     let mut app = App::new(repo.clone()).unwrap();
     app.terminal_session_path = tmp.path().join("sessions.json");
     app.lane_agent = None;
@@ -2885,7 +2877,7 @@ fn app_with_body_suggestion(tmp: &std::path::Path) -> App {
     app.editor.cursor_row = 0;
     app.editor.cursor_col = 14;
     let seq = app.editor.edit_seq;
-    app.editor.ghost = Some((
+    app.editor.ghost = Some(Ghost::insert(
         0,
         14,
         seq,
@@ -2894,11 +2886,9 @@ fn app_with_body_suggestion(tmp: &std::path::Path) -> App {
     app
 }
 
-/// The screen as rows, at `w` x `h`.
-fn screen_rows(app: &mut App, w: u16, h: u16) -> Vec<String> {
-    let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
-    term.draw(|f| app.render(f)).unwrap();
-    screen_text(&term).lines().map(str::to_string).collect()
+/// [`draw_screen`] as rows: draws `app` at `w` x `h`, one string per row.
+fn draw_screen_rows(app: &mut App, w: u16, h: u16) -> Vec<String> {
+    draw_screen(app, w, h).lines().map(str::to_string).collect()
 }
 
 /// #1625: every line of a multi-line suggestion is painted under the
@@ -2909,7 +2899,7 @@ fn a_multi_line_suggestion_paints_every_line_under_the_caret() {
     let tmp = tempfile::tempdir().unwrap();
     let mut app = app_with_body_suggestion(tmp.path());
     let before = app.editor.lines.clone();
-    let rows = screen_rows(&mut app, 120, 30);
+    let rows = draw_screen_rows(&mut app, 120, 30);
     let at = |needle: &str| {
         rows.iter()
             .position(|r| r.contains(needle))
@@ -2934,8 +2924,8 @@ fn a_suggestion_taller_than_the_pane_counts_the_lines_left_over() {
     let mut app = app_with_body_suggestion(tmp.path());
     let seq = app.editor.edit_seq;
     let body: String = (1..=60).map(|i| format!("\n    x{i} = {i}")).collect();
-    app.editor.ghost = Some((0, 14, seq, body));
-    let rows = screen_rows(&mut app, 120, 30);
+    app.editor.ghost = Some(Ghost::insert(0, 14, seq, body));
+    let rows = draw_screen_rows(&mut app, 120, 30);
     let shown = (1..=60)
         .filter(|i| rows.iter().any(|r| r.contains(&format!("x{i} = {i}"))))
         .count();
@@ -3034,7 +3024,7 @@ fn an_edit_makes_a_suggestion_stale_and_esc_dismisses_one() {
     let mut app = app_with_open_file(tmp.path(), "a.rs", "let x = \n");
     app.editor.cursor_col = 8;
     let seq = app.editor.edit_seq;
-    app.editor.ghost = Some((0, 8, seq, String::from("1;")));
+    app.editor.ghost = Some(Ghost::insert(0, 8, seq, String::from("1;")));
     assert!(app.editor.live_ghost().is_some());
     app.handle_key(crossterm::event::KeyEvent::new(
         KeyCode::Esc,
@@ -3042,13 +3032,144 @@ fn an_edit_makes_a_suggestion_stale_and_esc_dismisses_one() {
     ))
     .unwrap();
     assert!(app.editor.ghost.is_none(), "Esc dismisses");
-    app.editor.ghost = Some((0, 8, seq, String::from("1;")));
+    app.editor.ghost = Some(Ghost::insert(0, 8, seq, String::from("1;")));
     app.handle_key(crossterm::event::KeyEvent::new(
         KeyCode::Char('2'),
         KeyModifiers::NONE,
     ))
     .unwrap();
     assert!(app.editor.live_ghost().is_none(), "typing makes it stale");
+}
+
+/// A Rust file whose language server offers inline completions (LSP
+/// 3.18), suggestions on with a model that cannot answer, and the caret
+/// paused at the end of `line`.
+fn app_with_server_suggestions(tmp: &std::path::Path, line: &str) -> App {
+    let mut app = app_with_open_file(tmp, "a.rs", &format!("{line}\n"));
+    let path = app.editor.path.clone().unwrap();
+    app.lsp
+        .as_ref()
+        .unwrap()
+        .set_inline_completion_for_test(&path);
+    app.inline_config = Some(crate::inline_complete::Config {
+        backend: crate::inline_complete::Backend::Claude {
+            base_url: String::from("http://127.0.0.1:1"),
+            api_key: String::from("test-key"),
+        },
+        model: String::from("claude-opus-5"),
+    });
+    app.inline_worker = Some(crate::inline_complete::Worker::spawn());
+    app.inline_enabled = true;
+    app.editor.cursor_row = 0;
+    app.editor.cursor_col = line.chars().count();
+    app.editor.last_edit_at = Some(std::time::Instant::now() - std::time::Duration::from_secs(2));
+    app
+}
+
+/// The id of the server request a tick sends.
+fn ask_server_inline(app: &mut App) -> u64 {
+    app.tick_inline_complete();
+    app.inline_lsp.as_ref().expect("the server is asked").0
+}
+
+/// Answer server request `id` with `text` replacing UTF-16 columns `range`
+/// of line 0, and land it.
+fn answer_server_inline(app: &mut App, id: u64, text: &str, range: std::ops::Range<u32>) {
+    let item = Some(crate::lsp::manager::InlineItem {
+        text: text.to_string(),
+        range: Some((0, range.start, 0, range.end)),
+    });
+    app.lsp.as_ref().unwrap().push_inline_completion_for_test(
+        crate::lsp::manager::InlineCompletionResult {
+            request_id: id,
+            item,
+        },
+    );
+    app.tick_inline_complete();
+}
+
+/// A language server that offers inline completions answers instead of
+/// the model, and its "finish the word" replacement is ghost text for the
+/// rest of the word, which Tab takes.
+#[test]
+fn a_language_servers_suggestion_is_ghost_text_tab_takes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut app = app_with_server_suggestions(tmp.path(), "let x = pri");
+    let model_requests = app.inline_next_id;
+    let id = ask_server_inline(&mut app);
+    answer_server_inline(&mut app, id, "println!()", 8..11);
+    assert_eq!(app.inline_next_id, model_requests, "the model is not asked");
+    assert_eq!(app.editor.live_ghost(), Some("ntln!()"));
+    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(app.editor.lines[0], "let x = println!()");
+}
+
+/// A server's replacement that rewrites what was typed strikes the old
+/// text through with the new text beside it, and Tab replaces it in one
+/// undo step.
+#[test]
+fn a_language_servers_replacement_strikes_the_old_text_and_tab_replaces_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut app = app_with_server_suggestions(tmp.path(), "let x = pritn");
+    let id = ask_server_inline(&mut app);
+    answer_server_inline(&mut app, id, "println!()", 8..13);
+    let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 12)).unwrap();
+    term.draw(|f| app.render(f)).unwrap();
+    let screen = screen_text(&term);
+    let (y, row) = screen
+        .lines()
+        .enumerate()
+        .find(|(_, r)| r.contains("let x = pritn println!()"))
+        .unwrap_or_else(|| panic!("the replacement is beside the old text:\n{screen}"));
+    let x = row[..row.find("pritn").unwrap()].chars().count() as u16;
+    let struck = |x: u16| {
+        term.backend().buffer()[(x, y as u16)]
+            .modifier
+            .contains(ratatui::style::Modifier::CROSSED_OUT)
+    };
+    assert!((x..x + 5).all(struck), "pritn is struck through");
+    assert!(!struck(x - 2), "the text before it is not");
+    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(app.editor.lines[0], "let x = println!()");
+    assert_eq!(app.editor.cursor_col, 18);
+    assert!(app.editor.live_ghost().is_none());
+    app.editor.undo();
+    assert_eq!(app.editor.lines[0], "let x = pritn", "one undo step");
+}
+
+/// Negative: Ctrl+Right does not take part of a replacement; the text is
+/// left as typed, and the replacement, if still live, is whole.
+#[test]
+fn ctrl_right_does_not_take_part_of_a_replacement() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut app = app_with_server_suggestions(tmp.path(), "let x = pritn");
+    let id = ask_server_inline(&mut app);
+    answer_server_inline(&mut app, id, "println!()", 8..13);
+    assert!(app.editor.live_ghost().is_some());
+    app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::CONTROL))
+        .unwrap();
+    assert_eq!(app.editor.lines[0], "let x = pritn");
+    assert!(
+        app.editor
+            .live_ghost()
+            .is_none_or(|text| text == "println!()")
+    );
+}
+
+/// Negative: a server's answer for text typed over since it was asked
+/// is dropped.
+#[test]
+fn a_language_servers_answer_for_old_text_is_dropped() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut app = app_with_server_suggestions(tmp.path(), "let x = pri");
+    let id = ask_server_inline(&mut app);
+    app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE))
+        .unwrap();
+    answer_server_inline(&mut app, id, "println!()", 8..11);
+    assert!(app.editor.ghost.is_none());
+    assert_eq!(app.editor.lines[0], "let x = prin");
 }
 
 /// #624 review: the tool trust gate refuses a changed tool definition with
@@ -3061,19 +3182,6 @@ fn the_mcp_tool_gate_refuses_a_changed_definition() {
     let err = mcp_tool_trust(tmp.path(), "ext.go", "go", "fp2").unwrap_err();
     assert!(err.starts_with("refusing to run: the 'go' tool"), "{err}");
     assert!(err.contains("toggle the extension off and on"), "{err}");
-}
-
-fn popup_screen(app: &mut App, w: u16, h: u16) -> String {
-    let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
-    term.draw(|f| app.render(f)).unwrap();
-    let mut screen = String::new();
-    for y in 0..h {
-        for x in 0..w {
-            screen.push_str(term.backend().buffer()[(x, y)].symbol());
-        }
-        screen.push('\n');
-    }
-    screen
 }
 
 /// #347: what the language server says about a proposal's file while it is
@@ -3100,7 +3208,7 @@ fn a_proposals_diagnostics_show_in_the_popup_not_the_buffer() {
         opened: true,
         by_server: Default::default(),
     });
-    let screen = popup_screen(&mut app, 110, 30);
+    let screen = draw_screen(&mut app, 110, 30);
     assert!(screen.contains("Checking the proposed file"), "{screen}");
     app.apply_diagnostics_updates(vec![crate::lsp::manager::DiagnosticsUpdate {
         path: file.clone(),
@@ -3122,7 +3230,7 @@ fn a_proposals_diagnostics_show_in_the_popup_not_the_buffer() {
         !app.lsp_diagnostics.contains_key(&file),
         "the buffer's diagnostics are the buffer's"
     );
-    let screen = popup_screen(&mut app, 110, 30);
+    let screen = draw_screen(&mut app, 110, 30);
     assert!(
         screen.contains("1 error, 0 warnings in the proposed file"),
         "{screen}"
@@ -3904,15 +4012,7 @@ fn completing_an_approval_merge_approves_it_and_stages_nothing() {
     let home = tempfile::tempdir().unwrap();
     with_relay_home(home.path(), || {
         let tmp = tempfile::tempdir().unwrap();
-        let git = |args: &[&str]| {
-            std::process::Command::new("git")
-                .arg("-C")
-                .arg(tmp.path())
-                .args(args)
-                .output()
-                .unwrap()
-        };
-        git(&["init", "-q"]);
+        git_init(tmp.path());
         let target = tmp.path().join("a.rs");
         std::fs::write(&target, "one\ntwo\nthree\n").unwrap();
         let mut app = App::new(tmp.path().to_path_buf()).unwrap();
@@ -3957,8 +4057,8 @@ fn completing_an_approval_merge_approves_it_and_stages_nothing() {
         assert!(app.approvals.is_empty(), "approved: {}", app.status);
         assert!(!app.status.contains("Stage failed"), "{}", app.status);
         assert!(app.status.starts_with("Approved"), "{}", app.status);
-        let staged = git(&["diff", "--cached", "--name-only"]);
-        assert!(staged.stdout.is_empty(), "nothing staged");
+        let staged = git_stdout_untrimmed(tmp.path(), &["diff", "--cached", "--name-only"]);
+        assert!(staged.is_empty(), "nothing staged");
 
         hook.set_read_timeout(Some(std::time::Duration::from_millis(500)))
             .unwrap();

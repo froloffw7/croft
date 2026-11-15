@@ -902,7 +902,7 @@ fn the_failure_site_survives_a_whole_cargo_test_run() {
 fn a_test_built_app_reads_no_user_settings_layer() {
     let tmp = tempfile::tempdir().unwrap();
     let mut app = App::new(tmp.path().to_path_buf()).unwrap();
-    let user_dir = crate::prefs::config_dir();
+    let user_dir = crate::paths::config_dir();
     // At startup and again on a live settings reload.
     for when in ["startup", "reload"] {
         if when == "reload" {
@@ -1539,15 +1539,7 @@ fn an_external_rewrite_of_the_open_file_dims_its_coverage() {
 fn a_save_of_an_ignored_file_does_not_rerun_watched_tests() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().canonicalize().unwrap();
-    let git = |args: &[&str]| {
-        std::process::Command::new("git")
-            .arg("-C")
-            .arg(&root)
-            .args(args)
-            .output()
-            .unwrap()
-    };
-    git(&["init", "-q", "-b", "main"]);
+    git_init(&root);
     std::fs::write(root.join(".gitignore"), "*.log\nout/\n").unwrap();
     std::fs::create_dir_all(root.join("out")).unwrap();
     let mut app = App::new(root.clone()).unwrap();

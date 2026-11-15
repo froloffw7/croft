@@ -948,6 +948,26 @@ fn hex_typing_edits_bytes_and_cmd_s_writes_them_in_place() {
     );
 }
 
+#[test]
+fn a_half_typed_hex_byte_does_not_follow_the_cursor() {
+    // #1142: f, Right, 2 over 41 42 saved F2 into byte 1, a byte the user
+    // never typed on. Leaving byte 0 drops its half-typed digit.
+    let tmp = tempfile::tempdir().unwrap();
+    let p = tmp.path().join("h.bin");
+    std::fs::write(&p, b"ABCDEFGH\n").unwrap();
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    app.editor.open_hex(&p).unwrap();
+    assert!(app.editor.hex.is_some());
+    app.handle_hex_key(key(KeyCode::Char('f'), KeyModifiers::NONE));
+    app.handle_hex_key(key(KeyCode::Right, KeyModifiers::NONE));
+    app.handle_hex_key(key(KeyCode::Char('2'), KeyModifiers::NONE));
+    let v = app.editor.hex.as_ref().unwrap();
+    assert_eq!(v.effective_byte(0), Some(b'A'));
+    assert_eq!(v.effective_byte(1), Some(b'B'));
+    assert_eq!(v.pending_nibble, Some(2), "the 2 starts byte 1 afresh");
+    assert!(!app.editor.dirty, "no byte has changed");
+}
+
 /// The firmware image from #1644: the text "1234" at 0x115 and 0x137, and
 /// the bytes 12 34 at 0x11A.
 fn app_with_firmware_in_hex(tmp: &std::path::Path) -> App {
@@ -1843,10 +1863,10 @@ fn preview_link_under_the_pointer_lifts_to_the_hover_background() {
     app.editor.open_pinned(&readme).unwrap();
     app.focus_pane(Pane::Editor);
     app.toggle_markdown_preview();
-    render_buf(&mut app);
+    draw_buffer(&mut app, 140, 50);
     app.handle_key(key(KeyCode::Down, KeyModifiers::NONE))
         .unwrap();
-    render_buf(&mut app);
+    draw_buffer(&mut app, 140, 50);
     let md = app
         .editor
         .markdown_preview
@@ -1870,7 +1890,7 @@ fn preview_link_under_the_pointer_lifts_to_the_hover_background() {
             row,
             modifiers: KeyModifiers::NONE,
         });
-        let buf = render_buf(app);
+        let buf = draw_buffer(app, 140, 50);
         let rows = app.editor.markdown_preview.as_ref().unwrap().rows.clone();
         (buf, rows)
     };
@@ -3015,15 +3035,8 @@ fn an_http_file_runs_requests_and_keeps_secrets_out_of_history_and_the_tab() {
     // family: hold their lock and restore via RAII, exactly as
     // `with_relay_home` does, so a panic cannot leak the redirect into
     // later tests (#428 review).
-    struct RestoreCacheDir;
-    impl Drop for RestoreCacheDir {
-        fn drop(&mut self) {
-            *CACHE_DIR_OVERRIDE_FOR_TEST.lock().unwrap() = None;
-        }
-    }
     let _cache_lock = relay_test_lock().lock().unwrap_or_else(|e| e.into_inner());
-    let _restore = RestoreCacheDir;
-    *CACHE_DIR_OVERRIDE_FOR_TEST.lock().unwrap() = Some(tmp.path().join("cache"));
+    let _restore = override_cache_dir(tmp.path().join("cache"));
 
     // A 1x1 PNG via the image crate, so the decode on open genuinely works.
     let png_bytes = {
@@ -3411,6 +3424,36 @@ fn reopen_as_preview_keeps_a_utf16_capture_as_text() {
         app.status,
         "No preview for this file type; showing the text"
     );
+}
+
+/// #1363: Markdown is previewed by a toggle, so Reopen as Preview turns the
+/// preview on instead of reopening the source and saying there is none. The
+/// tab keeps its caret and unsaved edits.
+#[test]
+fn reopen_as_preview_shows_the_markdown_preview() {
+    use crate::widgets::command_palette::Command;
+    let tmp = tempfile::tempdir().unwrap();
+    let md = tmp.path().join("t.md");
+    std::fs::write(&md, "# Title\n\nSome *text*.\n").unwrap();
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    app.editor.open_pinned(&md).unwrap();
+    app.editor.cursor_row = 2;
+    app.editor.cursor_col = 5;
+    app.editor.insert_char('!');
+    assert!(app.editor.dirty);
+    app.run_command(Command::ReopenAsPreview);
+    assert!(app.editor.markdown_preview.is_some(), "the preview is on");
+    assert_eq!(app.status, "Markdown Preview");
+    assert!(app.editor.dirty, "the unsaved edit is kept, not reloaded");
+    assert_eq!(app.editor.lines[2], "Some !*text*.");
+    // Asked again, it stays on rather than flipping back to the source.
+    app.run_command(Command::ReopenAsPreview);
+    assert!(app.editor.markdown_preview.is_some());
+    // Reopen as Text still lands in the source, though the same-path reload
+    // it does now keeps a Markdown preview (#1605).
+    app.editor.save_to_disk().unwrap();
+    app.run_command(Command::ReopenAsText);
+    assert!(app.editor.markdown_preview.is_none(), "{}", app.status);
 }
 
 /// #1537 negative: source code has a grammar and no preview, so Reopen as

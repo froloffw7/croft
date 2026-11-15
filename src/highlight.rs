@@ -547,7 +547,49 @@ static SYNTAX: RwLock<SyntaxPalette> = RwLock::new(SyntaxPalette::BASE16);
 /// `apply_theme` and then re-highlights open editors so the change is visible
 /// immediately (cached spans carry baked colors).
 pub fn set_syntax_palette(palette: SyntaxPalette) {
+    // Under test the shared palette stays Base16. It is process-wide, every
+    // `App::new` pushes its theme's palette (Croft Loch's is not Base16),
+    // and App tests run on threads beside the highlight tests that pin
+    // Base16 colours, so a push here would make those tests pass or fail by
+    // scheduling. A test that needs another palette highlights through the
+    // explicit-palette paths (`highlight_text_with_palette`,
+    // `palette_style_for_name`) instead, or gives its thread a palette of
+    // its own ([`set_thread_syntax_palette`]), which then takes the push.
+    if cfg!(test) {
+        #[cfg(test)]
+        THREAD_SYNTAX.with(|own| {
+            if own.get().is_some() {
+                own.set(Some(palette));
+            }
+        });
+        return;
+    }
     *SYNTAX.write().unwrap() = palette;
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Under test, the code palette this thread highlights with instead of
+    /// the shared one, when it has one. The screen goldens give their thread
+    /// one, so `App::new`'s push of the theme's palette lands here and the
+    /// editor shows the theme's own code colours, as in the running app,
+    /// while the shared palette other tests pin stays Base16.
+    static THREAD_SYNTAX: std::cell::Cell<Option<SyntaxPalette>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// This thread's own code palette under test, if it has one.
+#[cfg(test)]
+pub(crate) fn thread_syntax_palette() -> Option<SyntaxPalette> {
+    THREAD_SYNTAX.with(std::cell::Cell::get)
+}
+
+/// Give this thread a code palette of its own under test, or `None` to read
+/// the shared one again. The editor's highlight pass carries it to the
+/// worker it starts.
+#[cfg(test)]
+pub(crate) fn set_thread_syntax_palette(palette: Option<SyntaxPalette>) {
+    THREAD_SYNTAX.with(|own| own.set(palette));
 }
 
 /// The palette keyed by capture name, resolved against the active theme's
@@ -555,6 +597,10 @@ pub fn set_syntax_palette(palette: SyntaxPalette) {
 /// by the LSP semantic-token overlay (via `semantic_style_for`) so both layers
 /// paint the same colors.
 fn style_for_name(name: &str) -> Style {
+    #[cfg(test)]
+    if let Some(own) = thread_syntax_palette() {
+        return palette_style_for_name(&own, name);
+    }
     palette_style_for_name(&SYNTAX.read().unwrap(), name)
 }
 
@@ -800,6 +846,41 @@ pub enum LangKind {
     Svelte,
 }
 
+/// Display name for a language mode, matching VS Code's status-bar labels.
+/// `None` is a buffer with no recognised grammar.
+pub fn language_label(lang: Option<LangKind>) -> &'static str {
+    match lang {
+        None => "Plain Text",
+        Some(LangKind::Rust) => "Rust",
+        Some(LangKind::Python) => "Python",
+        Some(LangKind::JavaScript) => "JavaScript",
+        Some(LangKind::TypeScript) => "TypeScript",
+        Some(LangKind::Tsx) => "TypeScript JSX",
+        Some(LangKind::Json) => "JSON",
+        Some(LangKind::Xml) => "XML",
+        Some(LangKind::Toml) => "TOML",
+        Some(LangKind::Yaml) => "YAML",
+        Some(LangKind::Markdown) => "Markdown",
+        Some(LangKind::Go) => "Go",
+        Some(LangKind::Html) => "HTML",
+        Some(LangKind::Css) => "CSS",
+        Some(LangKind::Bash) => "Shell Script",
+        Some(LangKind::C) => "C",
+        Some(LangKind::Cpp) => "C++",
+        Some(LangKind::Lua) => "Lua",
+        Some(LangKind::Ql) => "CodeQL",
+        Some(LangKind::Dbscheme) => "CodeQL Database Scheme",
+        Some(LangKind::Java) => "Java",
+        Some(LangKind::Ruby) => "Ruby",
+        Some(LangKind::CSharp) => "C#",
+        Some(LangKind::Sql) => "SQL",
+        Some(LangKind::Make) => "Makefile",
+        Some(LangKind::Dockerfile) => "Dockerfile",
+        Some(LangKind::Vue) => "Vue",
+        Some(LangKind::Svelte) => "Svelte",
+    }
+}
+
 /// The bare tree-sitter grammar handle for `kind` — the parser the
 /// expand-selection node-ancestry fallback walks (#254). Kept beside
 /// `build_config` so a new grammar joins highlighting and selection
@@ -840,7 +921,9 @@ pub fn lang_for_extension(ext: &str) -> Option<LangKind> {
         "rs" => LangKind::Rust,
         "py" | "pyi" | "pyw" => LangKind::Python,
         "js" | "mjs" | "cjs" | "jsx" => LangKind::JavaScript,
-        "ts" => LangKind::TypeScript,
+        // `.mts` / `.cts` are TypeScript's ES module and CommonJS files, as
+        // `.mjs` / `.cjs` are JavaScript's (#1162).
+        "ts" | "mts" | "cts" => LangKind::TypeScript,
         "tsx" => LangKind::Tsx,
         "json" | "jsonc" | "code-workspace" => LangKind::Json,
         "xml" | "xsd" | "xsl" | "xslt" | "svg" | "plist" => LangKind::Xml,
@@ -1666,6 +1749,8 @@ pub fn highlight_text_with_protected(
     // Snapshot the palette once per pass: the write happens only on a theme
     // switch, and one read beats a lock round-trip per token.
     let palette = *SYNTAX.read().unwrap();
+    #[cfg(test)]
+    let palette = thread_syntax_palette().unwrap_or(palette);
     highlight_text_with_palette(registry, kind, text, line_starts, &palette)
 }
 
@@ -2206,6 +2291,8 @@ def f() -> Config:\n\
         assert_eq!(lang_for_extension("rs"), Some(LangKind::Rust));
         assert_eq!(lang_for_extension("py"), Some(LangKind::Python));
         assert_eq!(lang_for_extension("ts"), Some(LangKind::TypeScript));
+        assert_eq!(lang_for_extension("mts"), Some(LangKind::TypeScript));
+        assert_eq!(lang_for_extension("cts"), Some(LangKind::TypeScript));
         assert_eq!(lang_for_extension("tsx"), Some(LangKind::Tsx));
         assert_eq!(lang_for_extension("js"), Some(LangKind::JavaScript));
         assert_eq!(lang_for_extension("jsx"), Some(LangKind::JavaScript));
@@ -2434,6 +2521,45 @@ def f() -> Config:\n\
                 "{kw} on a dark theme is {on_dark:.2}:1, want >= 4.5:1"
             );
         }
+    }
+
+    /// The shared palette never leaves Base16 under test: every `App::new`
+    /// pushes its theme's palette (Croft Loch's is its own), and the tests
+    /// here that pin Base16 colours must not pass or fail by which App test
+    /// happened to run beside them.
+    #[test]
+    fn the_shared_palette_stays_base16_under_test() {
+        set_syntax_palette(crate::theme::SyntaxPalette::LOCH);
+        assert_eq!(*SYNTAX.read().unwrap(), SyntaxPalette::BASE16);
+    }
+
+    /// A thread with a palette of its own takes the push the shared palette
+    /// ignores under test and highlights with it; a thread without one
+    /// never sees it.
+    #[test]
+    fn a_thread_with_its_own_palette_takes_the_push_under_test() {
+        let src = b"fn main() {}";
+        let keyword = |h: &[Vec<HiSpan>]| h[0][0].style.fg;
+        let line_starts = compute_line_starts(src);
+        set_thread_syntax_palette(Some(SyntaxPalette::BASE16));
+        set_syntax_palette(SyntaxPalette::LOCH);
+        assert_eq!(thread_syntax_palette(), Some(SyntaxPalette::LOCH));
+        let own = highlight_text(&mut LangRegistry::new(), LangKind::Rust, src, &line_starts);
+        let elsewhere = std::thread::spawn(move || {
+            highlight_text(&mut LangRegistry::new(), LangKind::Rust, src, &line_starts)
+        })
+        .join()
+        .unwrap();
+        set_thread_syntax_palette(None);
+        assert_eq!(
+            keyword(&own),
+            palette_style_for_name(&SyntaxPalette::LOCH, "keyword").fg
+        );
+        assert_eq!(
+            keyword(&elsewhere),
+            palette_style_for_name(&SyntaxPalette::BASE16, "keyword").fg
+        );
+        assert_eq!(*SYNTAX.read().unwrap(), SyntaxPalette::BASE16);
     }
 
     /// The light/dark decision comes from the palette's foreground: a dark

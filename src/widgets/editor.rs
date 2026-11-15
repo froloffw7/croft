@@ -12,9 +12,11 @@ use std::time::SystemTime;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::highlight::{
-    HiSpan, LangKind, LangRegistry, compute_line_starts, decode_semantic_tokens,
+    HiSpan, LangKind, LangRegistry, compute_line_starts, decode_semantic_tokens, language_label,
 };
 use crate::packed_lines::PackedLines;
+pub use crate::sheet::SheetCellEdit;
+pub use crate::text_edit::TextSpanEdit;
 use crate::widgets::scrollbar;
 
 /// Hard cap on the size of a single text file the editor will load.
@@ -895,22 +897,13 @@ fn render_sheet(
     }
 
     // Lay out visible columns from `scroll_col` rightwards until we run
-    // out of horizontal space.
-    let mut visible: Vec<(usize, u16)> = Vec::new(); // (col_idx, x_offset)
-    let mut x_off = 0u16;
-    for (c, w) in sheet.col_widths.iter().enumerate().skip(sheet.scroll_col) {
-        if x_off + w + 1 > body_w {
-            break;
-        }
-        visible.push((c, x_off));
-        x_off += w + 1; // +1 for inter-column gap
-    }
+    // out of horizontal space: (col_idx, x_offset, drawn width).
+    let visible = crate::sheet::visible_columns(&sheet.col_widths, sheet.scroll_col, body_w);
 
     // Header text.
-    for (c, x_off) in &visible {
-        let label = sheet.headers.get(*c).map(|s| s.as_str()).unwrap_or("");
-        let cell_x = body_x + *x_off;
-        let w = sheet.col_widths[*c];
+    for &(c, x_off, w) in &visible {
+        let label = sheet.headers.get(c).map(|s| s.as_str()).unwrap_or("");
+        let cell_x = body_x + x_off;
         write_cell(buf, cell_x, header_y, w, label, head_style);
     }
 
@@ -948,32 +941,36 @@ fn render_sheet(
             gutter_style.bg(style.bg.unwrap_or(Color::Reset)),
         );
         let row = &sheet.rows[row_idx];
-        for (c, x_off) in &visible {
+        for (c, x_off, w) in &visible {
+            let w = *w;
             let cell_text = row.get(*c).map(|s| s.as_str()).unwrap_or("");
-            let w = sheet.col_widths[*c];
             let is_cursor = row_idx == sheet.cur_row && *c == sheet.cur_col;
             if is_cursor {
                 if let Some(edit) = editing.as_ref() {
                     // In-grid editor (#177): show the tail that keeps the
-                    // caret visible, caret cell reversed.
-                    // Window in CHARACTERS (#193 review: the cursor is
-                    // a byte offset, and byte math shortened the tail
-                    // for multi-byte text), then convert to a byte start.
+                    // caret visible, caret cell reversed. The window is
+                    // measured in screen columns (#1138), whole graphemes
+                    // dropped from the left until what is before the caret
+                    // fits with a column left for the caret itself.
+                    use unicode_segmentation::UnicodeSegmentation;
                     let avail = w as usize;
-                    let chars_before = edit.value[..edit.cursor].chars().count();
-                    let skip = chars_before.saturating_sub(avail.saturating_sub(1));
-                    let start = edit
-                        .value
-                        .char_indices()
-                        .nth(skip)
-                        .map(|(i, _)| i)
-                        .unwrap_or(0);
+                    let before = &edit.value[..edit.cursor];
+                    let mut caret_cells = crate::sheet::text_width(before);
+                    let mut start = 0;
+                    let mut dropped = before.grapheme_indices(true);
+                    while caret_cells + 1 > avail {
+                        let Some((i, g)) = dropped.next() else {
+                            break;
+                        };
+                        caret_cells -= crate::sheet::grapheme_width(g);
+                        start = i + g.len();
+                    }
                     let shown = &edit.value[start..];
                     let edit_style = Style::default()
                         .fg(theme.accent_contrast_fg())
                         .bg(theme.accent());
                     write_cell(buf, body_x + *x_off, y, w, shown, edit_style);
-                    let caret_cells = shown[..edit.cursor - start].chars().count() as u16;
+                    let caret_cells = caret_cells.min(u16::MAX as usize) as u16;
                     let cx = body_x + *x_off + caret_cells.min(w.saturating_sub(1));
                     buf[(cx, y)].set_style(
                         Style::default()
@@ -1018,7 +1015,7 @@ fn render_sheet(
     let visible_col_first = sheet.scroll_col + 1;
     let visible_col_last = visible
         .last()
-        .map(|(c, _)| *c + 1)
+        .map(|(c, _, _)| *c + 1)
         .unwrap_or(visible_col_first);
     // A SQLite page names its rows by place in the table, with no total:
     // nobody counted the table (#1222), and the sheet name says whether
@@ -1376,8 +1373,8 @@ fn render_merge_panes(
 fn clip_pad_cells(text: &str, skip: usize, width: usize) -> String {
     let mut out = String::new();
     let mut used = 0;
-    for c in text.chars().skip(skip) {
-        let w = char_cells(c);
+    let from = byte_index_of_char(text, skip);
+    for (c, w) in char_cells_from(&text[from..], cells_from(&text[..from], 0)) {
         if used + w > width {
             break;
         }
@@ -1391,11 +1388,57 @@ fn clip_pad_cells(text: &str, skip: usize, width: usize) -> String {
     out
 }
 
+/// Lifts the inks laid on one diff fill (a changed row's tint, or its
+/// changed characters') so each reads at 4.5:1 on a `surfaces` theme
+/// ([`crate::widgets::surface::legible_ink`]). It remembers the last ink
+/// it lifted, so a run of cells in one colour costs one contrast check,
+/// not one per cell. Without tones (a boxed theme, an unchanged row) it
+/// hands every ink back untouched.
+struct DiffInkLift {
+    tones: Option<crate::widgets::surface::Tones>,
+    bg: (u8, u8, u8),
+    last: Option<(Color, Color)>,
+}
+
+impl DiffInkLift {
+    /// A lift onto fill `bg` with `legible`'s tones; `None`, or a fill
+    /// that is not an RGB colour, lifts nothing.
+    fn new(legible: Option<crate::widgets::surface::Tones>, bg: Color) -> Self {
+        let (tones, bg) = match (legible, bg) {
+            (Some(t), Color::Rgb(r, g, b)) => (Some(t), (r, g, b)),
+            _ => (None, (0, 0, 0)),
+        };
+        Self {
+            tones,
+            bg,
+            last: None,
+        }
+    }
+
+    /// `fg` as it must be drawn on the fill to read.
+    fn ink(&mut self, fg: Color) -> Color {
+        let (Some(t), Color::Rgb(r, g, b)) = (self.tones, fg) else {
+            return fg;
+        };
+        if let Some((from, to)) = self.last
+            && from == fg
+        {
+            return to;
+        }
+        let to =
+            crate::gradient::rgb_color(crate::widgets::surface::legible_ink((r, g, b), self.bg, t));
+        self.last = Some((fg, to));
+        to
+    }
+}
+
 /// Paint the changed characters `range` (char indices) of a diff line
 /// drawn at `text_x` from char `skip`, `width` cells wide, in `bg` (#1351).
 /// Cells follow display width, so a wide character before the change does
 /// not shift the mark (#1248). A range wholly past either edge puts a `›`
 /// or `‹` on that edge in `bg` instead, so a change off-screen still shows.
+/// With `legible` (a `surfaces` theme) an ink that would not read on the
+/// brighter `bg`, the code's or the edge flag's, is lifted until it does.
 #[allow(clippy::too_many_arguments)]
 fn paint_intraline_range(
     buf: &mut Buffer,
@@ -1407,44 +1450,417 @@ fn paint_intraline_range(
     (start, end): (usize, usize),
     bg: Color,
     fg: Color,
+    legible: Option<crate::widgets::surface::Tones>,
 ) {
     if start >= end || width == 0 {
         return;
     }
-    let edge = Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD);
+    let mut lift = DiffInkLift::new(legible, bg);
+    let edge = Style::default()
+        .fg(lift.ink(fg))
+        .bg(bg)
+        .add_modifier(Modifier::BOLD);
     if end <= skip {
         buf.set_string(text_x, y, "\u{2039}", edge);
         return;
     }
+    use unicode_segmentation::UnicodeSegmentation;
     let mut cell = 0u16;
     let mut painted = false;
-    for (i, c) in text.chars().enumerate().skip(skip) {
-        let w = char_cells(c) as u16;
+    let from = byte_index_of_char(text, skip);
+    let mut col = cells_from(&text[..from], 0);
+    let mut i = skip;
+    // Cluster by cluster, as the text is drawn: a change to any character of
+    // one (`👍🏻` to `👍🏽` changes only the skin tone) marks the cells the
+    // whole cluster takes.
+    for cluster in text[from..].graphemes(true) {
+        let w = cluster_cells_at(cluster, col);
+        let n = cluster.chars().count();
+        col += w;
+        let w = w as u16;
         if cell + w > width {
             break;
         }
-        if (start..end).contains(&i) {
+        if start < i + n && i < end {
             for dx in 0..w {
-                buf[(text_x + cell + dx, y)].set_bg(bg);
+                let slot = &mut buf[(text_x + cell + dx, y)];
+                let ink = lift.ink(slot.fg);
+                slot.set_bg(bg).set_fg(ink);
             }
             painted = true;
         }
         cell += w;
+        i += n;
     }
     if !painted {
         buf.set_string(text_x + width - 1, y, "\u{203a}", edge);
     }
 }
 
+/// Recolour one diff line drawn at `text_x` from char `skip`, `width` cells
+/// wide, in its syntax colours (#2020): each character takes its span's
+/// foreground and weight, and keeps the row's background, which is what
+/// marks it removed, added or unchanged. Cells follow display width, as
+/// [`clip_pad_cells`] lays them down. On a changed row of a `surfaces`
+/// theme `lift` raises a colour that would not read on the row's tint.
+#[allow(clippy::too_many_arguments)]
+fn paint_diff_syntax(
+    buf: &mut Buffer,
+    text_x: u16,
+    y: u16,
+    width: u16,
+    text: &str,
+    skip: usize,
+    spans: &[HiSpan],
+    mut lift: DiffInkLift,
+) {
+    if spans.is_empty() || width == 0 {
+        return;
+    }
+    let mut cell = 0u16;
+    let mut next = 0;
+    let from = byte_index_of_char(text, skip);
+    let cells = char_cells_from(&text[from..], cells_from(&text[..from], 0));
+    for ((byte, _), (_, w)) in text[from..].char_indices().zip(cells) {
+        let byte = from + byte;
+        // Spans arrive in order and do not overlap.
+        while spans.get(next).is_some_and(|s| s.range().end <= byte) {
+            next += 1;
+        }
+        let w = w as u16;
+        if cell + w > width {
+            break;
+        }
+        if let Some(span) = spans.get(next).filter(|s| s.range().contains(&byte)) {
+            let style = Style {
+                bg: None,
+                fg: span.style.fg.map(|fg| lift.ink(fg)),
+                ..span.style
+            };
+            for dx in 0..w {
+                buf[(text_x + cell + dx, y)].set_style(style);
+            }
+        }
+        cell += w;
+    }
+}
+
+/// The inks the side-by-side and deleted-file diff views paint their rows
+/// with. A boxed theme keeps the saturated red and green rows it always
+/// had. A `surfaces` theme (Croft Loch) tints a changed row toward red or
+/// green over the canvas, firmly enough that a change is seen at a glance
+/// and calmly enough that the code's own colours still lead; marks the
+/// changed characters in a clearly brighter tint of the same hue; lifts a
+/// syntax colour that would not read on either tint; puts the `+`/`-`
+/// signs in the hue, a changed row's line number in the muted ink (the
+/// faint one sinks into the tint) and the rest faint; and hatches the
+/// filler opposite an insertion or a deletion instead of filling it solid.
+#[derive(Debug, Clone, Copy)]
+struct DiffInks {
+    removed_bg: Color,
+    added_bg: Color,
+    /// Text on a removed / added row before its syntax colours land (all
+    /// of it in a file with no grammar).
+    removed_fg: Color,
+    added_fg: Color,
+    equal_fg: Color,
+    /// The `-` and `+` signs, and the `‹`/`›` that flag a change past an
+    /// edge.
+    removed_sign: Color,
+    added_sign: Color,
+    sign_modifier: Modifier,
+    gutter_fg: Color,
+    /// The line number of a removed or added row: the gutter ink on a
+    /// boxed theme, a step up under `surfaces` so it keeps 3:1 on the
+    /// row's tint.
+    changed_gutter_fg: Color,
+    intraline_removed: Color,
+    intraline_added: Color,
+    /// The background of the blank side of an inserted or deleted line:
+    /// the row's tint on a boxed theme, the canvas under `surfaces`.
+    filler_removed: Color,
+    filler_added: Color,
+    /// The glyph and ink the filler is hatched with, under `surfaces`.
+    hatch: Option<(&'static str, Color)>,
+    /// The glyph and ink of the line between the two columns.
+    seam: (&'static str, Color),
+    /// Under `surfaces`, the tones a syntax colour on a changed row is
+    /// lifted toward when it would fall under 4.5:1 on the row's tint or
+    /// on its changed characters' ([`crate::widgets::surface::legible_ink`]).
+    /// `None` on a boxed theme, whose inks are drawn exactly as they were.
+    legible: Option<crate::widgets::surface::Tones>,
+}
+
+/// Blend shares of the red (removed) and the green (added) a `surfaces`
+/// diff row is tinted with over the canvas, and the stronger shares its
+/// changed characters take. On Croft Loch's black a row lands near 1.6:1
+/// against the canvas, so a changed line is plain at a glance without
+/// shouting, and its changed characters a further 1.6:1 against the row,
+/// so a one-character edit is found without hunting. Croft's red and green
+/// carry about the same luminance, so equal shares give the two sides the
+/// same weight.
+const DIFF_ROW_TINT: (f32, f32) = (0.32, 0.32);
+const DIFF_CHANGE_TINT: (f32, f32) = (0.53, 0.53);
+
+/// How far a `surfaces` diff tint's hue is greyed toward the body ink
+/// before it is laid over the canvas: at the strength a row needs to be
+/// seen, the git red and green straight would read as brick and emerald;
+/// a fifth of grey keeps them plainly red and green but calm.
+const DIFF_TINT_GREY: f32 = 0.2;
+
+/// A `surfaces` diff fill: `hue`, greyed by [`DIFF_TINT_GREY`], laid
+/// `share` of the way over the canvas.
+fn diff_tint(t: crate::widgets::surface::Tones, hue: (u8, u8, u8), share: f32) -> Color {
+    use crate::gradient::{lerp_rgb, rgb_color};
+    let calm = lerp_rgb(hue, t.text, DIFF_TINT_GREY);
+    rgb_color(lerp_rgb(t.canvas, calm, share))
+}
+
+/// The [`DiffInks`] for `theme`.
+fn diff_inks(theme: crate::theme::Theme) -> DiffInks {
+    use crate::gradient::{lerp_rgb, rgb_color};
+    let Some(t) = crate::widgets::surface::tones(theme) else {
+        let removed_bg = theme.ui(Color::Rgb(0x4a, 0x1f, 0x1f));
+        let removed_fg = theme.ui(Color::Rgb(0xff, 0xb3, 0xb3));
+        let added_bg = theme.ui(Color::Rgb(0x1f, 0x42, 0x2a));
+        let added_fg = theme.ui(Color::Rgb(0xb6, 0xee, 0xc4));
+        let (rr, rg, rb) = crate::widgets::diff::INTRALINE_REMOVED_BG;
+        let (ar, ag, ab) = crate::widgets::diff::INTRALINE_ADDED_BG;
+        return DiffInks {
+            removed_bg,
+            added_bg,
+            removed_fg,
+            added_fg,
+            equal_fg: theme.ui(Color::Rgb(0xc5, 0xcd, 0xd9)),
+            removed_sign: removed_fg,
+            added_sign: added_fg,
+            sign_modifier: Modifier::BOLD,
+            gutter_fg: theme.ui(Color::Rgb(0x6c, 0x7d, 0x9c)),
+            changed_gutter_fg: theme.ui(Color::Rgb(0x6c, 0x7d, 0x9c)),
+            intraline_removed: theme.ui(Color::Rgb(rr, rg, rb)),
+            intraline_added: theme.ui(Color::Rgb(ar, ag, ab)),
+            filler_removed: removed_bg,
+            filler_added: added_bg,
+            hatch: None,
+            seam: ("\u{2502}", theme.ui(Color::Rgb(0x3a, 0x42, 0x52))),
+            legible: None,
+        };
+    };
+    let rgb = |c: Color| match c {
+        Color::Rgb(r, g, b) => (r, g, b),
+        _ => t.text,
+    };
+    let (red, green) = (rgb(theme.git_deleted()), rgb(theme.git_added()));
+    DiffInks {
+        removed_bg: diff_tint(t, red, DIFF_ROW_TINT.0),
+        added_bg: diff_tint(t, green, DIFF_ROW_TINT.1),
+        removed_fg: rgb_color(lerp_rgb(t.text, red, 0.3)),
+        added_fg: rgb_color(lerp_rgb(t.text, green, 0.3)),
+        equal_fg: t.text(),
+        removed_sign: rgb_color(red),
+        added_sign: rgb_color(green),
+        sign_modifier: Modifier::empty(),
+        gutter_fg: t.faint(),
+        changed_gutter_fg: t.muted(),
+        intraline_removed: diff_tint(t, red, DIFF_CHANGE_TINT.0),
+        intraline_added: diff_tint(t, green, DIFF_CHANGE_TINT.1),
+        filler_removed: t.canvas(),
+        filler_added: t.canvas(),
+        hatch: Some(("\u{2571}", rgb_color(lerp_rgb(t.canvas, t.faint, 0.34)))),
+        seam: ("\u{258f}", t.hairline()),
+        legible: Some(t),
+    }
+}
+
+/// Hatch the blank side of an inserted or deleted line, cells `x0..x1` of
+/// row `y`, when the theme hatches filler (VS Code's diagonal fill).
+fn paint_diff_filler(buf: &mut Buffer, x0: u16, x1: u16, y: u16, inks: &DiffInks) {
+    let Some((glyph, fg)) = inks.hatch else {
+        return;
+    };
+    for x in x0..x1 {
+        buf[(x, y)].set_symbol(glyph).set_fg(fg);
+    }
+}
+
+/// A file label in a diff header split into the file's name and the
+/// qualifier after it (`main.rs (HEAD)` is `main.rs` and ` (HEAD)`), which
+/// a `surfaces` header mutes.
+fn split_diff_label(label: &str) -> (&str, &str) {
+    match label.rfind(" (") {
+        Some(i) if label.ends_with(')') && i > 0 => label.split_at(i),
+        _ => (label, ""),
+    }
+}
+
+/// The notes a diff header adds after the file names: the lenses it is
+/// seen through and what it could not do, each of which a reader must be
+/// told about (a hidden change must never read as an absent one).
+fn diff_header_notes(diff: &crate::widgets::diff::DiffData) -> Vec<String> {
+    let mut notes = Vec::new();
+    if diff.bytes_differ_but_lines_equal {
+        notes.push(String::from(
+            "whitespace-only change (trailing newline / CRLF / BOM) \u{2014} no line-level diff",
+        ));
+    }
+    if diff.ws_mode != crate::widgets::diff::DiffWhitespace::Off {
+        notes.push(format!("ignoring whitespace: {}", diff.ws_mode.label()));
+    }
+    if diff.group_by_seat {
+        notes.push(format!("by seat: {}", diff.seat_summary()));
+    }
+    if diff.coarse {
+        notes.push(String::from("large change: diff stopped early"));
+    }
+    notes
+}
+
+/// The diff header on a `surfaces` theme: the chrome tone instead of the
+/// teal band, and the type ramp instead of one bold white line. Each side's
+/// file name sits over its own column's code (the current side's in the
+/// strong ink, the other in body text), a qualifier like `(HEAD)` muted,
+/// `↔` faint on the seam between them, and the notes muted after; on a pane
+/// too narrow for two columns, or a diff with one side, they run on from
+/// the left. The text stops short of the `‹ ›` arrows, which are muted at
+/// rest and strong, on a faint chip, under the pointer. Returns the arrows'
+/// hit rects, the same cells the boxed header gives them.
+#[allow(clippy::too_many_arguments)]
+fn paint_surface_diff_header(
+    buf: &mut Buffer,
+    inner: Rect,
+    t: crate::widgets::surface::Tones,
+    left: &str,
+    right: Option<&str>,
+    notes: &[String],
+    columns: Option<(u16, u16, u16)>,
+    pointer: Option<(u16, u16)>,
+) -> (Rect, Rect) {
+    let y = inner.y;
+    let chrome = t.chrome();
+    buf.set_style(
+        Rect { height: 1, ..inner },
+        Style::default().bg(chrome).fg(t.text()),
+    );
+    for x in inner.x..inner.right() {
+        buf[(x, y)].set_symbol(" ");
+    }
+    let (prev, next) = paint_diff_nav_arrows(inner, chrome, buf);
+    // The header's text stops a cell before the arrows' strip.
+    let text_end = if prev.width > 0 {
+        prev.x.saturating_sub(2)
+    } else {
+        inner.right()
+    };
+    let ink = |fg: Color| Style::default().fg(fg).bg(chrome);
+    let label = |name: &str, strong: bool| {
+        let (file, qualifier) = split_diff_label(name);
+        vec![
+            Span::styled(
+                file.to_string(),
+                ink(if strong { t.strong() } else { t.text() }),
+            ),
+            Span::styled(qualifier.to_string(), ink(t.muted())),
+        ]
+    };
+    let mut tail: Vec<Span> = Vec::new();
+    for note in notes {
+        tail.push(Span::styled("  \u{b7}  ", ink(t.faint())));
+        tail.push(Span::styled(note.clone(), ink(t.muted())));
+    }
+    let put = |buf: &mut Buffer, x: u16, spans: Vec<Span>| {
+        if x < text_end {
+            buf.set_line(x, y, &Line::from(spans), text_end - x);
+        }
+    };
+    match (right, columns) {
+        (Some(right), Some((l_text_x, seam_x, r_text_x))) => {
+            put(buf, l_text_x, label(left, false));
+            put(buf, seam_x, vec![Span::styled("\u{2194}", ink(t.faint()))]);
+            let mut spans = label(right, true);
+            spans.extend(tail);
+            put(buf, r_text_x, spans);
+        }
+        (Some(right), None) => {
+            let mut spans = label(left, false);
+            spans.push(Span::styled("  \u{2194}  ", ink(t.faint())));
+            spans.extend(label(right, true));
+            spans.extend(tail);
+            put(buf, inner.x + 1, spans);
+        }
+        (None, _) => {
+            let mut spans = label(left, true);
+            spans.extend(tail);
+            put(buf, inner.x + 1, spans);
+        }
+    }
+    for arrow in [prev, next] {
+        if arrow.width == 0 {
+            continue;
+        }
+        let hovered = pointer == Some((arrow.x, arrow.y));
+        let style = if hovered {
+            Style::default().fg(t.strong()).bg(t.hover_on(t.chrome))
+        } else {
+            Style::default().fg(t.muted()).bg(chrome)
+        };
+        let cell = &mut buf[(arrow.x, arrow.y)];
+        cell.set_style(style);
+        cell.modifier.remove(Modifier::BOLD);
+    }
+    (prev, next)
+}
+
+/// The diff footer on a `surfaces` theme: muted text on the chrome tone,
+/// not a raised grey band, with key names as keycaps. `position` leads;
+/// each `(keys, words)` hint follows while the row has room for all of it,
+/// so a narrow pane drops whole hints from the end instead of cutting one.
+fn paint_surface_diff_footer(
+    buf: &mut Buffer,
+    row: Rect,
+    t: crate::widgets::surface::Tones,
+    position: &str,
+    hints: &[(&str, &str)],
+) {
+    let chrome = t.chrome();
+    buf.set_style(row, Style::default().bg(chrome));
+    for x in row.left()..row.right() {
+        buf[(x, row.y)].set_symbol(" ");
+    }
+    let muted = Style::default().fg(t.muted()).bg(chrome);
+    let mut spans = vec![Span::styled(format!(" {position}"), muted)];
+    let mut used: usize = spans.iter().map(|s| s.width()).sum();
+    for (keys, words) in hints {
+        let mut hint = vec![Span::styled("   ", muted)];
+        if !keys.is_empty() {
+            hint.extend(crate::widgets::surface::keycap_spans(
+                keys, t, chrome, false,
+            ));
+        }
+        if !words.is_empty() {
+            hint.push(Span::styled(format!(" {words}"), muted));
+        }
+        let w: usize = hint.iter().map(|s| s.width()).sum();
+        if used + w > usize::from(row.width) {
+            break;
+        }
+        used += w;
+        spans.extend(hint);
+    }
+    buf.set_line(row.x, row.y, &Line::from(spans), row.width);
+}
+
 /// Returns the hit-test rects of the prev / next change arrows painted
 /// in the diff header (in that order). Both are `Rect::default()` when
-/// the header was too narrow to allocate them.
+/// the header was too narrow to allocate them. `pointer` is the screen
+/// cell under the mouse, which lifts an arrow under it on a `surfaces`
+/// theme.
 fn render_diff(
     diff: &mut crate::widgets::diff::DiffData,
     inner: Rect,
     buf: &mut Buffer,
     bg: Color,
     theme: crate::theme::Theme,
+    pointer: Option<(u16, u16)>,
 ) -> (Rect, Rect) {
     use crate::widgets::diff::DiffRow;
     // Background fill so the diff sits on a clean canvas (see [`canvas_bg`]).
@@ -1458,8 +1874,11 @@ fn render_diff(
     if inner.height < 3 || inner.width < 16 {
         return (Rect::default(), Rect::default());
     }
+    // A small diff colours in this frame; a large one paints plain now and
+    // takes its colours when `poll_highlights` lands them.
+    diff.colour_syntax(Some(HIGHLIGHT_INLINE_BUDGET));
     if diff.unified {
-        return render_unified_deletion(diff, inner, buf, bg, theme);
+        return render_unified_deletion(diff, inner, buf, bg, theme, pointer);
     }
     let left_name = diff
         .left_path
@@ -1478,62 +1897,10 @@ fn render_diff(
     } else {
         None
     };
-    let header = match (&right_name, diff.bytes_differ_but_lines_equal) {
-        (Some(r), true) => format!(
-            " diff: {left_name}  \u{2194}  {r}   \u{2022} whitespace-only change (trailing newline / CRLF / BOM) — no line-level diff "
-        ),
-        (Some(r), false) => format!(" diff: {left_name}  \u{2194}  {r} "),
-        // Synthetic git-diff text view: no real right-side path, so the
-        // header reads as the diff command instead of trailing "↔ null".
-        (None, _) => format!(" {left_name} "),
-    };
-    // Ignore-whitespace is a lens over the real diff, so say so in the header:
-    // a reader must never mistake a hidden change for an absent one.
-    let header = match diff.ws_mode {
-        crate::widgets::diff::DiffWhitespace::Off => header,
-        mode => format!("{header}\u{2022} ignoring whitespace: {} ", mode.label()),
-    };
-    // Same reason as the whitespace lens: a reader seeing coloured bars must
-    // be told what they mean and who is in them (#349).
-    let header = if diff.group_by_seat {
-        format!("{header}\u{2022} by seat: {} ", diff.seat_summary())
-    } else {
-        header
-    };
-    let header = if diff.coarse {
-        format!("{header}\u{2022} large change: diff stopped early ")
-    } else {
-        header
-    };
-    let head_bg = if diff.bytes_differ_but_lines_equal {
-        theme.ui(Color::Rgb(0x8a, 0x4a, 0x10))
-    } else {
-        theme.ui(Color::Rgb(0x09, 0x4d, 0x77))
-    };
-    let head_style = Style::default()
-        .fg(Color::White)
-        .bg(head_bg)
-        .add_modifier(Modifier::BOLD);
-    for x in inner.x..inner.x + inner.width {
-        buf[(x, inner.y)].set_style(head_style);
-        buf[(x, inner.y)].set_symbol(" ");
-    }
-    buf.set_string(inner.x, inner.y, &header, head_style);
-    let (prev_arrow, next_arrow) = paint_diff_nav_arrows(inner, head_bg, buf);
-
     // Two columns split exactly down the middle. Each column has a small
     // line-number gutter on its left and a 1-cell sign column showing
     // -, +, or space.
-    let body_top = inner.y + 1;
-    let body_height = inner.height.saturating_sub(2);
-    let status_y = inner.y + inner.height - 1;
-    if body_height == 0 {
-        return (prev_arrow, next_arrow);
-    }
     let half = inner.width / 2;
-    if half < 8 {
-        return (prev_arrow, next_arrow);
-    }
     let left_max = diff.left_lines.len();
     let right_max = diff.right_lines.len();
     let l_gutter = (left_max + 1).to_string().len() as u16 + 1;
@@ -1547,12 +1914,81 @@ fn render_diff(
     let r_sign_x = r_x + r_gutter;
     let r_text_x = r_sign_x + 2;
     let r_text_w = (inner.width - (half + 1)).saturating_sub(r_gutter + 2);
+    let seam_x = inner.x + half;
+    let inks = diff_inks(theme);
+    let tones = crate::widgets::surface::tones(theme);
+
+    let (prev_arrow, next_arrow) = if let Some(t) = tones {
+        let columns = (half >= 8).then_some((l_text_x, seam_x, r_text_x));
+        paint_surface_diff_header(
+            buf,
+            inner,
+            t,
+            &left_name,
+            right_name.as_deref(),
+            &diff_header_notes(diff),
+            columns,
+            pointer,
+        )
+    } else {
+        let header = match (&right_name, diff.bytes_differ_but_lines_equal) {
+            (Some(r), true) => format!(
+                " diff: {left_name}  \u{2194}  {r}   \u{2022} whitespace-only change (trailing newline / CRLF / BOM) — no line-level diff "
+            ),
+            (Some(r), false) => format!(" diff: {left_name}  \u{2194}  {r} "),
+            // Synthetic git-diff text view: no real right-side path, so the
+            // header reads as the diff command instead of trailing "↔ null".
+            (None, _) => format!(" {left_name} "),
+        };
+        // Ignore-whitespace is a lens over the real diff, so say so in the header:
+        // a reader must never mistake a hidden change for an absent one.
+        let header = match diff.ws_mode {
+            crate::widgets::diff::DiffWhitespace::Off => header,
+            mode => format!("{header}\u{2022} ignoring whitespace: {} ", mode.label()),
+        };
+        // Same reason as the whitespace lens: a reader seeing coloured bars must
+        // be told what they mean and who is in them (#349).
+        let header = if diff.group_by_seat {
+            format!("{header}\u{2022} by seat: {} ", diff.seat_summary())
+        } else {
+            header
+        };
+        let header = if diff.coarse {
+            format!("{header}\u{2022} large change: diff stopped early ")
+        } else {
+            header
+        };
+        let head_bg = if diff.bytes_differ_but_lines_equal {
+            theme.ui(Color::Rgb(0x8a, 0x4a, 0x10))
+        } else {
+            theme.ui(Color::Rgb(0x09, 0x4d, 0x77))
+        };
+        let head_style = Style::default()
+            .fg(Color::White)
+            .bg(head_bg)
+            .add_modifier(Modifier::BOLD);
+        for x in inner.x..inner.x + inner.width {
+            buf[(x, inner.y)].set_style(head_style);
+            buf[(x, inner.y)].set_symbol(" ");
+        }
+        buf.set_string(inner.x, inner.y, &header, head_style);
+        paint_diff_nav_arrows(inner, head_bg, buf)
+    };
+
+    let body_top = inner.y + 1;
+    let body_height = inner.height.saturating_sub(2);
+    let status_y = inner.y + inner.height - 1;
+    if body_height == 0 {
+        return (prev_arrow, next_arrow);
+    }
+    if half < 8 {
+        return (prev_arrow, next_arrow);
+    }
 
     // Vertical seam between the two columns.
-    let seam_x = inner.x + half;
     for y in body_top..body_top + body_height {
-        buf[(seam_x, y)].set_symbol("\u{2502}");
-        buf[(seam_x, y)].set_style(Style::default().fg(theme.ui(Color::Rgb(0x3a, 0x42, 0x52))));
+        buf[(seam_x, y)].set_symbol(inks.seam.0);
+        buf[(seam_x, y)].set_style(Style::default().fg(inks.seam.1));
     }
 
     let total = diff.rows.len();
@@ -1562,12 +1998,15 @@ fn render_diff(
         diff.scroll = max_scroll;
     }
 
-    let removed_bg = theme.ui(Color::Rgb(0x4a, 0x1f, 0x1f));
-    let removed_fg = theme.ui(Color::Rgb(0xff, 0xb3, 0xb3));
-    let added_bg = theme.ui(Color::Rgb(0x1f, 0x42, 0x2a));
-    let added_fg = theme.ui(Color::Rgb(0xb6, 0xee, 0xc4));
-    let equal_fg = theme.ui(Color::Rgb(0xc5, 0xcd, 0xd9));
-    let gutter_fg = theme.ui(Color::Rgb(0x6c, 0x7d, 0x9c));
+    let DiffInks {
+        removed_bg,
+        added_bg,
+        removed_fg,
+        added_fg,
+        equal_fg,
+        gutter_fg,
+        ..
+    } = inks;
 
     let find_needle = diff.find.needle.clone();
     let find_opts = diff.find.opts;
@@ -1599,7 +2038,7 @@ fn render_diff(
                 '-',
                 diff.left_lines.get(left).cloned().unwrap_or_default(),
             ),
-            DiffRow::Added { .. } => (added_bg, ' ', String::new()),
+            DiffRow::Added { .. } => (inks.filler_added, ' ', String::new()),
         };
         let (r_cell_bg, r_sign, r_text) = match row {
             DiffRow::Equal { right, .. } => (
@@ -1617,7 +2056,7 @@ fn render_diff(
                 '+',
                 diff.right_lines.get(right).cloned().unwrap_or_default(),
             ),
-            DiffRow::Removed { .. } => (removed_bg, ' ', String::new()),
+            DiffRow::Removed { .. } => (inks.filler_removed, ' ', String::new()),
         };
 
         // Left column.
@@ -1627,6 +2066,7 @@ fn render_diff(
             | DiffRow::Replaced { left, .. } => Some(left),
             DiffRow::Added { .. } => None,
         };
+        let l_changed = l_cell_bg == removed_bg;
         let l_label = l_left_idx
             .map(|i| format!("{:>width$} ", i + 1, width = l_gutter as usize - 1))
             .unwrap_or_else(|| " ".repeat(l_gutter as usize));
@@ -1634,7 +2074,13 @@ fn render_diff(
             l_x,
             y,
             &l_label,
-            Style::default().fg(gutter_fg).bg(l_cell_bg),
+            Style::default()
+                .fg(if l_changed {
+                    inks.changed_gutter_fg
+                } else {
+                    gutter_fg
+                })
+                .bg(l_cell_bg),
         );
         buf.set_string(
             l_sign_x,
@@ -1642,12 +2088,12 @@ fn render_diff(
             format!("{l_sign} "),
             Style::default()
                 .fg(if l_cell_bg == removed_bg {
-                    removed_fg
+                    inks.removed_sign
                 } else {
                     equal_fg
                 })
                 .bg(l_cell_bg)
-                .add_modifier(Modifier::BOLD),
+                .add_modifier(inks.sign_modifier),
         );
         let l_padded = clip_pad_cells(&l_text, diff.scroll_x, l_text_w as usize);
         buf.set_string(
@@ -1662,13 +2108,24 @@ fn render_diff(
                 })
                 .bg(l_cell_bg),
         );
+        if let Some(i) = l_left_idx {
+            paint_diff_syntax(
+                buf,
+                l_text_x,
+                y,
+                l_text_w,
+                &l_text,
+                diff.scroll_x,
+                diff.syntax.left(i),
+                DiffInkLift::new(inks.legible.filter(|_| l_changed), l_cell_bg),
+            );
+        }
         // The changed characters of a replaced line (#1351), on both sides.
         let intraline = match row {
             DiffRow::Replaced { .. } => crate::widgets::diff::changed_char_ranges(&l_text, &r_text),
             _ => None,
         };
         if let Some((range, _)) = intraline {
-            let (r, g, b) = crate::widgets::diff::INTRALINE_REMOVED_BG;
             paint_intraline_range(
                 buf,
                 l_text_x,
@@ -1677,9 +2134,22 @@ fn render_diff(
                 &l_text,
                 diff.scroll_x,
                 range,
-                theme.ui(Color::Rgb(r, g, b)),
-                removed_fg,
+                inks.intraline_removed,
+                inks.removed_sign,
+                inks.legible,
             );
+        }
+        if l_left_idx.is_none() {
+            paint_diff_filler(buf, l_x, seam_x, y, &inks);
+        } else if tones.is_some() {
+            // The spacer before the seam takes the row's tint, so a changed
+            // row's band runs right up to the hairline.
+            buf[(seam_x - 1, y)].set_bg(l_cell_bg);
+        }
+        if tones.is_some() {
+            // The seam's glyph hugs its cell's left edge; the rest of the
+            // cell belongs to the right column's row.
+            buf[(seam_x, y)].set_bg(r_cell_bg);
         }
 
         // Right column.
@@ -1689,6 +2159,7 @@ fn render_diff(
             | DiffRow::Replaced { right, .. } => Some(right),
             DiffRow::Removed { .. } => None,
         };
+        let r_changed = r_cell_bg == added_bg;
         let r_label = r_right_idx
             .map(|i| format!("{:>width$} ", i + 1, width = r_gutter as usize - 1))
             .unwrap_or_else(|| " ".repeat(r_gutter as usize));
@@ -1696,7 +2167,13 @@ fn render_diff(
             r_x,
             y,
             &r_label,
-            Style::default().fg(gutter_fg).bg(r_cell_bg),
+            Style::default()
+                .fg(if r_changed {
+                    inks.changed_gutter_fg
+                } else {
+                    gutter_fg
+                })
+                .bg(r_cell_bg),
         );
         // The group-by-seat lens (#349): a bar in this row's own hue, in the
         // gutter's last cell, on the lines this change ADDS. An unchanged
@@ -1728,12 +2205,12 @@ fn render_diff(
             format!("{r_sign} "),
             Style::default()
                 .fg(if r_cell_bg == added_bg {
-                    added_fg
+                    inks.added_sign
                 } else {
                     equal_fg
                 })
                 .bg(r_cell_bg)
-                .add_modifier(Modifier::BOLD),
+                .add_modifier(inks.sign_modifier),
         );
         let r_padded = clip_pad_cells(&r_text, diff.scroll_x, r_text_w as usize);
         buf.set_string(
@@ -1748,8 +2225,19 @@ fn render_diff(
                 })
                 .bg(r_cell_bg),
         );
+        if let Some(i) = r_right_idx {
+            paint_diff_syntax(
+                buf,
+                r_text_x,
+                y,
+                r_text_w,
+                &r_text,
+                diff.scroll_x,
+                diff.syntax.right(i),
+                DiffInkLift::new(inks.legible.filter(|_| r_changed), r_cell_bg),
+            );
+        }
         if let Some((_, range)) = intraline {
-            let (r, g, b) = crate::widgets::diff::INTRALINE_ADDED_BG;
             paint_intraline_range(
                 buf,
                 r_text_x,
@@ -1758,9 +2246,13 @@ fn render_diff(
                 &r_text,
                 diff.scroll_x,
                 range,
-                theme.ui(Color::Rgb(r, g, b)),
-                added_fg,
+                inks.intraline_added,
+                inks.added_sign,
+                inks.legible,
             );
+        }
+        if r_right_idx.is_none() {
+            paint_diff_filler(buf, r_x, inner.right(), y, &inks);
         }
 
         // Inline-find highlight: overpaint every occurrence of the needle
@@ -1857,6 +2349,24 @@ fn render_diff(
     // Status footer.
     let visible_first = diff.scroll + 1;
     let visible_last = end;
+    if let Some(t) = tones {
+        paint_surface_diff_footer(
+            buf,
+            Rect {
+                y: status_y,
+                height: 1,
+                ..inner
+            },
+            t,
+            &format!("{visible_first}\u{2013}{visible_last} of {total}"),
+            &[
+                ("F7", "next change"),
+                ("Shift+F7", "previous"),
+                ("PgUp PgDn", "scroll"),
+            ],
+        );
+        return (prev_arrow, next_arrow);
+    }
     let status = format!(
         " {visible_first}–{visible_last} of {total}  ·  ↑/↓ PgUp/PgDn  ·  ‹/› click arrows or F7 for next/prev change "
     );
@@ -1928,8 +2438,19 @@ fn paint_diff_selection_band(
         } else {
             (0, usize::MAX)
         };
-        let cs_screen = cs.saturating_sub(diff.scroll_x);
-        let ce_screen = ce.saturating_sub(diff.scroll_x);
+        // The band is in cells: a tab inside the selection is Tab Size wide.
+        let line = diff_side_line(diff, row_idx, sel.side);
+        let to_cell = |col: usize| {
+            if col == usize::MAX {
+                return usize::MAX;
+            }
+            let from = byte_index_of_char(line, diff.scroll_x);
+            let to = byte_index_of_char(line, col.max(diff.scroll_x));
+            let drawn = cells_from(&line[from..to], cells_from(&line[..from], 0));
+            drawn + col.saturating_sub(line.chars().count().max(diff.scroll_x))
+        };
+        let cs_screen = to_cell(cs);
+        let ce_screen = to_cell(ce);
         paint_selection_band(buf, text_x, y, text_w, cs_screen, ce_screen, theme);
     }
 }
@@ -1996,8 +2517,54 @@ pub fn diff_hit_test(
     } else {
         0
     };
-    let char_col = screen_col + diff.scroll_x;
+    // The text is drawn with each tab as its Tab Size cells, so a cell maps to
+    // the char drawn on it, not to `cell + scroll_x`.
+    let line = diff_side_line(diff, row_idx, side);
+    let char_col = char_at_cell_from(line, diff.scroll_x, screen_col);
     Some((side, row_idx, char_col))
+}
+
+/// The text a diff row draws in `side`'s column, `""` when that side has no
+/// line on the row (an added or removed line's other half).
+fn diff_side_line(
+    diff: &crate::widgets::diff::DiffData,
+    row_idx: usize,
+    side: crate::widgets::diff::DiffSide,
+) -> &str {
+    use crate::widgets::diff::{DiffRow, DiffSide};
+    let (left, right) = match diff.rows.get(row_idx) {
+        Some(DiffRow::Equal { left, right } | DiffRow::Replaced { left, right }) => {
+            (Some(*left), Some(*right))
+        }
+        Some(DiffRow::Removed { left }) => (Some(*left), None),
+        Some(DiffRow::Added { right }) => (None, Some(*right)),
+        None => (None, None),
+    };
+    let (lines, idx) = match side {
+        DiffSide::Left => (&diff.left_lines, left),
+        DiffSide::Right => (&diff.right_lines, right),
+    };
+    idx.and_then(|i| lines.get(i)).map_or("", String::as_str)
+}
+
+/// The char index of `text` drawn on screen cell `cell` when the row starts
+/// at char `skip` (cells as [`char_cells_from`] counts them). A cell past the
+/// end of the text counts on from its length, one char per cell, as before
+/// tabs had width.
+fn char_at_cell_from(text: &str, skip: usize, cell: usize) -> usize {
+    let mut at = 0;
+    let from = byte_index_of_char(text, skip);
+    // Chars up to the row's first: `skip`, or the whole line when it is
+    // scrolled past its end.
+    let mut i = text[..from].chars().count();
+    for (_, w) in char_cells_from(&text[from..], cells_from(&text[..from], 0)) {
+        if cell < at + w {
+            return i;
+        }
+        at += w;
+        i += 1;
+    }
+    i.max(skip) + cell.saturating_sub(at)
 }
 
 /// Paint `‹` and `›` glyphs at the right edge of a diff header so the
@@ -2050,6 +2617,7 @@ fn render_unified_deletion(
     buf: &mut Buffer,
     bg: Color,
     theme: crate::theme::Theme,
+    pointer: Option<(u16, u16)>,
 ) -> (Rect, Rect) {
     use crate::widgets::diff::DiffRow;
     let name = diff
@@ -2057,18 +2625,24 @@ fn render_unified_deletion(
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| diff.left_path.display().to_string());
-    let header = format!(" diff: {name}  \u{2022} deleted (HEAD \u{2192} /dev/null) ");
-    let head_style = Style::default()
-        .fg(Color::White)
-        .bg(theme.ui(Color::Rgb(0x6b, 0x1f, 0x1f)))
-        .add_modifier(Modifier::BOLD);
-    for x in inner.x..inner.x + inner.width {
-        buf[(x, inner.y)].set_style(head_style);
-        buf[(x, inner.y)].set_symbol(" ");
-    }
-    buf.set_string(inner.x, inner.y, &header, head_style);
-    let (prev_arrow, next_arrow) =
-        paint_diff_nav_arrows(inner, theme.ui(Color::Rgb(0x6b, 0x1f, 0x1f)), buf);
+    let inks = diff_inks(theme);
+    let tones = crate::widgets::surface::tones(theme);
+    let (prev_arrow, next_arrow) = if let Some(t) = tones {
+        let note = [String::from("deleted (HEAD \u{2192} /dev/null)")];
+        paint_surface_diff_header(buf, inner, t, &name, None, &note, None, pointer)
+    } else {
+        let header = format!(" diff: {name}  \u{2022} deleted (HEAD \u{2192} /dev/null) ");
+        let head_style = Style::default()
+            .fg(Color::White)
+            .bg(theme.ui(Color::Rgb(0x6b, 0x1f, 0x1f)))
+            .add_modifier(Modifier::BOLD);
+        for x in inner.x..inner.x + inner.width {
+            buf[(x, inner.y)].set_style(head_style);
+            buf[(x, inner.y)].set_symbol(" ");
+        }
+        buf.set_string(inner.x, inner.y, &header, head_style);
+        paint_diff_nav_arrows(inner, theme.ui(Color::Rgb(0x6b, 0x1f, 0x1f)), buf)
+    };
 
     let body_top = inner.y + 1;
     let body_height = inner.height.saturating_sub(2);
@@ -2089,9 +2663,12 @@ fn render_unified_deletion(
         diff.scroll = max_scroll;
     }
 
-    let removed_bg = theme.ui(Color::Rgb(0x4a, 0x1f, 0x1f));
-    let removed_fg = theme.ui(Color::Rgb(0xff, 0xb3, 0xb3));
-    let gutter_fg = theme.ui(Color::Rgb(0x6c, 0x7d, 0x9c));
+    let DiffInks {
+        removed_bg,
+        removed_fg,
+        gutter_fg,
+        ..
+    } = inks;
 
     let end = (diff.scroll + viewport).min(total);
     for (vis_row, row_idx) in (diff.scroll..end).enumerate() {
@@ -2106,6 +2683,7 @@ fn render_unified_deletion(
             DiffRow::Equal { left, .. } => (Some(left), ' ', bg),
             DiffRow::Added { .. } => (None, ' ', bg),
         };
+        let changed = cell_bg == removed_bg;
         let label = left_idx
             .map(|i| format!("{:>width$} ", i + 1, width = gutter as usize - 1))
             .unwrap_or_else(|| " ".repeat(gutter as usize));
@@ -2113,7 +2691,13 @@ fn render_unified_deletion(
             inner.x,
             y,
             &label,
-            Style::default().fg(gutter_fg).bg(cell_bg),
+            Style::default()
+                .fg(if changed {
+                    inks.changed_gutter_fg
+                } else {
+                    gutter_fg
+                })
+                .bg(cell_bg),
         );
         buf.set_string(
             sign_x,
@@ -2121,12 +2705,12 @@ fn render_unified_deletion(
             format!("{sign} "),
             Style::default()
                 .fg(if cell_bg == removed_bg {
-                    removed_fg
+                    inks.removed_sign
                 } else {
                     gutter_fg
                 })
                 .bg(cell_bg)
-                .add_modifier(Modifier::BOLD),
+                .add_modifier(inks.sign_modifier),
         );
         let text = left_idx
             .and_then(|i| diff.left_lines.get(i).cloned())
@@ -2140,14 +2724,40 @@ fn render_unified_deletion(
                 .fg(if cell_bg == removed_bg {
                     removed_fg
                 } else {
-                    theme.ui(Color::Rgb(0xc5, 0xcd, 0xd9))
+                    inks.equal_fg
                 })
                 .bg(cell_bg),
         );
+        if let Some(i) = left_idx {
+            paint_diff_syntax(
+                buf,
+                text_x,
+                y,
+                text_w,
+                &text,
+                diff.scroll_x,
+                diff.syntax.left(i),
+                DiffInkLift::new(inks.legible.filter(|_| changed), cell_bg),
+            );
+        }
     }
 
     let visible_first = diff.scroll + 1;
     let visible_last = end;
+    if let Some(t) = tones {
+        paint_surface_diff_footer(
+            buf,
+            Rect {
+                y: status_y,
+                height: 1,
+                ..inner
+            },
+            t,
+            &format!("{visible_first}\u{2013}{visible_last} of {total}"),
+            &[("", "every line removed at HEAD"), ("PgUp PgDn", "scroll")],
+        );
+        return (prev_arrow, next_arrow);
+    }
     let status = format!(
         " {visible_first}\u{2013}{visible_last} of {total}  \u{00b7}  every line removed at HEAD  \u{00b7}  \u{2191}/\u{2193} PgUp/PgDn to scroll "
     );
@@ -2163,16 +2773,32 @@ fn render_unified_deletion(
 }
 
 fn write_cell(buf: &mut Buffer, x: u16, y: u16, w: u16, text: &str, style: Style) {
-    let max_chars = w as usize;
-    // Overflow is cut plainly with no trailing ellipsis marker (the user wants
-    // no ellipsis anywhere in croft).
-    let content: String = text.chars().take(max_chars).map(visible_control).collect();
-    let mut padded = content;
-    let pad_count = max_chars.saturating_sub(padded.chars().count());
-    for _ in 0..pad_count {
-        padded.push(' ');
+    use unicode_segmentation::UnicodeSegmentation;
+    // Fill the slot in screen columns, not chars (#1138): a CJK or emoji
+    // glyph is two columns, so `w` chars drew up to twice the slot and ran
+    // into the next column. Blank it first; then a wide glyph that would
+    // straddle the edge is left out and its column stays blank. Overflow is
+    // cut plainly with no trailing ellipsis marker (the user wants no
+    // ellipsis anywhere in croft).
+    let width = w as usize;
+    buf.set_stringn(x, y, " ".repeat(width), width, style);
+    let mut col = 0;
+    for g in text.graphemes(true) {
+        let gw = crate::sheet::grapheme_width(g);
+        if gw == 0 {
+            continue;
+        }
+        if col + gw > width {
+            break;
+        }
+        if g.contains(char::is_control) {
+            let shown: String = g.chars().map(visible_control).collect();
+            buf.set_stringn(x + col as u16, y, &shown, gw, style);
+        } else {
+            buf.set_stringn(x + col as u16, y, g, gw, style);
+        }
+        col += gw;
     }
-    buf.set_string(x, y, &padded, style);
 }
 
 /// A control character as a glyph a cell can show (#1002): the buffer drops
@@ -2291,27 +2917,6 @@ type ColumnBoxCarets = (
     Option<EditorSelection>,
     Vec<EditorSelection>,
 );
-
-/// An xlsx grid's edited cell as hot exit keeps it (#1593):
-/// `(sheet name, row, col, value)`. The worksheet goes by its name, which
-/// a workbook keeps unique, so a reorder since the backup does not put the
-/// value on another worksheet.
-pub type SheetCellEdit = (String, usize, usize, String);
-
-/// A single text replacement in char-indexed `(row, col)` coordinates, as
-/// produced by an LSP rename `WorkspaceEdit`. Applied by
-/// [`apply_span_edits_to_lines`] and [`Editor::apply_span_edits`].
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TextSpanEdit {
-    pub start: (usize, usize),
-    pub end: (usize, usize),
-    pub new_text: String,
-    /// The columns are UTF-16 code units, as a language server sends them,
-    /// not chars. Converted against the lines at apply time: read as char
-    /// columns, every edit after an emoji on its line landed off by one per
-    /// astral character, and a rename wrote `xrenamed+ 1` over `x + 1`.
-    pub utf16: bool,
-}
 
 /// Apply `edits` to `lines` (char-indexed coords), bottom-to-top so an
 /// earlier replacement never shifts the coordinates of a later one. Returns
@@ -3101,6 +3706,15 @@ pub enum GitMark {
     Deleted,
 }
 
+/// What the inline blame says of the cursor's line (#1556).
+#[derive(Clone, Copy, Debug)]
+pub enum LineBlame<'a> {
+    /// The line differs from HEAD: the annotation reads `Uncommitted changes`.
+    Uncommitted,
+    /// The commit that last changed the line.
+    Commit(&'a crate::git::BlameCommit),
+}
+
 /// One tick on the editor's overview ruler: the whole-file summary VS Code and
 /// Zed paint down the scrollbar track, so a problem or a search hit outside the
 /// viewport is still visible.
@@ -3296,6 +3910,10 @@ pub struct Editor {
     /// closers type over, selections surround, and backspace eats an empty
     /// pair. Synced from the app's persisted preference like `blame_enabled`.
     pub auto_close_pairs: bool,
+    /// Overwrite (Replace) mode, toggled by the Insert key: a typed character
+    /// replaces the one under the caret instead of pushing it along. Mirrored
+    /// from the app's single global switch, like `auto_close_pairs`.
+    pub overwrite: bool,
     /// The global on-save clean-ups (#1657), set by the app before each save.
     pub save_cleanup: SaveCleanup,
     /// Auto-closing TAGS (VS Code's `html.autoClosingTags` /
@@ -3340,10 +3958,10 @@ pub struct Editor {
     /// Clickable lens spans painted this frame: `(screen y, x range, index
     /// into code_lenses)`. Cleared at render start, like the merge spans.
     pub code_lens_spans: Vec<(u16, std::ops::Range<u16>, usize)>,
-    /// An inline AI suggestion (#607): `(row, col, edit_seq, text)`, painted
-    /// as ghost text at the caret while the caret, the buffer and the row
-    /// are all still where the suggestion was asked for.
-    pub ghost: Option<(usize, usize, u64, String)>,
+    /// An inline suggestion (#607), painted as ghost text at the caret while
+    /// the caret, the buffer and the row are all still where it was asked
+    /// for. One that replaces part of the line strikes that part through.
+    pub ghost: Option<crate::inline_complete::Ghost>,
     /// Per-source-line git blame for the current file, index 0 = line 1. Set
     /// by the app off-thread once per (file, HEAD); `None` until fetched or
     /// when blame is disabled. Drives the GitLens-style current-line inline
@@ -3355,6 +3973,11 @@ pub struct Editor {
     /// Whether to paint the current-line blame annotation (user pref, default
     /// on). The blame data is still fetched so toggling is instant.
     pub blame_enabled: bool,
+    /// The blame annotation painted this frame when it names a commit:
+    /// `(screen y, x range, the commit's hash)`, which the mouse hovers for
+    /// the commit's card and clicks to open its changes (#1556). Cleared at
+    /// render start, like the lens spans.
+    blame_span: Option<(u16, std::ops::Range<u16>, String)>,
     /// Paint who typed each line in the gutter and name the seat in the
     /// inline-blame annotation (#349). Off by default: it is a review lens,
     /// not a resting state, and `Editor: Toggle Provenance` flips it for the
@@ -3382,6 +4005,13 @@ pub struct Editor {
     pub cursor_row: usize,
     pub cursor_col: usize,
     pub focused: bool,
+    /// A modal quick input (Command Palette, Go to File, a list picker, any
+    /// modal overlay) holds the keyboard above this editor. `focused` keeps
+    /// saying where the keyboard returns; this only takes the accent marks
+    /// (the top rule's lip, the active tab's underline) off a `surfaces`
+    /// theme's editor while the overlay has it, so one thing at a time wears
+    /// the accent. Set by the app each frame.
+    pub overlay_has_keyboard: bool,
     /// When focused, draw the orange→green gradient border (Black theme)
     /// instead of the solid blue one. Set by the app's focus/theme sync.
     pub focus_gradient: bool,
@@ -3418,7 +4048,7 @@ pub struct Editor {
     /// Cached longest-line width in CHARACTERS. Recomputing it every frame is
     /// O(total chars), so it is invalidated (set `None`) only when the buffer
     /// content changes (`open`/`mark_buffer_changed`) and recomputed lazily.
-    hscroll_content_cols: Option<usize>,
+    hscroll_content_cols: Option<(usize, usize, usize)>,
     /// Visual-row layout captured by the most recent render: one entry per
     /// painted screen row, each `(logical_line, char_start, char_end)`. In
     /// soft-wrap mode a logical line spans several entries; otherwise there is
@@ -3465,6 +4095,12 @@ pub struct Editor {
     /// on-type formatting trigger detector (#254). Stale once any other
     /// edit bumps the seq.
     pub last_typed: Option<(char, u64)>,
+    /// The whitespace-only line Enter just indented (#956): its row, how
+    /// many characters of indentation it got, and the `edit_seq` that left
+    /// it so. The indentation is cleared again, as VS Code's
+    /// `trimAutoWhitespace` does, once the caret leaves the line with
+    /// nothing typed on it.
+    auto_indent: Option<(usize, usize, u64)>,
     /// Collaborators' caret positions in this file (multiplayer sessions,
     /// docs/MULTIPLAYER.md): (row, char col, participant color). Painted as
     /// colored block cells like secondary carets; the App rebuilds this
@@ -3645,6 +4281,9 @@ pub struct Editor {
     /// lines at each indent level in a line's leading whitespace, with the
     /// cursor's block highlighted. App-synced from prefs; on by default.
     pub show_indent_guides: bool,
+    /// Home walks back one wrapped row per press on a continuation row's
+    /// start (`home_walks_wrapped_rows`, #1569). Off is VS Code's behaviour.
+    pub home_walks_rows: bool,
     /// Ruler columns (#1524, VS Code `editor.rulers`). App-synced from
     /// prefs; empty by default.
     pub rulers: Vec<u16>,
@@ -4004,6 +4643,7 @@ impl Editor {
             git_marks: std::collections::HashMap::new(),
             git_marks_seq: u64::MAX,
             auto_close_pairs: true,
+            overwrite: false,
             save_cleanup: SaveCleanup::default(),
             auto_close_tags: true,
             auto_pair_at: None,
@@ -4018,6 +4658,7 @@ impl Editor {
             blame_lines: None,
             blame_for: None,
             blame_enabled: true,
+            blame_span: None,
             provenance_overlay: false,
             scroll: 0,
             scroll_sub: 0,
@@ -4026,6 +4667,7 @@ impl Editor {
             cursor_row: 0,
             cursor_col: 0,
             focused: false,
+            overlay_has_keyboard: false,
             focus_gradient: false,
             theme: crate::theme::Theme::default(),
             pdf_viewer_enabled: true,
@@ -4049,6 +4691,7 @@ impl Editor {
             last_edit_origin: (0, 0),
             select_expand: None,
             last_typed: None,
+            auto_indent: None,
             ghost_carets: Vec::new(),
             ghost_caret_labels: Vec::new(),
             stream_stop_line: None,
@@ -4088,6 +4731,7 @@ impl Editor {
             final_newline: false,
             decode_lossy: false,
             show_indent_guides: true,
+            home_walks_rows: false,
             rulers: Vec::new(),
             show_bracket_colors: true,
             bracket_colors: Vec::new(),
@@ -4259,6 +4903,21 @@ impl Editor {
         (line < self.lines.len()).then_some(line)
     }
 
+    /// The 0-based line whose number `(col, row)` is on (#1570): only the
+    /// number's own columns, right of the sign margin (the breakpoint lane
+    /// and the fold chevron) and left of the spacer before the change bar,
+    /// on any visual row of a source line. A press there selects the line,
+    /// as in VS Code. With line numbers off there are no such columns, and
+    /// views without source lines have none either.
+    pub fn line_number_line_at(&self, col: u16, row: u16) -> Option<usize> {
+        let x = self.last_inner.x;
+        let numbers = x + 2..x + self.last_gutter_width.saturating_sub(1);
+        if !numbers.contains(&col) || self.has_non_text_view() || self.markdown_preview.is_some() {
+            return None;
+        }
+        self.gutter_line_at(col, row)
+    }
+
     /// The 0-based line whose breakpoint lane `(col, row)` is on (#1544): the
     /// sign cell left of the fold chevron, where breakpoints draw, on any
     /// visual row of a source line. A left click there toggles a breakpoint,
@@ -4367,22 +5026,22 @@ impl Editor {
             .map(|idx| self.last_inner.y.saturating_add(idx as u16))
     }
 
-    /// Toggle a bookmark on the cursor's line in the open file. Returns
+    /// Toggle a bookmark on `line` (1-based, like breakpoints) in the open
+    /// file. Returns
     /// `Some(true)` when a bookmark was added, `Some(false)` when one was
     /// removed, and `None` when no file is open (a scratch buffer has no
     /// path to key the set by).
-    pub fn toggle_bookmark(&mut self) -> Option<bool> {
+    pub fn toggle_bookmark_at(&mut self, line: usize) -> Option<bool> {
         let path = self.path.clone()?;
         // Settle the existing marks against the buffer before adding one, so
         // the shadow seeded below describes every mark in the set.
         self.sync_bookmarks_to_buffer();
-        let here = self.cursor_row + 1; // bookmarks are 1-based, like breakpoints
         let set = self.bookmarks.entry(path.clone()).or_default();
-        let added = if set.contains(&here) {
-            set.remove(&here);
+        let added = if set.contains(&line) {
+            set.remove(&line);
             false
         } else {
-            set.insert(here);
+            set.insert(line);
             true
         };
         // Drop the empty set so `bookmarked_lines` and the gutter never walk
@@ -4392,6 +5051,12 @@ impl Editor {
         }
         self.seed_bookmark_shadow();
         Some(added)
+    }
+
+    /// Toggle a bookmark on the cursor's line in the open file; see
+    /// [`Self::toggle_bookmark_at`].
+    pub fn toggle_bookmark(&mut self) -> Option<bool> {
+        self.toggle_bookmark_at(self.cursor_row + 1)
     }
 
     /// 1-based bookmark lines for the open file, ascending. Empty when no
@@ -4412,6 +5077,59 @@ impl Editor {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    /// Take over a saved set of bookmarks (a restored session) for the open
+    /// file, trimmed to the lines it still has.
+    pub fn restore_bookmarks(
+        &mut self,
+        marks: &std::collections::HashMap<PathBuf, std::collections::BTreeSet<usize>>,
+    ) {
+        if marks.is_empty() {
+            return;
+        }
+        self.bookmarks = marks.clone();
+        self.sync_bookmarks_to_buffer();
+    }
+
+    /// Take `path`'s marks as another tab holds them (`None`: it has none),
+    /// so every tab keeps one set per file. Trimmed to the buffer when
+    /// `path` is the open file, whose later edits then carry them.
+    pub fn adopt_bookmarks(
+        &mut self,
+        path: &Path,
+        marks: Option<&std::collections::BTreeSet<usize>>,
+    ) {
+        match marks {
+            Some(set) if !set.is_empty() => {
+                self.bookmarks.insert(path.to_path_buf(), set.clone());
+            }
+            _ => {
+                self.bookmarks.remove(path);
+            }
+        }
+        if self.path.as_deref() == Some(path) {
+            self.sync_bookmarks_to_buffer();
+        }
+    }
+
+    /// This tab's bookmarks on the files as saved: the open file's marks
+    /// follow its unsaved edits, so with the tab closing on those edits
+    /// each goes back to its line on disk, decoded as the tab decoded it.
+    pub fn bookmarks_on_disk(
+        &self,
+    ) -> std::collections::HashMap<PathBuf, std::collections::BTreeSet<usize>> {
+        let mut marks = self.bookmarks.clone();
+        if self.dirty
+            && let Some(path) = self.path.as_deref()
+            && let Some(set) = marks.get_mut(path)
+            && let Ok(bytes) = std::fs::read(path)
+        {
+            let (text, _, _) = self.encoding.decode(&bytes);
+            *set = carry_marks(set, &self.lines, &split_into_lines(&text));
+        }
+        marks.retain(|_, set| !set.is_empty());
+        marks
     }
 
     /// Whether 0-based `line` carries a bookmark in the open file.
@@ -4617,12 +5335,14 @@ impl Editor {
 
     /// Put the cursor on 1-based `line`, clamped to the buffer, unfolding
     /// anything hiding it and centring it in the viewport — a bookmark
-    /// inside a collapsed region must still be reachable.
-    fn jump_to_bookmark(&mut self, line: usize) {
+    /// inside a collapsed region must still be reachable. The selection and
+    /// any secondary carets go, so the next keystroke edits only that line.
+    pub fn jump_to_bookmark(&mut self, line: usize) {
         if self.lines.is_empty() {
             return;
         }
         self.selection = None;
+        self.collapse_carets();
         self.goto_line_centered(line.saturating_sub(1));
         self.reveal_cursor_fold();
         self.ensure_cursor_col_visible();
@@ -4731,6 +5451,22 @@ impl Editor {
     /// The git half of the annotation: author, age and summary of the
     /// cursor's line, or the uncommitted marker.
     fn committed_blame_annotation(&self) -> Option<String> {
+        Some(match self.cursor_line_blame()? {
+            LineBlame::Uncommitted => "Uncommitted changes".to_string(),
+            LineBlame::Commit(commit) => format!(
+                "{}, {} • {}",
+                commit.author,
+                crate::git::humanize_age(commit.age_secs),
+                commit.summary
+            ),
+        })
+    }
+
+    /// What the inline blame says of the cursor's line, or `None` when it
+    /// says nothing: blame is off or unavailable, or the line was edited
+    /// past the blamed range. Git: Open Commit for Line and the annotation's
+    /// hover and click act on its commit (#1556).
+    pub fn cursor_line_blame(&self) -> Option<LineBlame<'_>> {
         if !self.blame_enabled {
             return None;
         }
@@ -4754,7 +5490,7 @@ impl Editor {
             self.git_mark_at(self.cursor_row),
             Some(GitMark::Added | GitMark::Modified)
         ) {
-            return Some("Uncommitted changes".to_string());
+            return Some(LineBlame::Uncommitted);
         }
         // Insertions/deletions shift line indices out from under the blamed
         // snapshot; only trust the 1:1 mapping while the line counts match.
@@ -4768,15 +5504,20 @@ impl Editor {
         if text.is_some_and(|t| Some(t) != self.lines.get(self.cursor_row).map(String::as_str)) {
             return None;
         }
-        if commit.uncommitted {
-            return Some("Uncommitted changes".to_string());
-        }
-        Some(format!(
-            "{}, {} • {}",
-            commit.author,
-            crate::git::humanize_age(commit.age_secs),
-            commit.summary
-        ))
+        Some(if commit.uncommitted {
+            LineBlame::Uncommitted
+        } else {
+            LineBlame::Commit(commit)
+        })
+    }
+
+    /// The hash of the commit the blame annotation painted this frame names
+    /// at screen cell `(col, row)`, if it is there (#1556).
+    pub fn blame_commit_at(&self, col: u16, row: u16) -> Option<&str> {
+        self.blame_span
+            .as_ref()
+            .filter(|(y, xs, _)| *y == row && xs.contains(&col))
+            .map(|(_, _, hash)| hash.as_str())
     }
 
     /// The buffer's merge-conflict blocks, rescanned only when the buffer
@@ -5076,7 +5817,6 @@ impl Editor {
     fn warm_render_caches(&mut self) {
         self.refresh_fold_tables();
         self.conflicts();
-        self.content_cols();
     }
 
     /// Go to Next / Previous Change in an editor tab (#1352): the first
@@ -5137,11 +5877,18 @@ impl Editor {
             .unwrap_or(matches!(self.lang, Some(LangKind::Markdown)))
     }
 
-    /// Longest line width in characters, cached until the buffer changes.
-    /// Drives the horizontal scrollbar's content extent and the `scroll_col`
-    /// clamp. `&mut self` so the lazy recompute can populate the cache.
-    fn content_cols(&mut self) -> usize {
-        if let Some(cols) = self.hscroll_content_cols {
+    /// Widest line as a horizontal extent in char columns for a text column
+    /// `width` cells wide (tabs are Tab Size cells, see below), cached until the
+    /// buffer, the width or the Tab Size changes. Drives the horizontal
+    /// scrollbar's content extent and the `scroll_col` clamp. `&mut self` so the lazy recompute can populate the cache.
+    fn content_cols(&mut self, width: usize) -> usize {
+        use unicode_segmentation::UnicodeSegmentation;
+        self.sync_tab_cells();
+        let tab = char_cells('\t');
+        if let Some((w, t, cols)) = self.hscroll_content_cols
+            && w == width
+            && t == tab
+        {
             return cols;
         }
         let cols = self
@@ -5157,11 +5904,41 @@ impl Editor {
                     .get(i)
                     .map(|hs| hs.iter().map(|(_, label, _)| label.chars().count()).sum())
                     .unwrap_or(0);
-                l.chars().count() + extra
+                if !l.contains('\t') {
+                    return l.chars().count() + extra;
+                }
+                // A tab is Tab Size cells, but `scroll_col` counts chars. The
+                // extent is in the same char columns: how far the line must
+                // scroll for its tail to fit `width` cells, plus `width`, so
+                // that `extent - width` is exactly that scroll.
+                // Tab stops count from the line's left edge, so the tail from
+                // char `first` takes `col - start(first)` cells, which shrinks
+                // as `first` grows: the scroll is the first grapheme cluster
+                // starting at or past the `col + extra - width` cells that must
+                // scroll off. A whole cluster, never a char inside one: the row
+                // scrolled to `👍🏽`'s skin tone draws the tone on its own, two
+                // cells wider than the tail measured here. Two passes and no
+                // table per char, which on a huge one-line file was hundreds of
+                // MB before the first frame.
+                let (col, len) =
+                    char_cells_from(l, 0).fold((0, 0), |(col, n), (_, w)| (col + w, n + 1));
+                if col + extra <= width {
+                    return len + extra;
+                }
+                let off = col + extra - width;
+                let (mut at, mut first) = (0, 0);
+                for cluster in l.graphemes(true) {
+                    if at >= off {
+                        return first + width;
+                    }
+                    at += cluster_cells_at(cluster, at);
+                    first += cluster.chars().count();
+                }
+                len + width
             })
             .max()
             .unwrap_or(0);
-        self.hscroll_content_cols = Some(cols);
+        self.hscroll_content_cols = Some((width, tab, cols));
         cols
     }
 
@@ -5188,7 +5965,7 @@ impl Editor {
         let mut out = Vec::new();
         for line in body.split('\n') {
             let chars: Vec<char> = line.chars().collect();
-            for &(s, e) in &wrap_segments(&chars, bw) {
+            for &(s, e) in &wrap_segments(line, bw) {
                 out.push(chars[s..e].iter().collect());
             }
         }
@@ -5380,12 +6157,7 @@ impl Editor {
 
     /// Wrap segments of a single logical line at the given text width.
     fn line_segments(&self, line: usize, width: usize) -> Vec<(usize, usize)> {
-        let chars: Vec<char> = self
-            .lines
-            .get(line)
-            .map(|l| l.chars().collect())
-            .unwrap_or_default();
-        wrap_segments(&chars, width)
+        wrap_segments(self.lines.get(line).map_or("", String::as_str), width)
     }
 
     /// Number of visual rows a logical line occupies. Avoids allocating the
@@ -5925,10 +6697,20 @@ impl Editor {
                     return Ok(());
                 }
             }
-            // A `.tar.xz` under another name (#1645); a plain xz file is not
-            // a tar and falls through to hex.
-            Some(crate::magic::Magic::Xz) => {
-                match self.open_archive(path, crate::archive::ArchiveKind::TarXz) {
+            // A `.tar.xz`, `.tar.bz2` or `.tar.zst` under another name
+            // (#1645); a plain compressed file is not a tar and falls through
+            // to hex.
+            Some(
+                m @ (crate::magic::Magic::Xz
+                | crate::magic::Magic::Bzip2
+                | crate::magic::Magic::Zstd),
+            ) => {
+                let kind = match m {
+                    crate::magic::Magic::Xz => crate::archive::ArchiveKind::TarXz,
+                    crate::magic::Magic::Bzip2 => crate::archive::ArchiveKind::TarBz2,
+                    _ => crate::archive::ArchiveKind::TarZst,
+                };
+                match self.open_archive(path, kind) {
                     Ok(()) => return Ok(()),
                     Err(e) if crate::archive::is_list_cap_refusal(&e.to_string()) => {
                         self.route_note = Some((path.to_path_buf(), e.to_string()));
@@ -6115,7 +6897,22 @@ impl Editor {
         self.last_edit_kind = None;
         self.image = None;
         self.sheet = None;
-        self.markdown_preview = None;
+        // A same-path reload (the FS-sync sweep after another pane saves the
+        // file, an agent or formatter rewriting it, a revert) keeps the
+        // rendered Markdown view (#1605): dropping it turned the tab back
+        // into source whenever anything rewrote the file. The `edit_seq`
+        // bump below rebuilds it from the new text. A notebook's view is
+        // rebuilt below anyway, and a document's or media card's belonged to
+        // a viewer this text route has just replaced.
+        let keep_preview = !changed_file
+            && self.lang == Some(LangKind::Markdown)
+            && self
+                .markdown_preview
+                .as_ref()
+                .is_some_and(|md| !md.notebook && md.doc_path.is_none());
+        if !keep_preview {
+            self.markdown_preview = None;
+        }
         self.hex = None;
         self.log = None;
         self.archive = None;
@@ -6316,6 +7113,7 @@ impl Editor {
             row_of_line: Vec::new(),
             scroll_to_source: None,
             links: crate::markdown::MdLinks::default(),
+            follows: None,
         });
         self.status = format!("Opened media info {}", path.display());
         Ok(())
@@ -6397,6 +7195,7 @@ impl Editor {
             row_of_line: Vec::new(),
             scroll_to_source: None,
             links: crate::markdown::MdLinks::default(),
+            follows: None,
         });
         self.status = format!("Opened document {}", path.display());
         Ok(())
@@ -7432,6 +8231,10 @@ impl Editor {
         // A pass already running bakes the old palette's colors.
         self.highlight_job = None;
         self.recompute_highlights();
+        // A diff view's colours are baked the same way (#2020).
+        if let Some(diff) = self.diff.as_mut() {
+            diff.syntax.restart();
+        }
         // The markdown preview bakes the theme into its lines at build time
         // and rebuilds only when the buffer edits (`built_seq`), so a theme
         // switch must rebuild it here or it keeps the old colors until the
@@ -7474,17 +8277,28 @@ impl Editor {
         if self.markdown_preview.is_none() {
             return;
         }
+        let text = self.lines.join("\n");
+        self.rebuild_markdown_preview_from(&text, None);
+    }
+
+    /// [`Self::rebuild_markdown_preview`] from `text` instead of this tab's
+    /// buffer (#1605): the source pane's text, for a preview to the side
+    /// that follows it, with `follows` naming that source (`None` when
+    /// `text` is the buffer's own).
+    pub fn rebuild_markdown_preview_from(&mut self, text: &str, follows: Option<(u64, u64)>) {
+        if self.markdown_preview.is_none() {
+            return;
+        }
         // The image-aware builder (#196 review): the plain one left
         // md.images pointing at anchors into the REPLACED lines, and
         // the wrap-key recompute then sliced with stale first_line
         // values - an out-of-range panic on a theme switch.
-        let text = self.lines.join("\n");
         let base = self
             .path
             .as_ref()
             .and_then(|p| p.parent().map(|d| d.to_path_buf()));
         let (lines, images, runnables, source_map, links) = crate::markdown::render_markdown_mapped(
-            &text,
+            text,
             self.theme,
             &mut self.registry,
             base.as_deref(),
@@ -7497,6 +8311,14 @@ impl Editor {
             md.runnables = runnables;
             md.links = links;
             md.built_seq = self.edit_seq;
+            md.follows = follows;
+            // The visual-row caches (images, play glyphs, scroll sync) are
+            // keyed on `(built_seq, width)`, and a preview following another
+            // pane rebuilds with its own `built_seq` unchanged (#1605
+            // review): without this they kept the first build's rows, so
+            // clicks and scrolling landed on stale lines. `(0, 0)` never
+            // matches a drawn width.
+            md.wrap_key = (0, 0);
         }
     }
 
@@ -7636,9 +8458,15 @@ impl Editor {
         let text = self.lines.join("\n");
         let line_lens = embedded_line_lens(&self.lines);
         let (tx, rx) = std::sync::mpsc::channel();
+        // Under test a thread can carry a code palette of its own (the
+        // screen goldens' themes), which the pass reads on its worker.
+        #[cfg(test)]
+        let palette = crate::highlight::thread_syntax_palette();
         let spawned = std::thread::Builder::new()
             .name(String::from("croft-highlight"))
             .spawn(move || {
+                #[cfg(test)]
+                crate::highlight::set_thread_syntax_palette(palette);
                 // Nobody listening (the tab closed, or a newer pass replaced
                 // this one) is fine: the result is simply dropped.
                 let _ = tx.send(run_highlight_pass(kind, text, line_lens));
@@ -7694,6 +8522,16 @@ impl Editor {
     /// calls this every tick for every tab; true when the colors changed.
     pub fn poll_highlights(&mut self) -> bool {
         use std::sync::mpsc::TryRecvError;
+        // A diff view's colours land the same way (#2020). One whose pass
+        // waited for a free slot starts it once one frees.
+        if let Some(diff) = self.diff.as_mut() {
+            if diff.syntax.waiting() {
+                diff.colour_syntax(Some(std::time::Duration::ZERO));
+            }
+            if diff.syntax.poll() {
+                return true;
+            }
+        }
         let Some(job) = &self.highlight_job else {
             return false;
         };
@@ -8288,6 +9126,7 @@ impl Editor {
             row_of_line: Vec::new(),
             scroll_to_source,
             links,
+            follows: None,
         });
         true
     }
@@ -8335,6 +9174,7 @@ impl Editor {
             row_of_line: Vec::new(),
             scroll_to_source: None,
             links: crate::markdown::MdLinks::default(),
+            follows: None,
         });
         true
     }
@@ -8401,6 +9241,10 @@ impl Editor {
     }
 
     pub fn insert_char(&mut self, c: char) {
+        if self.overwrite_applies() {
+            self.overwrite_char(c);
+            return;
+        }
         if self.auto_close_tags && c == '>' && self.insert_closing_tag() {
             // Still a keystroke, like the pair path below: on-type
             // formatting (#254) keys off the typed character.
@@ -8439,6 +9283,74 @@ impl Editor {
         // this keystroke (seq must still match at the tick). Set here, not
         // in insert_char_raw: paste and snippet expansion go through the
         // raw path and must never count as typing.
+        self.last_typed = Some((c, self.edit_seq));
+    }
+
+    /// Whether a typed character should overwrite rather than insert: the
+    /// mode is on, there is a character to the right of the one caret on its
+    /// line (at the end of a line typing appends, as in every editor) and no
+    /// selection or extra caret is in play (those keep their insert semantics).
+    fn overwrite_applies(&self) -> bool {
+        self.overwrite
+            && self.carets.is_empty()
+            && !self.selection.is_some_and(|s| s.has_area())
+            && self
+                .lines
+                .get(self.cursor_row)
+                .is_some_and(|l| self.cursor_col < l.chars().count())
+    }
+
+    /// Whether `c` typed at the caret joins the cluster just before it: a
+    /// combining accent after its letter, a vowel sign after its consonant, a
+    /// ZWJ or the next part of an emoji sequence.
+    fn joins_cluster_before_caret(&self, c: char) -> bool {
+        let Some(line) = self.lines.get(self.cursor_row) else {
+            return false;
+        };
+        let byte = self.byte_index(self.cursor_row, self.cursor_col);
+        let Some(prev) = line[..byte].graphemes(true).next_back() else {
+            return false;
+        };
+        let mut joined = String::with_capacity(prev.len() + c.len_utf8());
+        joined.push_str(prev);
+        joined.push(c);
+        joined.graphemes(true).nth(1).is_none()
+    }
+
+    /// Overwrite-mode typing: replace the character cluster under the caret
+    /// with `c` and step past it. A `c` that completes the character before
+    /// the caret (see [`Self::joins_cluster_before_caret`]) belongs to it, so
+    /// it is added and nothing is replaced. One undo step per keystroke run,
+    /// like ordinary typing. Auto-closing pairs and tags are bypassed: a
+    /// typed bracket replaces, it does not grow a partner.
+    fn overwrite_char(&mut self, c: char) {
+        self.pin_on_edit();
+        self.push_undo(EditKind::InsertChar);
+        // A click leaves an empty selection behind; drop it, as the insert
+        // path does, or a later Shift+arrow would extend from the click.
+        self.selection = None;
+        let row = self.cursor_row;
+        let from = self.byte_index(row, self.cursor_col);
+        let to = if self.joins_cluster_before_caret(c) {
+            from
+        } else {
+            let next = next_grapheme_col(&self.lines[row], self.cursor_col);
+            self.byte_index(row, next)
+        };
+        let mut buf = [0u8; 4];
+        self.lines[row].replace_range(from..to, c.encode_utf8(&mut buf));
+        // The typed char can join the clusters around it into one (a ZWJ
+        // between two emoji, a regional indicator before a flag); step past
+        // the whole cluster then, so the next keystroke never lands inside it.
+        let col = self.cursor_col + 1;
+        let line = &self.lines[row];
+        self.cursor_col = if floor_grapheme_col(line, col) == col {
+            col
+        } else {
+            next_grapheme_col(line, col)
+        };
+        self.mark_buffer_changed();
+        self.recompute_highlights();
         self.last_typed = Some((c, self.edit_seq));
     }
 
@@ -8880,11 +9792,46 @@ impl Editor {
     /// [`Editor::convert_indentation`] to rewrite existing lines.
     pub fn set_indent_style(&mut self, style: IndentStyle) {
         self.indent_override = Some(style);
+        self.hscroll_content_cols = None;
     }
 
     /// The indentation unit as text for the active style: N spaces or one tab.
     fn indent_unit(&self) -> String {
         self.indent_style().unit()
+    }
+
+    /// The display cell a row showing `line` from char `start` begins at, for
+    /// tab stops: a wrapped row counts from its own left edge, a flat one
+    /// from the line's (the cells scrolled past).
+    fn row_origin(&self, line: &str, start: usize) -> usize {
+        if self.wrap_enabled() {
+            0
+        } else {
+            cells_before(line, start)
+        }
+    }
+
+    /// The caret's column as the status bar shows it, counted in display
+    /// cells from 1: a tab moves it to the next tab stop, as in VS Code and
+    /// vim, so it agrees with where the caret is drawn.
+    pub fn cursor_visual_col(&self) -> usize {
+        self.sync_tab_cells();
+        // Only a tab is more than one column; any other character, a wide
+        // one or each part of `👍🏽` included, counts one, exactly as VS
+        // Code's status bar counts (`CursorColumns.toStatusbarColumn`).
+        self.lines
+            .get(self.cursor_row)
+            .map_or(self.cursor_col, |l| {
+                l.chars().take(self.cursor_col).fold(0, |col, c| {
+                    col + if c == '\t' { tab_cells_at(col) } else { 1 }
+                })
+            })
+            + 1
+    }
+
+    /// Make `\t` measure and paint as this buffer's Tab Size from here on.
+    pub(crate) fn sync_tab_cells(&self) {
+        set_tab_cells(self.indent_style().width as usize);
     }
 
     /// The editor's indentation preference as the LSP `FormattingOptions`
@@ -9411,13 +10358,84 @@ impl Editor {
     }
 
     pub fn insert_newline(&mut self) {
+        // Enter again on a line Enter only indented leaves that line blank
+        // (#956): the indentation moves down with the caret, and the clear
+        // is part of this Enter's undo step.
+        let blank = self
+            .auto_indent
+            .take()
+            .filter(|&(row, len, seq)| {
+                seq == self.edit_seq
+                    && row == self.cursor_row
+                    && self.selection.is_none()
+                    && self.is_auto_indent_line(row, len)
+            })
+            .map(|(row, ..)| row);
         self.pin_on_edit();
         self.push_undo(EditKind::Newline);
         self.delete_selection_inner();
         self.smart_insert_newline_inner();
+        if let Some(row) = blank
+            && row < self.cursor_row
+            && self.lines[row].chars().all(|c| c == ' ' || c == '\t')
+            && !self.lines[row].is_empty()
+        {
+            self.lines[row].clear();
+            self.remap_carets(|p| p);
+            self.mark_buffer_changed();
+        }
+        self.note_auto_indent();
         self.recompute_highlights();
         // Newline is an on-type trigger for several servers (#254).
         self.last_typed = Some(('\n', self.edit_seq));
+    }
+
+    /// Remember the caret's line when Enter left it holding nothing but the
+    /// indentation it inserted, caret at its end (#956).
+    fn note_auto_indent(&mut self) {
+        let row = self.cursor_row;
+        self.auto_indent = self.lines.get(row).and_then(|line| {
+            let len = line.chars().count();
+            (len > 0 && self.cursor_col == len && line.chars().all(|c| c == ' ' || c == '\t'))
+                .then_some((row, len, self.edit_seq))
+        });
+    }
+
+    /// Whether `row` still holds exactly the `len` characters of
+    /// indentation Enter gave it and nothing else.
+    fn is_auto_indent_line(&self, row: usize, len: usize) -> bool {
+        self.lines.get(row).is_some_and(|line| {
+            line.chars().count() == len && line.chars().all(|c| c == ' ' || c == '\t')
+        })
+    }
+
+    /// Clear the indentation Enter put on a line the caret has since left
+    /// with nothing typed on it (#956), so a blank line between statements
+    /// is saved blank rather than as `"    "` that every linter flags. Called
+    /// after each key and click, with `tab_left` set for every tab but the
+    /// one being typed in: switching away from a tab leaves its line too.
+    /// It takes no undo step of its own: the step on top is still the one
+    /// before the Enter, so one Ctrl+Z still undoes the Enter.
+    pub fn trim_auto_indent(&mut self, tab_left: bool) {
+        let Some((row, len, seq)) = self.auto_indent else {
+            return;
+        };
+        if seq == self.edit_seq && row == self.cursor_row && !tab_left {
+            return;
+        }
+        self.auto_indent = None;
+        // Anything typed or edited since, here or elsewhere, keeps the line.
+        if seq != self.edit_seq || !self.is_auto_indent_line(row, len) {
+            return;
+        }
+        self.lines[row].clear();
+        // A selection end or an extra caret on the line stays on it, at
+        // its new end, not past it.
+        self.remap_carets(|p| p);
+        let pos = self.last_edit_pos;
+        self.mark_buffer_changed();
+        self.last_edit_pos = pos;
+        self.recompute_highlights();
     }
 
     fn smart_insert_newline_inner(&mut self) {
@@ -11125,9 +12143,15 @@ impl Editor {
     /// The inline suggestion (#607) when it still applies: the caret where it
     /// was asked for and no edit since.
     pub fn live_ghost(&self) -> Option<&str> {
-        let (row, col, seq, text) = self.ghost.as_ref()?;
-        (*row == self.cursor_row && *col == self.cursor_col && *seq == self.edit_seq)
-            .then_some(text.as_str())
+        self.live_ghost_full().map(|g| g.text.as_str())
+    }
+
+    /// [`Self::live_ghost`] with the columns of the caret's line it replaces,
+    /// when it is a language server's replacement.
+    pub fn live_ghost_full(&self) -> Option<&crate::inline_complete::Ghost> {
+        let g = self.ghost.as_ref()?;
+        (g.row == self.cursor_row && g.col == self.cursor_col && g.seq == self.edit_seq)
+            .then_some(g)
     }
 
     /// Indices of the code lenses on 0-based `line` whose line still reads
@@ -11178,20 +12202,36 @@ impl Editor {
     /// neighbour scans are capped: past a 200-blank-line gap guides simply
     /// stop, which keeps the per-row render cost bounded.
     fn guide_indent_width(&self, line: usize) -> usize {
+        self.guide_indent(line).0
+    }
+
+    /// [`Self::guide_indent_width`] plus the line whose leading whitespace
+    /// that width counts: the line itself, or for a blank line the neighbour
+    /// it borrowed from. The width is in characters, so where its guides sit
+    /// on screen has to be measured on that line (a tab is several cells; a
+    /// blank line has none of its own to measure).
+    fn guide_indent(&self, line: usize) -> (usize, usize) {
         const BLANK_SCAN_CAP: usize = 200;
         if let Some(w) = self.indent_width(line) {
-            return w;
+            return (w, line);
         }
         let above = (0..line)
             .rev()
             .take(BLANK_SCAN_CAP)
-            .find_map(|i| self.indent_width(i))
-            .unwrap_or(0);
+            .find_map(|i| self.indent_width(i).map(|w| (w, i)));
         let below = (line + 1..self.lines.len())
             .take(BLANK_SCAN_CAP)
-            .find_map(|i| self.indent_width(i))
-            .unwrap_or(0);
-        above.min(below)
+            .find_map(|i| self.indent_width(i).map(|w| (w, i)));
+        match (above, below) {
+            (Some(a), Some(b)) => {
+                if b.0 < a.0 {
+                    b
+                } else {
+                    a
+                }
+            }
+            _ => (0, line),
+        }
     }
 
     /// The active indentation guide (VS Code
@@ -13204,18 +14244,45 @@ impl Editor {
         self.dedup_carets();
     }
 
-    /// Drop extra carets that sit on the primary or on an earlier caret: kept
-    /// apart, the next key would edit the same spot twice.
+    /// Drop extra carets that sit on the primary or on an earlier caret, and
+    /// merge selections that overlap into one, as VS Code does (#1570):
+    /// kept apart, the next key would edit the same spot twice, and the
+    /// edit at the lower one left the upper one's end stale, so typing over
+    /// two overlapping line selections panicked or deleted lines nobody
+    /// selected. Selections that only touch stay apart, as does a caret at a
+    /// selection's edge. A merged selection keeps the place in the order and
+    /// the direction of its first member, so the primary stays the primary.
     fn dedup_carets(&mut self) {
-        let primary = self.selections_with_primary()[0].normalised();
-        let mut kept: Vec<EditorSelection> = Vec::with_capacity(self.carets.len());
-        for s in std::mem::take(&mut self.carets) {
-            let n = s.normalised();
-            if n != primary && !kept.iter().any(|k| k.normalised() == n) {
-                kept.push(s);
+        let all = self.selections_with_primary();
+        let mut by_start: Vec<usize> = (0..all.len()).collect();
+        by_start.sort_by_key(|&i| all[i].normalised());
+        // Each run of overlapping selections: (first member, start, end).
+        let mut runs: Vec<(usize, BPos, BPos)> = Vec::with_capacity(all.len());
+        for i in by_start {
+            let (start, end) = all[i].normalised();
+            match runs.last_mut() {
+                Some(run) if start < run.2 || (start, end) == (run.1, run.2) => {
+                    run.0 = run.0.min(i);
+                    run.2 = run.2.max(end);
+                }
+                _ => runs.push((i, start, end)),
             }
         }
-        self.carets = kept;
+        runs.sort_unstable_by_key(|run| run.0);
+        let mut merged = runs.into_iter().map(|(i, start, end)| {
+            let (anchor, head) = if all[i].anchor <= all[i].head {
+                (start, end)
+            } else {
+                (end, start)
+            };
+            EditorSelection { anchor, head }
+        });
+        let primary = merged.next().expect("the primary is always first");
+        if primary != all[0] {
+            self.selection = primary.has_area().then_some(primary);
+            (self.cursor_row, self.cursor_col) = primary.head;
+        }
+        self.carets = merged.collect();
     }
 
     /// A position kept as (rows from the last line, chars from its line's
@@ -15449,12 +16516,24 @@ impl Editor {
             // viewport width too. Scrolling right drops leading hints out of
             // the row, so re-measure until the caret fits (the loop is
             // bounded: `scroll_col` only grows, capped at `cursor_col`).
+            self.sync_tab_cells();
             loop {
                 let extra = self.inlay_cells_before_cursor(self.cursor_row, self.scroll_col);
-                if self.cursor_col + extra < self.scroll_col + width {
+                let row = RowCells::of_line(
+                    self.lines.get(self.cursor_row).map_or("", String::as_str),
+                    self.scroll_col,
+                );
+                let cells = row.text_before(self.cursor_col) + extra;
+                if cells < width {
                     break;
                 }
-                let target = (self.cursor_col + extra + 1).saturating_sub(width);
+                // Scroll right by the cells the caret overflows by (a tab or
+                // wide character is several), measured in columns.
+                let overflow = cells + 1 - width;
+                let mut target = self.scroll_col;
+                while target < self.cursor_col && row.text_before(target) < overflow {
+                    target += 1;
+                }
                 if target <= self.scroll_col {
                     break;
                 }
@@ -15522,7 +16601,10 @@ impl Editor {
     /// non-whitespace character, or to its start when the caret is already
     /// there, so a second press toggles (#987). It used to always go to the
     /// start, before the indentation. With wrap on (#1569) it first goes to
-    /// the start of the wrapped row the caret is on.
+    /// the start of the wrapped row the caret is on. With
+    /// `home_walks_rows`, a caret already on a continuation row's start goes
+    /// to the start of the row above, one row per press, down to the line's
+    /// own stops.
     pub fn home_key(&mut self) {
         let line = &self.lines[self.cursor_row];
         let first = line
@@ -15535,11 +16617,25 @@ impl Editor {
             // space it sits on), so step back to its cluster's start.
             Some((start, _)) => match floor_grapheme_col(line, start) {
                 row_start if self.cursor_col > row_start && row_start > first => row_start,
+                _ if self.home_walks_rows && start > 0 && self.cursor_col == start => {
+                    self.wrapped_row_above(start).unwrap_or(smart)
+                }
                 _ => smart,
             },
             None => smart,
         };
         self.last_edit_kind = None;
+    }
+
+    /// Start of the wrapped row above the one that starts at `row_start`
+    /// (a char column of the caret's line), on a grapheme boundary. `None`
+    /// on the line's top row.
+    fn wrapped_row_above(&self, row_start: usize) -> Option<usize> {
+        let width = self.visible_text_width().max(1);
+        let segs = self.line_segments(self.cursor_row, width);
+        let idx = segs.iter().position(|&(s, _)| s == row_start)?;
+        let above = segs.get(idx.checked_sub(1)?)?.0;
+        Some(floor_grapheme_col(&self.lines[self.cursor_row], above))
     }
 
     /// The End key. With wrap on (#1569) it first goes to the end of the
@@ -15774,7 +16870,7 @@ impl Editor {
         let width = self.visible_text_width();
         let Some(metrics) = scrollbar::horizontal_metrics(
             self.last_hscrollbar,
-            self.content_cols(),
+            self.content_cols(width),
             width,
             self.scroll_col,
         ) else {
@@ -15830,9 +16926,16 @@ impl Editor {
         self.cursor_row = line;
         self.cursor_col = self.cursor_col.min(self.line_char_len(line));
         let viewport = self.text_rows();
-        self.scroll = line
-            .saturating_sub(viewport / 2)
-            .min(self.lines.len().saturating_sub(viewport));
+        if viewport == 0 {
+            // Not rendered yet (a file opened for the first time has no
+            // geometry), so there is no middle to find: leave a few lines of
+            // context above the target and let the first render follow.
+            self.scroll = line.saturating_sub(5);
+        } else {
+            self.scroll = line
+                .saturating_sub(viewport / 2)
+                .min(self.lines.len().saturating_sub(viewport));
+        }
         self.last_edit_kind = None;
     }
 
@@ -16071,6 +17174,55 @@ impl Editor {
         self.last_edit_kind = None;
     }
 
+    /// Lines `from` through `to` as one whole-line selection (#1570): from
+    /// the start of the top line to the start of the line after the bottom
+    /// one, or to the end of the buffer's last line, which has none. With
+    /// `to` above `from` it runs upward, the caret at the top.
+    fn whole_lines(&self, from: usize, to: usize) -> EditorSelection {
+        let last = self.lines.len().saturating_sub(1);
+        let (top, bottom) = (from.min(to).min(last), from.max(to).min(last));
+        let start = (top, 0);
+        let end = if bottom < last {
+            (bottom + 1, 0)
+        } else {
+            (last, self.line_char_len(last))
+        };
+        let (anchor, head) = if to < from {
+            (end, start)
+        } else {
+            (start, end)
+        };
+        EditorSelection { anchor, head }
+    }
+
+    /// Whole-line selection by mouse (#1570), as VS Code's triple-click and
+    /// line-number click make: select from line `anchor` (the line under the
+    /// pointer when `None`) through the line under screen `(col, row)`, and
+    /// return the anchor so a drag can keep extending from it.
+    pub fn select_lines_at(&mut self, anchor: Option<usize>, col: u16, row: u16) -> usize {
+        self.click(col, row);
+        let anchor = anchor.unwrap_or(self.cursor_row);
+        self.set_selections(&[self.whole_lines(anchor, self.cursor_row)]);
+        anchor
+    }
+
+    /// VS Code "Expand Line Selection" (#1570): every cursor's selection
+    /// grows to the whole lines it touches, through the start of the next
+    /// line. A selection that already ends at a line start reaches one line
+    /// further, so each press adds a line.
+    pub fn expand_line_selection(&mut self) {
+        let all: Vec<EditorSelection> = self
+            .selections_with_primary()
+            .iter()
+            .map(|s| {
+                let (start, end) = s.normalised();
+                self.whole_lines(start.0, end.0)
+            })
+            .collect();
+        self.set_selections(&all);
+        self.last_edit_kind = None;
+    }
+
     /// Move the cursor to the screen coordinates (col, row). Used for mouse clicks.
     pub fn click(&mut self, col: u16, row: u16) {
         if self.lines.is_empty() || self.last_inner.height == 0 {
@@ -16114,14 +17266,14 @@ impl Editor {
                 let cap = if self.wrap_enabled() { end } else { usize::MAX };
                 (
                     line,
-                    self.buffer_col_at_display(line, start + visible).min(cap),
+                    self.buffer_col_at_display(line, start, visible).min(cap),
                 )
             }
             None => {
                 let line = (self.scroll + row_idx).min(self.lines.len().saturating_sub(1));
                 (
                     line,
-                    self.buffer_col_at_display(line, visible + self.scroll_col),
+                    self.buffer_col_at_display(line, self.scroll_col, visible),
                 )
             }
         };
@@ -16136,6 +17288,7 @@ impl Editor {
         if self.last_inner.height == 0 || self.lines.is_empty() || row < self.last_inner.y {
             return None;
         }
+        self.sync_tab_cells();
         let text_x = self.last_inner.x + self.last_gutter_width + 1;
         if self.wrap_enabled() {
             // Map the screen row through the last render's visual-row layout so
@@ -16147,7 +17300,10 @@ impl Editor {
                 return None;
             }
             let visible_col = (col - text_x) as usize;
-            let char_col = (start + visible_col).min(end).min(self.line_char_len(line));
+            let char_col = self
+                .buffer_col_at_display(line, start, visible_col)
+                .min(end)
+                .min(self.line_char_len(line));
             return Some((line, char_col));
         }
         // Non-wrap: map through the painted layout (comment boxes shift the
@@ -16173,34 +17329,36 @@ impl Editor {
         }
         Some((
             line,
-            self.buffer_col_at_display(line, self.scroll_col + visible_col),
+            self.buffer_col_at_display(line, self.scroll_col, visible_col),
         ))
     }
 
-    /// Invert the hint-splice display map: the first buffer column of `line`
-    /// whose display cell reaches absolute display column `display_col`. A
-    /// point landing inside a hint's own cells resolves to its anchor column,
-    /// so the caret snaps beside the code the hint annotates. Without hints
-    /// this is the identity (clamped to the line length).
-    fn buffer_col_at_display(&self, line: usize, display_col: usize) -> usize {
+    /// Invert the row's display map: the first buffer column of `line`
+    /// (counting from `base`, the column the row starts at) whose first cell
+    /// reaches `visible_cells` cells right of the row's left edge. Cells are
+    /// as painted: a tab takes its Tab Size, a wide character two, and a
+    /// point landing inside an inlay hint's own cells resolves to its anchor
+    /// column, so the caret snaps beside the code the hint annotates.
+    fn buffer_col_at_display(&self, line: usize, base: usize, visible_cells: usize) -> usize {
+        self.sync_tab_cells();
         let line_len = self.line_char_len(line);
-        let hints = self.row_inlay_spans(line);
-        if hints.is_empty() {
-            return display_col.min(line_len);
-        }
-        let mut c = self.scroll_col;
-        while c < line_len {
-            let extra: usize = hints
+        let base = base.min(line_len);
+        let text = self.lines.get(line).map_or("", String::as_str);
+        let mut row = RowCells::default();
+        row.fill(
+            &text[byte_index_of_char(text, base)..],
+            base,
+            self.row_origin(text, base),
+            self.row_inlay_spans(line)
                 .iter()
-                .filter(|(hc, _, _)| *hc >= self.scroll_col && *hc <= c)
-                .map(|(_, l, _)| l.chars().count())
-                .sum();
-            if c + extra >= display_col {
-                break;
-            }
+                .filter(|(hc, _, _)| *hc >= base)
+                .map(|(hc, l, _)| (*hc, l.chars().count())),
+        );
+        let mut c = base;
+        while c < line_len && row.cell(c) < visible_cells {
             c += 1;
         }
-        c.min(line_len)
+        c
     }
 
     pub fn word_at(&self, line: usize, col: usize) -> Option<(usize, usize)> {
@@ -16258,7 +17416,8 @@ impl Editor {
 
     /// Severities and messages of every diagnostic whose range covers the
     /// character position, each message followed by its rule as
-    /// `source(code)` and the rule's link on a line of its own (#1540).
+    /// `source(code)` and the rule's link on a line of its own (#1540), then
+    /// a line per related location (#1523), its file relative to `root`.
     /// The position is `(line, ch)`. Decoded on demand from the retained
     /// `diagnostics` (UTF-16 positions) rather than the per-line span cache so
     /// the messages don't have to be duplicated into the render-time cache.
@@ -16270,6 +17429,7 @@ impl Editor {
         &self,
         line: usize,
         ch: usize,
+        root: &Path,
     ) -> Vec<(crate::lsp::manager::DiagnosticSeverity, String)> {
         if self.diagnostics_path.as_deref() != self.path.as_deref() {
             return Vec::new();
@@ -16296,7 +17456,12 @@ impl Editor {
             };
             let to = to.max(from + 1);
             if ch >= from && ch < to {
-                out.push((d.severity, message_with_code(d)));
+                let mut text = message_with_code(d);
+                for related in d.related() {
+                    text.push('\n');
+                    text.push_str(&related.label(root));
+                }
+                out.push((d.severity, text));
             }
         }
         out
@@ -16449,7 +17614,7 @@ pub(crate) fn is_word_char(c: char) -> bool {
 /// (#909): a word char, or a zero-width mark riding on one (a combining
 /// accent in decomposed text, a variation selector), so `Ctrl+Right` never
 /// stops between `e` and its accent for `Ctrl+Backspace` to split them.
-fn word_char_at(chars: &[char], i: usize) -> bool {
+pub(crate) fn word_char_at(chars: &[char], i: usize) -> bool {
     let joins = |c: char| !c.is_control() && unicode_width::UnicodeWidthChar::width(c) == Some(0);
     let base = (0..=i)
         .rev()
@@ -16792,10 +17957,14 @@ fn text_end(start: (usize, usize), text: &str) -> (usize, usize) {
 
 /// Title-case a string: the first alphanumeric of each run is upper-cased,
 /// the rest lower-cased, separators preserved. Used by Transform to Title
-/// Case.
+/// Case. An apostrophe (`'` or `’`) right after a letter stays inside the
+/// word, so `don't` and `journey's` keep a lower-case tail (#1016); one at
+/// the start of a word (`'tis`) still lets the next letter start it, as in
+/// VS Code.
 fn title_case(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut prev_alnum = false;
+    let mut prev_letter = false;
     for c in s.chars() {
         if c.is_alphanumeric() {
             if prev_alnum {
@@ -16804,9 +17973,15 @@ fn title_case(s: &str) -> String {
                 out.extend(c.to_uppercase());
             }
             prev_alnum = true;
+            prev_letter = c.is_alphabetic();
+        } else if matches!(c, '\'' | '\u{2019}') && prev_letter {
+            // `prev_alnum` stays set: the letter after it continues the word.
+            out.push(c);
+            prev_letter = false;
         } else {
             out.push(c);
             prev_alnum = false;
+            prev_letter = false;
         }
     }
     out
@@ -17926,41 +19101,6 @@ fn emmet_profile_for(
     }
 }
 
-/// Display name for a language mode, matching VS Code's status-bar labels.
-/// `None` is a buffer with no recognised grammar.
-pub fn language_label(lang: Option<LangKind>) -> &'static str {
-    match lang {
-        None => "Plain Text",
-        Some(LangKind::Rust) => "Rust",
-        Some(LangKind::Python) => "Python",
-        Some(LangKind::JavaScript) => "JavaScript",
-        Some(LangKind::TypeScript) => "TypeScript",
-        Some(LangKind::Tsx) => "TypeScript JSX",
-        Some(LangKind::Json) => "JSON",
-        Some(LangKind::Xml) => "XML",
-        Some(LangKind::Toml) => "TOML",
-        Some(LangKind::Yaml) => "YAML",
-        Some(LangKind::Markdown) => "Markdown",
-        Some(LangKind::Go) => "Go",
-        Some(LangKind::Html) => "HTML",
-        Some(LangKind::Css) => "CSS",
-        Some(LangKind::Bash) => "Shell Script",
-        Some(LangKind::C) => "C",
-        Some(LangKind::Cpp) => "C++",
-        Some(LangKind::Lua) => "Lua",
-        Some(LangKind::Ql) => "CodeQL",
-        Some(LangKind::Dbscheme) => "CodeQL Database Scheme",
-        Some(LangKind::Java) => "Java",
-        Some(LangKind::Ruby) => "Ruby",
-        Some(LangKind::CSharp) => "C#",
-        Some(LangKind::Sql) => "SQL",
-        Some(LangKind::Make) => "Makefile",
-        Some(LangKind::Dockerfile) => "Dockerfile",
-        Some(LangKind::Vue) => "Vue",
-        Some(LangKind::Svelte) => "Svelte",
-    }
-}
-
 /// The VS Code language id for `lang`, used to scope user snippets (their
 /// `scope` field names these). Lowercase, matching VS Code's identifiers so a
 /// config copied from there just works.
@@ -18541,18 +19681,84 @@ fn is_wrap_break_after(c: char) -> bool {
         )
 }
 
+thread_local! {
+    /// Cells one `\t` is drawn as: the buffer's "Tab Size" (status bar), set
+    /// by [`Editor::sync_tab_cells`] before anything measures or paints text.
+    static TAB_CELLS: std::cell::Cell<usize> = const { std::cell::Cell::new(1) };
+}
+
+fn set_tab_cells(n: usize) {
+    TAB_CELLS.with(|t| t.set(n.max(1)));
+}
+
 /// Screen cells a char takes in the editor: its display width, with a tab
-/// drawn as one cell (the editor paints tabs as a single glyph).
+/// drawn as the buffer's Tab Size blank cells.
 fn char_cells(c: char) -> usize {
     if c == '\t' {
-        1
+        TAB_CELLS.with(std::cell::Cell::get)
     } else {
         unicode_width::UnicodeWidthChar::width(c).unwrap_or(0)
     }
 }
 
-fn cells_of(chars: &[char]) -> usize {
-    chars.iter().map(|&c| char_cells(c)).sum()
+/// Cells a tab takes when it starts at display cell `col` of its row: up to
+/// the next multiple of Tab Size, as in vim and VS Code, so text after a tab
+/// lines up whatever came before it.
+fn tab_cells_at(col: usize) -> usize {
+    let t = TAB_CELLS.with(std::cell::Cell::get).max(1);
+    t - col % t
+}
+
+/// Cells `c` takes when it starts at display cell `col`.
+fn char_cells_at(c: char, col: usize) -> usize {
+    if c == '\t' {
+        tab_cells_at(col)
+    } else {
+        char_cells(c)
+    }
+}
+
+/// Cells the grapheme cluster `cluster` takes when it starts at display cell
+/// `col`. ratatui paints a cluster as one glyph sized by the whole cluster
+/// (`crate::cell_map`): `👍🏽` is two cells, not four, and `❤️` two, not one.
+/// A lone character keeps [`char_cells_at`], so a tab runs to the next stop
+/// (a tab is always a cluster of its own).
+fn cluster_cells_at(cluster: &str, col: usize) -> usize {
+    let mut chars = cluster.chars();
+    match (chars.next(), chars.next()) {
+        (Some(c), None) => char_cells_at(c, col),
+        (Some(_), Some(_)) => unicode_width::UnicodeWidthStr::width(cluster),
+        (None, _) => 0,
+    }
+}
+
+/// Each character of `text` with the cells it takes when `text` starts at
+/// display cell `origin` of its row: a cluster's first character takes the
+/// whole cluster's cells ([`cluster_cells_at`]) and the rest none. Everything
+/// that measures text for tab stops goes through here, so the drawing, the
+/// caret and clicks agree on where a tab after an emoji ends.
+fn char_cells_from(text: &str, origin: usize) -> impl Iterator<Item = (char, usize)> + '_ {
+    use unicode_segmentation::UnicodeSegmentation;
+    let mut col = origin;
+    text.graphemes(true).flat_map(move |cluster| {
+        let w = cluster_cells_at(cluster, col);
+        col += w;
+        cluster
+            .chars()
+            .enumerate()
+            .map(move |(i, c)| (c, if i == 0 { w } else { 0 }))
+    })
+}
+
+/// Cells `text` takes from display cell `origin` of its row on.
+fn cells_from(text: &str, origin: usize) -> usize {
+    char_cells_from(text, origin).map(|(_, w)| w).sum()
+}
+
+/// Display cells of the first `chars` characters of `line`, from the line's
+/// left edge: where its character number `chars` starts.
+fn cells_before(line: &str, chars: usize) -> usize {
+    cells_from(&line[..byte_index_of_char(line, chars)], 0)
 }
 
 /// `text` as the editor paints it: each tab as the blank cells it takes
@@ -18560,65 +19766,79 @@ fn cells_of(chars: &[char]) -> usize {
 /// count for it. ratatui drops control characters, so a raw tab took no
 /// cell and the text after it slid left under all of them (#891).
 fn blank_tabs(text: &str) -> std::borrow::Cow<'_, str> {
-    if text.contains('\t') {
-        text.replace('\t', &" ".repeat(char_cells('\t'))).into()
-    } else {
-        text.into()
+    blank_tabs_from(text, 0)
+}
+
+/// [`blank_tabs`] for text that starts at display cell `origin` of its row,
+/// so each tab fills up to the next tab stop.
+fn blank_tabs_from(text: &str, origin: usize) -> std::borrow::Cow<'_, str> {
+    if !text.contains('\t') {
+        return text.into();
     }
+    let mut out = String::with_capacity(text.len() + 8);
+    for (c, w) in char_cells_from(text, origin) {
+        if c == '\t' {
+            out.extend(std::iter::repeat_n(' ', w));
+        } else {
+            out.push(c);
+        }
+    }
+    out.into()
 }
 
 /// Soft-wrap a logical line into visual segments for word-wrap mode.
 ///
-/// Each segment is a half-open `(start_char, end_char)` range over `chars`;
-/// the segments tile the line with no gaps or overlaps, so the inverse maps
-/// (cursor -> screen, click -> cursor) stay exact. Breaks after the last
-/// break-after character at or before `width` when one exists (word wrap), and
-/// hard-breaks a single token longer than `width` at the column. A line that
-/// already fits, an empty line, or `width == 0` yields one segment so the line
-/// still occupies a row. Mirrors VS Code's monospace wrap: pick the rightmost
-/// break opportunity within the column, else split the over-long token.
-fn wrap_segments(chars: &[char], width: usize) -> Vec<(usize, usize)> {
-    if width == 0 || chars.len() <= width && cells_of(chars) <= width {
-        return vec![(0, chars.len())];
+/// Each segment is a half-open `(start_char, end_char)` range over the chars
+/// of `line`; the segments tile the line with no gaps or overlaps, so the
+/// inverse maps (cursor -> screen, click -> cursor) stay exact. Breaks after
+/// the last break-after character at or before `width` when one exists (word
+/// wrap), and hard-breaks a single token longer than `width` at the column. A
+/// line that already fits, an empty line, or `width == 0` yields one segment
+/// so the line still occupies a row. Mirrors VS Code's monospace wrap: pick
+/// the rightmost break opportunity within the column, else split the
+/// over-long token.
+fn wrap_segments(line: &str, width: usize) -> Vec<(usize, usize)> {
+    if width == 0 {
+        return vec![(0, line.chars().count())];
     }
     let mut segs = Vec::new();
-    let mut start = 0;
-    while start < chars.len() {
-        if cells_of(&chars[start..]) <= width {
-            segs.push((start, chars.len()));
-            break;
-        }
+    let (mut start, mut start_byte) = (0, 0);
+    loop {
+        // A wrapped row counts tab stops from its own left edge, so each row
+        // is measured as text of its own ([`char_cells_from`]). One pass per
+        // row and nothing kept per char: a huge one-line file wraps without
+        // a table the size of the file.
+        let row = &line[start_byte..];
+        let (mut end, mut end_byte, mut used) = (start, start_byte, 0);
+        // The rightmost break-after char so far, as the `(char, byte)` just
+        // past it; never right at the row's start, so a row is never one
+        // char by a break (or stalls).
+        let mut brk = None;
+        let mut fits = true;
         // The hard limit counts CELLS, as the renderer clips: counted in
         // chars, a row of wide (CJK) characters was twice as wide as the
         // pane and its second half was never shown on any row. At least one
         // char per row, so a char wider than the pane cannot stall.
-        let mut limit = start;
-        let mut used = 0;
-        while limit < chars.len() {
-            let w = char_cells(chars[limit]);
-            if used + w > width && limit > start {
+        for ((at, c), (_, w)) in row.char_indices().zip(char_cells_from(row, 0)) {
+            if used + w > width && end > start {
+                fits = false;
                 break;
             }
             used += w;
-            limit += 1;
-        }
-        // Scan back from the hard limit for the rightmost break-after char;
-        // `i` is the char count, so the char sits at `chars[i - 1]` and the
-        // segment becomes `[start, i)`. Stop at `start + 1` so a break right
-        // at the segment start can't produce a one-char row (or stall).
-        let mut brk = limit;
-        let mut i = limit;
-        while i > start + 1 {
-            if is_wrap_break_after(chars[i - 1]) {
-                brk = i;
-                break;
+            end += 1;
+            end_byte = start_byte + at + c.len_utf8();
+            if end > start + 1 && is_wrap_break_after(c) {
+                brk = Some((end, end_byte));
             }
-            i -= 1;
         }
-        segs.push((start, brk));
-        start = brk;
+        if fits {
+            segs.push((start, end));
+            return segs;
+        }
+        (end, end_byte) = brk.unwrap_or((end, end_byte));
+        segs.push((start, end));
+        (start, start_byte) = (end, end_byte);
     }
-    segs
 }
 
 /// Map 1-based bookmark `marks` across a buffer change from `old` to `new`.
@@ -18662,6 +19882,24 @@ fn line_mapper<'a>(
                 .next()
         })
     }
+}
+
+/// `marks` (1-based lines of `old`) carried to the lines they sit on in
+/// `new`, another copy of the same file: a second tab of it whose unsaved
+/// edits differ, or the file on disk under a buffer whose edits are being
+/// discarded. Each mark moves as an edit from `old` to `new` would move it
+/// (see [`line_mapper`]): one on a line deleted outright is dropped, and one
+/// on a line edited in place stays on that line, as it does while typing.
+pub fn carry_marks(
+    marks: &std::collections::BTreeSet<usize>,
+    old: &[String],
+    new: &[String],
+) -> std::collections::BTreeSet<usize> {
+    if old == new {
+        return marks.clone();
+    }
+    let map = line_mapper(old, new);
+    marks.iter().filter_map(|&line| map(line)).collect()
 }
 
 /// The line mapping behind [`shift_bookmark_lines`].
@@ -18987,29 +20225,40 @@ fn merge_overlay(base: &[HiSpan], over: &[HiSpan]) -> Vec<HiSpan> {
     out
 }
 
-fn build_line_spans<'a>(line: &'a str, spans: &[HiSpan]) -> Vec<Span<'a>> {
+/// `origin` is the display cell `line` starts at in its row (tab stops).
+fn build_line_spans<'a>(line: &'a str, spans: &[HiSpan], origin: usize) -> Vec<Span<'a>> {
     if spans.is_empty() {
-        return vec![Span::raw(blank_tabs(line))];
+        return vec![Span::raw(blank_tabs_from(line, origin))];
     }
     let mut out: Vec<Span> = Vec::with_capacity(spans.len() * 2);
     let mut cursor = 0usize;
+    // Display cells painted so far, from the row's left edge.
+    let mut col = origin;
+    let mut push = |out: &mut Vec<Span<'a>>, text: &'a str, style: Option<Style>| {
+        let shown = blank_tabs_from(text, col);
+        col += cells_from(text, col);
+        out.push(match style {
+            Some(st) => Span::styled(shown, st),
+            None => Span::raw(shown),
+        });
+    };
     for sp in spans {
         let range = sp.range();
         if range.start > cursor && range.start <= line.len() {
             let slice = &line[cursor..range.start];
             if !slice.is_empty() {
-                out.push(Span::raw(blank_tabs(slice)));
+                push(&mut out, slice, None);
             }
         }
         let s = range.start.min(line.len());
         let e = range.end.min(line.len());
         if e > s {
-            out.push(Span::styled(blank_tabs(&line[s..e]), sp.style));
+            push(&mut out, &line[s..e], Some(sp.style));
             cursor = e;
         }
     }
     if cursor < line.len() {
-        out.push(Span::raw(blank_tabs(&line[cursor..])));
+        push(&mut out, &line[cursor..], None);
     }
     out
 }
@@ -19017,6 +20266,7 @@ fn build_line_spans<'a>(line: &'a str, spans: &[HiSpan]) -> Vec<Span<'a>> {
 impl Widget for &mut Editor {
     fn render(self, area: Rect, buf: &mut Buffer) {
         self.clamp_to_symbol_view();
+        self.sync_tab_cells();
         let block_style = if self.focused {
             Style::default().fg(self.theme.ui(Color::Rgb(0x4e, 0x9a, 0xff)))
         } else {
@@ -19035,9 +20285,16 @@ impl Widget for &mut Editor {
         // Black theme: replace the solid focus border with the orange→green
         // gradient that matches the welcome activity box. The editor has no
         // title, so nothing needs re-stamping over the gradient top edge.
-        // Croft Loch marks focus with a rule along the top edge instead.
-        if self.focused && surfaces {
-            crate::widgets::surface::paint_focus_rule(buf, area, self.theme);
+        // Croft Loch always draws the seam under the header along the top
+        // edge, and lights it with the accent lip only while the editor has
+        // the keyboard: a modal quick input above it takes the lip away.
+        if surfaces {
+            crate::widgets::surface::paint_pane_top(
+                buf,
+                area,
+                self.theme,
+                self.focused && !self.overlay_has_keyboard,
+            );
         } else if self.focused && self.focus_gradient {
             crate::gradient::paint_gradient_box(buf, area);
         }
@@ -19047,6 +20304,7 @@ impl Widget for &mut Editor {
         self.last_hscrollbar = Rect::default();
         self.merge_action_spans.clear();
         self.code_lens_spans.clear();
+        self.blame_span = None;
         // Every rect this frame publishes is cleared up front, so a frame
         // that paints nothing leaves nothing behind for the mouse path to
         // hit-test against. `render_log` sets its own when it paints; the
@@ -19162,7 +20420,8 @@ impl Widget for &mut Editor {
             return;
         }
         if let Some(diff) = self.diff.as_mut() {
-            let (prev_arrow, next_arrow) = render_diff(diff, inner, buf, cbg, self.theme);
+            let (prev_arrow, next_arrow) =
+                render_diff(diff, inner, buf, cbg, self.theme, self.pointer);
             self.diff_prev_arrow = prev_arrow;
             self.diff_next_arrow = next_arrow;
             return;
@@ -19218,7 +20477,6 @@ impl Widget for &mut Editor {
             self.scroll_col = 0;
         }
         let text_x = inner.x + gutter_width + 1;
-        let content_cols = self.content_cols();
 
         // Layout has a small cycle: the horizontal bar takes the bottom row
         // only when a line overflows the text column, but the text column's
@@ -19234,6 +20492,7 @@ impl Widget for &mut Editor {
             .width
             .saturating_sub(gutter_width + 2 + u16::from(self.lines.len() > height))
             as usize;
+        let content_cols = self.content_cols(provisional_text_width);
         let hbar_present =
             !wrap && provisional_text_width > 0 && content_cols > provisional_text_width;
         let text_height = height - usize::from(hbar_present);
@@ -19365,6 +20624,9 @@ impl Widget for &mut Editor {
 
         // Clamp horizontal scroll (non-wrap only) so a wheel swipe can't
         // strand the buffer off-screen, then lay out the horizontal bar.
+        // The extent depends on the width it is measured against, and the
+        // final text column may be narrower than the provisional one.
+        let content_cols = self.content_cols(text_width as usize);
         let max_scroll_col = content_cols.saturating_sub(text_width as usize);
         self.scroll_col = self.scroll_col.min(max_scroll_col);
         let hbar_metrics = scrollbar::horizontal_metrics(
@@ -19515,6 +20777,17 @@ impl Widget for &mut Editor {
             .flatten();
         let guide_fg = self.theme.indent_guide();
         let guide_active_fg = self.theme.indent_guide_active();
+        // A `surfaces` theme keeps the gutter quiet: an expanded fold's
+        // chevron shows on the caret's line, or on every foldable line while
+        // the pointer is over the gutter (VS Code's `showFoldingControls:
+        // mouseover`); the change bar hugs the code edge as a quarter block.
+        let surfaces = self.theme.surfaces().is_some();
+        let gutter_hovered = self.pointer.is_some_and(|(px, py)| {
+            px >= inner.x
+                && px <= inner.x + gutter_width
+                && py >= inner.y
+                && py < inner.y + inner.height
+        });
         // Each text row's geometry, refilled per row (#873).
         let mut row_cells = RowCells::default();
 
@@ -19586,7 +20859,7 @@ impl Widget for &mut Editor {
                         self.theme.ui(Color::Rgb(0xa0, 0x55, 0x55))
                     }
                     None if self.is_caret_line(line_idx) => self.theme.line_number_active(),
-                    None => Color::DarkGray,
+                    None => self.theme.line_number_fg(),
                 };
                 let gutter = Line::from(Span::styled(line_no, Style::default().fg(number_fg)));
                 buf.set_line(inner.x, y, &gutter, gutter_width);
@@ -19715,15 +20988,23 @@ impl Widget for &mut Editor {
             // second sign-margin column (`sign_x + 1`) so it never collides with
             // a breakpoint dot at `sign_x`. ▾ = expanded, ▸ = collapsed; the
             // collapsed one is brighter so hidden content is noticeable. Matches
-            // the gutter's own DarkGray line numbers (which are theme-agnostic).
+            // the gutter's own line numbers. On a `surfaces` theme the
+            // expanded one waits for the caret or the pointer, and the
+            // collapsed one, always shown, wears the muted ink.
             if (!wrap || row_start == 0) && self.is_foldable(line_idx) {
                 let collapsed = self.folded.contains(&line_idx);
-                let (glyph, color) = if collapsed {
-                    ("▸", self.theme.ui(Color::Gray))
+                let glyph = if collapsed {
+                    let ink = crate::widgets::surface::tones(self.theme)
+                        .map_or_else(|| self.theme.ui(Color::Gray), |t| t.muted());
+                    Some(("▸", ink))
+                } else if !surfaces || gutter_hovered || self.is_caret_line(line_idx) {
+                    Some(("▾", self.theme.line_number_fg()))
                 } else {
-                    ("▾", Color::DarkGray)
+                    None
                 };
-                buf.set_string(sign_x + 1, y, glyph, Style::default().fg(color));
+                if let Some((glyph, color)) = glyph {
+                    buf.set_string(sign_x + 1, y, glyph, Style::default().fg(color));
+                }
             }
 
             // Git gutter: a thin coloured bar in the spacer cell between the
@@ -19740,12 +21021,11 @@ impl Widget for &mut Editor {
                     GitMark::Modified => self.theme.git_modified(),
                     GitMark::Deleted => self.theme.git_deleted(),
                 };
-                buf.set_string(
-                    inner.x + gutter_width,
-                    y,
-                    "\u{2503}", // ┃ heavy vertical
-                    Style::default().fg(color),
-                );
+                // ┃ heavy vertical; ▎ left quarter block on a `surfaces`
+                // theme, a crisp stripe on the cell edge rather than a line
+                // through its middle.
+                let bar = if surfaces { "\u{258e}" } else { "\u{2503}" };
+                buf.set_string(inner.x + gutter_width, y, bar, Style::default().fg(color));
             }
             // Coverage lens (#263): the same lane, painted over the git bar
             // while a coverage report is shown. Green run, red never run,
@@ -19783,10 +21063,13 @@ impl Widget for &mut Editor {
                 && let Some(seat) = self.provenance.seat(line_idx)
             {
                 let (r, g, b) = seat.hue();
+                // ▎ left one-quarter block; ▏ one-eighth on a `surfaces`
+                // theme, whose change bar already takes the quarter block.
+                let bar = if surfaces { "\u{258f}" } else { "\u{258e}" };
                 buf.set_string(
                     inner.x + gutter_width,
                     y,
-                    "\u{258e}", // ▎ left one-quarter block
+                    bar,
                     Style::default().fg(self.theme.ui(Color::Rgb(r, g, b))),
                 );
             }
@@ -19802,11 +21085,10 @@ impl Widget for &mut Editor {
             let byte_end = byte_index_of_char(raw, row_end);
             // A wrapped row's width in CELLS, which is what the painters clip
             // by: its char count cut a row of wide characters in half.
-            let row_width = if wrap {
-                let cells: usize = raw[byte_start..byte_end].chars().map(char_cells).sum();
+            let row_origin = self.row_origin(raw, row_start);
+            let row_width = {
+                let cells: usize = cells_from(&raw[byte_start..byte_end], row_origin);
                 cells.max(row_end - row_start).min(text_width as usize) as u16
-            } else {
-                (row_end - row_start) as u16
             };
             let visible_raw = &raw[byte_start..byte_end];
             let seg_bytes = byte_end - byte_start;
@@ -19829,6 +21111,7 @@ impl Widget for &mut Editor {
             row_cells.fill(
                 visible_raw,
                 row_start,
+                row_origin,
                 self.row_inlay_spans(line_idx)
                     .iter()
                     .filter(|(hc, _, _)| *hc >= row_start && *hc <= hint_cap)
@@ -19841,7 +21124,7 @@ impl Widget for &mut Editor {
                     .into_iter()
                     .filter_map(|sp| sp.clipped(seg_bytes))
                     .collect();
-                let spans = build_line_spans(visible_raw, &shifted);
+                let spans = build_line_spans(visible_raw, &shifted, row_origin);
                 buf.set_line(text_x, y, &Line::from(spans), row_width);
             } else {
                 // Splice each hint label between the text segments it splits.
@@ -19858,7 +21141,13 @@ impl Widget for &mut Editor {
                     .filter(|(hc, _, _)| *hc >= row_start && *hc <= hint_cap)
                 {
                     if *hcol > from {
-                        out.extend(inlay_text_segment(raw, &merged, from, *hcol));
+                        out.extend(inlay_text_segment(
+                            raw,
+                            &merged,
+                            (row_start, row_origin),
+                            from,
+                            *hcol,
+                        ));
                     }
                     // A color swatch paints in ITS color (#254); plain
                     // hints keep the dim italic Zed look.
@@ -19870,7 +21159,13 @@ impl Widget for &mut Editor {
                     from = from.max(*hcol);
                 }
                 if row_end > from {
-                    out.extend(inlay_text_segment(raw, &merged, from, row_end));
+                    out.extend(inlay_text_segment(
+                        raw,
+                        &merged,
+                        (row_start, row_origin),
+                        from,
+                        row_end,
+                    ));
                 }
                 buf.set_line(text_x, y, &Line::from(out), row_width);
             }
@@ -19938,11 +21233,25 @@ impl Widget for &mut Editor {
             // in the flat path `row_start` is the horizontal scroll and
             // translates the columns like every other painter here.
             if self.show_indent_guides && (!wrap || row_start == 0) {
-                for c in (0..self.guide_indent_width(line_idx)).step_by(guide_step) {
+                let (guide_width, guide_src) = self.guide_indent(line_idx);
+                // A blank line's guides sit where its neighbour's indentation
+                // is drawn, tabs and all, not one cell per level.
+                let src_cells;
+                let geometry = if guide_src == line_idx {
+                    &row_cells
+                } else {
+                    src_cells = RowCells::of_line_at(
+                        &self.lines[guide_src],
+                        row_start,
+                        self.row_origin(&self.lines[guide_src], row_start),
+                    );
+                    &src_cells
+                };
+                for c in (0..guide_width).step_by(guide_step) {
                     if c < row_start {
                         continue;
                     }
-                    let col = row_cells.cell(c);
+                    let col = geometry.cell(c);
                     if col >= usize::from(row_width) {
                         break;
                     }
@@ -19957,7 +21266,9 @@ impl Widget for &mut Editor {
                         _ => guide_fg,
                     };
                     cell.set_symbol("\u{2502}");
-                    let style = cell.style().fg(fg);
+                    // Not italic even over a comment: a slanted guide looks
+                    // broken, and the text's modifier is not the guide's.
+                    let style = cell.style().fg(fg).remove_modifier(Modifier::ITALIC);
                     cell.set_style(style);
                 }
             }
@@ -20016,7 +21327,8 @@ impl Widget for &mut Editor {
                         }
                         let cell = &mut buf[(text_x + col as u16, y)];
                         cell.set_symbol(glyph);
-                        let style = cell.style().fg(ws_fg);
+                        // The glyph marks whitespace, not comment text.
+                        let style = cell.style().fg(ws_fg).remove_modifier(Modifier::ITALIC);
                         cell.set_style(style);
                     }
                 }
@@ -20248,6 +21560,13 @@ impl Widget for &mut Editor {
                             .fg(self.theme.ignored_fg())
                             .add_modifier(Modifier::ITALIC),
                     );
+                    // Hover and click reach the commit it names (#1556);
+                    // `Uncommitted changes` has none to show.
+                    if let Some(LineBlame::Commit(c)) = self.cursor_line_blame() {
+                        let hash = c.hash.clone();
+                        let w = unicode_width::UnicodeWidthStr::width(shown.as_str()) as u16;
+                        self.blame_span = Some((y, start_x..(start_x + w).min(right), hash));
+                    }
                 }
             }
 
@@ -20275,6 +21594,23 @@ impl Widget for &mut Editor {
                 }
             }
 
+            // A language server's replacement strikes through the columns it
+            // takes the place of, and its text stands one cell clear of them.
+            let replaces = self
+                .live_ghost_full()
+                .and_then(|g| g.replaces.clone())
+                .filter(|_| self.focused && line_idx == self.cursor_row);
+            if let Some(r) = &replaces {
+                let (vs, ve) = (row_cells.cell(r.start), row_cells.end(r.end));
+                if ve > vs {
+                    let struck = crate::lsp::manager::DiagnosticTags {
+                        unnecessary: true,
+                        deprecated: true,
+                    };
+                    paint_diagnostic_tags(buf, text_x, y, row_width, vs, ve, struck);
+                }
+            }
+
             // Inline suggestion (#607): the first line as ghost text right at
             // the caret (suggestions are only asked for at a line's end); the
             // rest hang below as `VisRow::Ghost` rows (#1625), and only lines
@@ -20285,7 +21621,7 @@ impl Widget for &mut Editor {
                 && row_end >= line_len
                 && self.live_ghost().is_some();
             if ghost_here && let Some(text) = self.live_ghost() {
-                let text_cols = row_cells.cell(line_len);
+                let text_cols = row_cells.cell(line_len) + usize::from(replaces.is_some());
                 let x = text_x + text_cols as u16;
                 let right = inner.x + inner.width;
                 if x < right {
@@ -20424,7 +21760,7 @@ impl Widget for &mut Editor {
                         continue;
                     }
                     cell.set_symbol("\u{2502}");
-                    let style = cell.style().fg(ruler_fg);
+                    let style = cell.style().fg(ruler_fg).remove_modifier(Modifier::ITALIC);
                     cell.set_style(style);
                 }
             }
@@ -20471,6 +21807,7 @@ impl Widget for &mut Editor {
                 &caret_raw[byte_index_of_char(caret_raw, caret_start)
                     ..byte_index_of_char(caret_raw, caret_end)],
                 caret_start,
+                self.row_origin(caret_raw, caret_start),
                 self.row_inlay_spans(*cl)
                     .iter()
                     .filter(|(hc, _, _)| *hc >= caret_start && *hc <= hint_cap)
@@ -20538,7 +21875,7 @@ impl Widget for &mut Editor {
                     inner.x,
                     y,
                     &line_no,
-                    Style::default().fg(Color::DarkGray).bg(bg),
+                    Style::default().fg(self.theme.line_number_fg()).bg(bg),
                 );
                 self.paint_highlighted_line(buf, text_x, y, text_w, line as usize);
                 self.sticky_click_rows.push((y, line));
@@ -20574,8 +21911,10 @@ impl Editor {
     /// Paint the rendered Markdown preview: the pre-built lines flow through
     /// a wrapping `Paragraph` so paragraphs reflow with the pane, scrolled by
     /// the preview's own offset, with a scrollbar over the wrapped height.
-    /// Rebuilds first when the buffer moved under the preview (a live edit in
-    /// a split, an external reload) so it always shows the current text.
+    /// Rebuilds first when the buffer moved under the preview (an edit, an
+    /// external reload) so it always shows the current text. A preview to
+    /// the side shows its source pane's text, which the app hands it
+    /// (`App::sync_markdown_side_previews`, #1605).
     fn render_markdown_preview(&mut self, inner: Rect, buf: &mut Buffer) {
         let stale = self
             .markdown_preview
@@ -20588,26 +21927,7 @@ impl Editor {
         } else if stale {
             // The image-aware builder (#176): the plain one here left the
             // images list pointing at STALE anchors after a live edit.
-            let text = self.lines.join("\n");
-            let base = self
-                .path
-                .as_ref()
-                .and_then(|p| p.parent().map(|d| d.to_path_buf()));
-            let (lines, images, runnables, map, links) = crate::markdown::render_markdown_mapped(
-                &text,
-                self.theme,
-                &mut self.registry,
-                base.as_deref(),
-                self.md_outputs.clone(),
-            );
-            if let Some(md) = self.markdown_preview.as_mut() {
-                md.lines = lines;
-                md.source_map = map;
-                md.images = images;
-                md.runnables = runnables;
-                md.links = links;
-                md.built_seq = self.edit_seq;
-            }
+            self.rebuild_markdown_preview();
         }
         let Some(md) = self.markdown_preview.as_mut() else {
             return;
@@ -20750,7 +22070,7 @@ impl Editor {
             .into_iter()
             .filter_map(|sp| sp.clipped(raw_bytes))
             .collect();
-        let spans = build_line_spans(raw, &clamped);
+        let spans = build_line_spans(raw, &clamped, 0);
         buf.set_line(text_x, y, &Line::from(spans), width);
     }
 
@@ -20773,6 +22093,7 @@ impl Editor {
         if self.last_inner.height == 0 {
             return None;
         }
+        self.sync_tab_cells();
         let text_x = self.last_inner.x + self.last_gutter_width + 1;
         if self.wrap_enabled() {
             // Find the visual row holding the cursor in the layout the last
@@ -20793,8 +22114,8 @@ impl Editor {
             // text column: past the pane edge or onto the vertical scrollbar.
             // In cells, as the row was painted: wide characters before the
             // caret push it right by two each.
-            let visible_col =
-                RowCells::of_line(&self.lines[self.cursor_row], start).text_before(self.cursor_col);
+            let visible_col = RowCells::of_line_at(&self.lines[self.cursor_row], start, 0)
+                .text_before(self.cursor_col);
             let x = text_x as usize + visible_col;
             let right = (self.last_inner.x + self.last_inner.width)
                 .saturating_sub(u16::from(self.last_scrollbar.width > 0))
@@ -20831,8 +22152,14 @@ impl Editor {
         // (`hc < cursor_col`, not `<=`): a caret AT a hint's anchor sits left
         // of the hint, like VS Code, so typing there pushes the hint along.
         let extra = self.inlay_cells_before_cursor(self.cursor_row, self.scroll_col);
-        let visible_col = self.cursor_col - self.scroll_col + extra;
-        if (visible_col as u16) >= text_width {
+        let visible_col = self
+            .lines
+            .get(self.cursor_row)
+            .map_or(self.cursor_col - self.scroll_col, |l| {
+                RowCells::of_line(l, self.scroll_col).text_before(self.cursor_col)
+            })
+            + extra;
+        if visible_col >= text_width as usize {
             return None;
         }
         Some((
@@ -20895,8 +22222,16 @@ impl Editor {
         if text_w == 0 || char_col < diff.scroll_x {
             return None;
         }
-        let vis_col = char_col - diff.scroll_x;
-        if vis_col as u16 >= text_w {
+        // Cells, not chars: a tab before the caret is Tab Size cells wide.
+        self.sync_tab_cells();
+        let line = diff_side_line(diff, row_idx, side);
+        let from = byte_index_of_char(line, diff.scroll_x);
+        let to = byte_index_of_char(line, char_col.max(diff.scroll_x));
+        let drawn = cells_from(&line[from..to], cells_from(&line[..from], 0));
+        let line_len = line.chars().count();
+        // Past the end of the text the caret counts one cell per char.
+        let vis_col = drawn + char_col.saturating_sub(line_len.max(diff.scroll_x));
+        if vis_col >= usize::from(text_w) {
             return None;
         }
         Some((text_x + vis_col as u16, body_top + vis_row as u16))
@@ -20947,34 +22282,37 @@ impl RowCells {
     /// The geometry of a row showing `line` from buffer column `start`, with
     /// no inlay hints.
     fn of_line(line: &str, start: usize) -> Self {
+        Self::of_line_at(line, start, cells_before(line, start))
+    }
+
+    /// [`Self::of_line`] for a row whose first cell is display cell `origin`
+    /// of its tab stops: 0 for a wrapped row, the cells scrolled past for a
+    /// horizontally scrolled one.
+    fn of_line_at(line: &str, start: usize, origin: usize) -> Self {
         let mut row = Self::default();
-        row.fill(&line[byte_index_of_char(line, start)..], start, []);
+        row.fill(&line[byte_index_of_char(line, start)..], start, origin, []);
         row
     }
 
     /// Refill for a row painting `text` from buffer column `start` with
     /// `hints` spliced in, reusing the allocations.
-    fn fill(&mut self, text: &str, start: usize, hints: impl IntoIterator<Item = (usize, usize)>) {
-        use unicode_segmentation::UnicodeSegmentation;
+    fn fill(
+        &mut self,
+        text: &str,
+        start: usize,
+        origin: usize,
+        hints: impl IntoIterator<Item = (usize, usize)>,
+    ) {
         self.start = start;
         self.before.clear();
         self.before.push(0);
         let mut cells = 0;
-        // ratatui paints a grapheme cluster as one glyph sized by the whole
-        // cluster (`crate::cell_map`): `👍🏽` is two cells, not four, and `❤️`
-        // two, not one. The cluster's first character takes those cells and
-        // the rest none; a lone character keeps `char_cells`.
-        for cluster in text.graphemes(true) {
-            let mut chars = cluster.chars();
-            let first = chars.next().map_or(0, char_cells);
-            cells += match chars.clone().next() {
-                None => first,
-                Some(_) => unicode_width::UnicodeWidthStr::width(cluster),
-            };
+        // Tab stops count from the row's left edge, `origin` cells before its
+        // first character. A grapheme cluster's first character takes the
+        // whole cluster's cells and the rest none ([`char_cells_from`]).
+        for (_, w) in char_cells_from(text, origin) {
+            cells += w;
             self.before.push(cells);
-            for _ in chars {
-                self.before.push(cells);
-            }
         }
         self.hints.clear();
         self.hints.extend(hints);
@@ -21052,6 +22390,7 @@ fn paint_row_cells(
 fn inlay_text_segment<'a>(
     raw: &'a str,
     merged: &[HiSpan],
+    row: (usize, usize),
     from: usize,
     to: usize,
 ) -> Vec<Span<'a>> {
@@ -21063,11 +22402,17 @@ fn inlay_text_segment<'a>(
         .into_iter()
         .filter_map(|sp| sp.clipped(seg_bytes))
         .collect();
-    build_line_spans(seg, &shifted)
+    // Tab stops count from the row's left edge: its first char is `row.0`,
+    // which sits at display cell `row.1` (hint labels do not count).
+    let row_start = byte_index_of_char(raw, row.0).min(byte_from);
+    let origin = row.1 + cells_from(&raw[row_start..byte_from], row.1);
+    build_line_spans(seg, &shifted, origin)
 }
 
 /// The (inactive, active) find-highlight styles, shared by the editor's
-/// highlighter and the rendered log's so the two tabs read the same.
+/// highlighter and the rendered log's so the two tabs read the same. A
+/// boxed theme's solid blocks; Croft Loch tints each cell instead
+/// ([`crate::widgets::surface::match_style`]).
 fn search_highlight_styles(theme: crate::theme::Theme) -> (Style, Style) {
     let inactive = Style::default()
         .fg(Color::Black)
@@ -21128,6 +22473,17 @@ fn paint_search_highlight(
         return;
     }
     let (inactive_style, active_style) = search_highlight_styles(theme);
+    // Croft Loch tints each matched cell's own background amber and keeps
+    // its syntax ink where it stays legible ([`surface::match_style`]); a
+    // boxed theme stamps the solid find style over it.
+    let tones = crate::widgets::surface::tones(theme);
+    let restyle = |active: bool| {
+        move |s: Style| match tones {
+            Some(t) => crate::widgets::surface::match_style(s, t, theme, active),
+            None if active => active_style,
+            None => inactive_style,
+        }
+    };
     let segments = crate::widgets::search::split_for_highlight(raw_line, needle, opts);
     // `abs_col` tracks the absolute character index in the original line.
     // Columns before the row's start are scrolled out; the rest map
@@ -21140,11 +22496,7 @@ fn paint_search_highlight(
         if is_match && in_window {
             let is_active =
                 active_match_on_line.is_some_and(|(c, l)| c == abs_col && l == chunk_cols);
-            let style = if is_active {
-                active_style
-            } else {
-                inactive_style
-            };
+            let style = restyle(is_active);
             for c in 0..chunk_cols {
                 let absolute = abs_col + c;
                 if absolute < row.start {
@@ -21154,20 +22506,13 @@ fn paint_search_highlight(
                 // so its band goes through the same cell map the text did;
                 // the editor's text path goes through its row geometry.
                 if let Some(cells) = cells {
-                    if !paint_log_cells(
-                        buf,
-                        text_x,
-                        text_x + text_width,
-                        y,
-                        cells,
-                        absolute,
-                        |_| style,
-                    ) {
+                    if !paint_log_cells(buf, text_x, text_x + text_width, y, cells, absolute, style)
+                    {
                         break;
                     }
                     continue;
                 }
-                if !paint_row_cells(buf, text_x, y, text_width, row, absolute, |_| style) {
+                if !paint_row_cells(buf, text_x, y, text_width, row, absolute, style) {
                     break;
                 }
             }
@@ -21232,10 +22577,13 @@ fn paint_block_cursor(
         return;
     }
     let cell = &mut buf[(text_x + col as u16, y)];
+    // The glyph under the block takes the canvas on a `surfaces` theme
+    // rather than the host palette's named black.
+    let fg = crate::widgets::surface::tones(theme).map_or(Color::Black, |t| t.canvas());
     cell.set_style(
         Style::default()
-            .fg(Color::Black)
-            .bg(theme.ui(Color::Rgb(0xae, 0xc6, 0xff)))
+            .fg(fg)
+            .bg(theme.secondary_caret_bg())
             .add_modifier(Modifier::BOLD),
     );
 }
@@ -21925,6 +23273,10 @@ fn paint_diagnostic_tags(
 pub struct Crumb {
     pub label: String,
     pub target: Option<(u32, u32)>,
+    /// The glyph and colour a `surfaces` theme draws before the label: the
+    /// file's type icon on the file crumb, the symbol kind's on a symbol
+    /// crumb, none on a folder. Not part of the crumb's hit range.
+    pub icon: Option<(char, Color)>,
 }
 
 /// A rendered breadcrumb crumb's hit-test span: `(x_start, width, jump target)`.
@@ -21975,6 +23327,9 @@ pub struct EditorTabs {
     /// tab is the only one — closing it isn't allowed so we hide the X).
     tab_close_x: Vec<u16>,
     tab_strip_y: u16,
+    /// Scroll and button state of the tab strip, boxed to keep this large
+    /// struct (a layout-tree leaf) under clippy's size-difference limit.
+    tab_strip: Box<TabStripState>,
     /// The full pane area (tab strip + body) from the most recent render.
     /// Used by `App::handle_mouse` for hit-testing — the active editor's
     /// own `last_area` only covers the body below the strip.
@@ -21996,6 +23351,10 @@ pub struct EditorTabs {
     pub hover_pointer: Option<(u16, u16)>,
     /// Handed to the active editor each frame: see [`Editor::cell_images`].
     pub cell_images: bool,
+    /// The bookmarks of the tabs closed since the App last took them
+    /// ([`Self::take_released_bookmarks`]), on the files' saved lines, so a
+    /// file's marks outlive the last tab that held them.
+    released_bookmarks: Vec<std::collections::HashMap<PathBuf, std::collections::BTreeSet<usize>>>,
 }
 
 impl EditorTabs {
@@ -22011,10 +23370,12 @@ impl EditorTabs {
             tab_screen_ranges: Vec::new(),
             tab_close_x: Vec::new(),
             tab_strip_y: 0,
+            tab_strip: Box::default(),
             last_full_area: Rect::default(),
             search_highlight_term: None,
             search_highlight_opts: crate::widgets::search::SearchOpts::default(),
             hover_pointer: None,
+            released_bookmarks: Vec::new(),
         }
     }
 
@@ -22048,6 +23409,53 @@ impl EditorTabs {
 
     pub fn active_index(&self) -> usize {
         self.active
+    }
+
+    /// The group's active tab, for callers that must act on the group without
+    /// hoisting it into App::editor (e.g. a wheel scroll over an inactive
+    /// split pane). editors is never empty, so this cannot fail.
+    pub fn active_editor_mut(&mut self) -> &mut Editor {
+        let active = self.active.min(self.editors.len().saturating_sub(1));
+        &mut self.editors[active]
+    }
+
+    /// Wheel-scroll this group's active tab by notches (positive = down),
+    /// mirroring what App does for the focused tab: a diff scrolls its own
+    /// pane, a PDF preview steps pages (clamped to the document), a hex view
+    /// scrolls by data rows, anything else scrolls text by notches lines.
+    /// Keeping the modes here means a background split group behaves like the
+    /// focused one instead of scrolling a buffer that isn't on screen.
+    pub fn wheel_scroll_active(&mut self, notches: i32) {
+        let ed = self.active_editor_mut();
+        if let Some(diff) = ed.diff.as_mut() {
+            if notches >= 0 {
+                diff.scroll_down_by(notches.unsigned_abs() as usize);
+            } else {
+                diff.scroll_up_by(notches.unsigned_abs() as usize);
+            }
+            return;
+        }
+        if let Some(page) = ed.pdf_page() {
+            // One page per wheel event, like the focused preview: the
+            // caller's notches are text lines (3 a tick), not pages.
+            let target = if notches >= 0 {
+                page.saturating_add(1)
+            } else {
+                page.saturating_sub(1).max(1)
+            };
+            ed.set_pdf_page(target);
+            return;
+        }
+        if let Some(view) = ed.hex.as_mut() {
+            let rows = (view.layout.data_rows as usize).max(1);
+            view.scroll_by(notches as i64, rows);
+            return;
+        }
+        if notches >= 0 {
+            ed.scroll_down(notches.unsigned_abs() as usize);
+        } else {
+            ed.scroll_up(notches.unsigned_abs() as usize);
+        }
     }
 
     /// The tab strip label for the tab at `idx` (file name, diff pair, or
@@ -22099,6 +23507,16 @@ impl EditorTabs {
         self.active = idx;
         self.editors[self.active].focused = true;
         true
+    }
+
+    /// [`Editor::trim_auto_indent`] over every tab (#956): the active one
+    /// keeps the line its caret is still on when `focused_group`, and every
+    /// other tab has been switched away from, so its line was left.
+    pub fn trim_auto_indents(&mut self, focused_group: bool) {
+        let active = self.active;
+        for (i, editor) in self.editors.iter_mut().enumerate() {
+            editor.trim_auto_indent(!(focused_group && i == active));
+        }
     }
 
     /// Sweep EVERY open tab (not just the active one) for external on-disk
@@ -22281,11 +23699,13 @@ impl EditorTabs {
             let was_focused = self.editors[0].focused;
             let mut fresh = Editor::new();
             fresh.focused = was_focused;
-            self.editors[0] = fresh;
+            let closed = std::mem::replace(&mut self.editors[0], fresh);
+            self.release_bookmarks(&closed);
             self.active = 0;
             return true;
         }
-        self.editors.remove(idx);
+        let closed = self.editors.remove(idx);
+        self.release_bookmarks(&closed);
         if self.active > idx {
             self.active -= 1;
         } else if self.active >= self.editors.len() {
@@ -22295,6 +23715,21 @@ impl EditorTabs {
             ed.focused = i == self.active;
         }
         true
+    }
+
+    /// Keep a closing tab's bookmarks for the App, which holds a file's
+    /// marks once no tab does.
+    fn release_bookmarks(&mut self, closed: &Editor) {
+        if !closed.bookmarks.is_empty() {
+            self.released_bookmarks.push(closed.bookmarks_on_disk());
+        }
+    }
+
+    /// The bookmarks of the tabs closed since the last call, oldest first.
+    pub fn take_released_bookmarks(
+        &mut self,
+    ) -> Vec<std::collections::HashMap<PathBuf, std::collections::BTreeSet<usize>>> {
+        std::mem::take(&mut self.released_bookmarks)
     }
 
     /// Close every tab whose index ≠ `keep_idx`, except pinned tabs, which
@@ -22316,6 +23751,8 @@ impl EditorTabs {
                 kept.push(ed);
             } else if ed.pinned || ed.dirty {
                 kept.push(ed);
+            } else {
+                self.release_bookmarks(&ed);
             }
         }
         let removed = before - kept.len();
@@ -22350,6 +23787,8 @@ impl EditorTabs {
                     new_active = Some(kept.len());
                 }
                 kept.push(ed);
+            } else {
+                self.release_bookmarks(&ed);
             }
         }
         let removed = before - kept.len();
@@ -22393,6 +23832,8 @@ impl EditorTabs {
                     new_active = kept.len();
                 }
                 kept.push(ed);
+            } else {
+                self.release_bookmarks(&ed);
             }
         }
         let removed = before - kept.len();
@@ -22422,6 +23863,47 @@ impl EditorTabs {
             }
         }
         None
+    }
+
+    /// Whether `(col, row)` is on the tab strip row of this group, tabs or the
+    /// gap after them.
+    pub fn tab_strip_contains(&self, col: u16, row: u16) -> bool {
+        let r = self.last_full_area;
+        row == self.tab_strip_y && col >= r.x && col < r.x + r.width
+    }
+
+    /// Reserve `cells` at the strip's right end for what the app paints there.
+    pub fn set_tab_reserved_right(&mut self, cells: u16) {
+        self.tab_strip.reserved_right = cells;
+    }
+
+    /// Whether `(col, row)` is on the "all open tabs" button.
+    pub fn tab_list_button_at(&self, col: u16, row: u16) -> bool {
+        let r = self.tab_strip.list_button;
+        r.width > 0 && row == r.y && col >= r.x && col < r.x + r.width
+    }
+
+    /// A wheel notch over the strip: [`Self::scroll_tabs`], but at most one tab
+    /// per [`TAB_WHEEL_GAP`] in a direction. A touchpad sends dozens of events
+    /// per swipe, which would otherwise fling the strip to its end.
+    pub fn scroll_tabs_wheel(&mut self, delta: isize) {
+        let now = std::time::Instant::now();
+        if let Some((at, dir)) = self.tab_strip.wheel_at
+            && dir == delta
+            && now.duration_since(at) < TAB_WHEEL_GAP
+        {
+            return;
+        }
+        self.tab_strip.wheel_at = Some((now, delta));
+        self.scroll_tabs(delta);
+    }
+
+    /// Scroll the tab strip by `delta` tabs (the wheel over it). The render
+    /// clamps the result to what still fills the strip.
+    pub fn scroll_tabs(&mut self, delta: isize) {
+        let last = self.editors.len().saturating_sub(1);
+        self.tab_strip.scroll = self.tab_strip.scroll.saturating_add_signed(delta).min(last);
+        self.tab_strip.revealed = Some((self.active, self.editors.len()));
     }
 
     /// Full filesystem path for a tab, used as the hover tooltip that
@@ -22721,7 +24203,8 @@ impl EditorTabs {
             if let Some(prev) = self.preview_index()
                 && prev != idx
             {
-                self.editors.remove(prev);
+                let dropped = self.editors.remove(prev);
+                self.release_bookmarks(&dropped);
                 let new_idx = if idx > prev { idx - 1 } else { idx };
                 // Bypass `select` here because the removal may have left
                 // `self.active` pointing past the end (when the active
@@ -23235,6 +24718,32 @@ impl DerefMut for EditorTabs {
 // derives colors for every manifest theme, so the strip follows the selected
 // theme instead of staying VS-Code navy. Only the label foregrounds stay
 // fixed: this muted grey and white are legible on all dark themes.
+/// The tab strip's scroll position and button, see `EditorTabs::tab_strip`.
+#[derive(Default)]
+struct TabStripState {
+    /// Index of the first tab drawn in the strip: it scrolls by tab when
+    /// there are more of them than fit (wheel over the strip, or the active
+    /// tab changing).
+    scroll: usize,
+    /// The `(active, tab count)` the strip last scrolled itself to reveal, so
+    /// a wheel scroll away from the active tab is not undone on the next
+    /// frame.
+    revealed: Option<(usize, usize)>,
+    /// Cells at the strip's right end the app paints over (the Customize
+    /// Layout icons); tabs stop short of them. Set before each render.
+    reserved_right: u16,
+    /// The "all open tabs" button at the right end of the tab area, drawn
+    /// only when the tabs do not all fit (otherwise empty).
+    list_button: Rect,
+    /// When and which way the wheel last moved the strip, so a touchpad's
+    /// flood of events moves it a tab at a time rather than all at once.
+    wheel_at: Option<(std::time::Instant, isize)>,
+}
+
+/// Cells the "all open tabs" button takes at the right end of a crowded strip.
+const TAB_LIST_W: u16 = 3;
+/// The least time between two tabs of wheel scrolling in one direction.
+const TAB_WHEEL_GAP: std::time::Duration = std::time::Duration::from_millis(90);
 const TAB_INACTIVE_FG: Color = Color::Rgb(0x9d, 0xa5, 0xb4);
 const TAB_ACTIVE_FG: Color = Color::White;
 
@@ -23252,6 +24761,138 @@ fn close_pill_fg(theme: crate::theme::Theme, pill: Color) -> Color {
         }
         _ => Color::White,
     }
+}
+
+/// The file-type icon a tab leads with on a `surfaces` theme: the
+/// Explorer's icon for its file (a diff tab's left side), the plain file
+/// icon for an untitled buffer.
+fn tab_icon(ed: &Editor) -> crate::icons::Icon {
+    let path = ed
+        .path
+        .as_deref()
+        .or_else(|| ed.diff.as_ref().map(|d| d.left_path.as_path()));
+    match path.and_then(|p| p.file_name().map(|n| (p, n))) {
+        Some((p, name)) => {
+            let suffix = p
+                .extension()
+                .map(|e| format!(".{}", e.to_string_lossy()))
+                .unwrap_or_default();
+            crate::icons::for_path(&name.to_string_lossy(), &suffix)
+        }
+        None => crate::icons::DEFAULT_FILE,
+    }
+}
+
+/// One visible tab of the strip on a `surfaces` theme, for
+/// [`paint_surface_tab`]: where it sits and the states its look follows.
+struct SurfaceTab<'a> {
+    /// The tab's first cell (its leading pad).
+    x: u16,
+    y: u16,
+    label: &'a str,
+    /// Where the label starts, after the pad, the icon and its gap.
+    label_x: u16,
+    /// The close / pin / dirty-dot cell, the tab's close hit target.
+    close_x: u16,
+    ed: &'a Editor,
+    theme: crate::theme::Theme,
+    t: crate::widgets::surface::Tones,
+    /// The tab body's fill: canvas when active, the hover lift, or chrome.
+    bg: Color,
+    is_active: bool,
+    /// The tab's group is the focused editor group.
+    group_focused: bool,
+    /// That group has the keyboard (focused, no modal over it).
+    has_keyboard: bool,
+    tab_hovered: bool,
+    on_close: bool,
+}
+
+/// Paint a tab as ` {icon} {label} {close} ` on a `surfaces` theme. Three
+/// inks and no bold: an inactive label is muted and lifts to body text
+/// under the pointer; the active tab is the region's one strong label in
+/// the focused group and body text in another, and only in the group with
+/// the keyboard does it wear the accent, as an underline under its label.
+/// The close cross is muted on the active or hovered tab and faint on the
+/// rest; a dirty file shows a dot in that slot until the pointer is on the
+/// tab, so the tab keeps one width whether its file is dirty or not.
+fn paint_surface_tab(buf: &mut Buffer, tab: SurfaceTab<'_>) {
+    let SurfaceTab {
+        x,
+        y,
+        label,
+        label_x,
+        close_x,
+        ed,
+        theme,
+        t,
+        bg,
+        is_active,
+        group_focused,
+        has_keyboard,
+        tab_hovered,
+        on_close,
+    } = tab;
+    let fill = Style::default().bg(bg);
+    let label_fg = if is_active {
+        if group_focused { t.strong() } else { t.text() }
+    } else if tab_hovered {
+        t.text()
+    } else {
+        t.muted()
+    };
+    // The pads and gaps first, so every cell of the tab wears its fill.
+    for cx in [x, x + 2, close_x - 1, close_x + 1] {
+        buf.set_string(cx, y, " ", fill);
+    }
+    // The icon in its own colour on the active or hovered tab, eased most
+    // of the way into the tab's fill on the others.
+    let icon = tab_icon(ed);
+    let icon_fg = match (theme.ui(icon.color), bg) {
+        (Color::Rgb(r, g, b), Color::Rgb(br, bgc, bb)) if !(is_active || tab_hovered) => {
+            crate::gradient::rgb_color(crate::gradient::lerp_rgb((r, g, b), (br, bgc, bb), 0.45))
+        }
+        (c, _) => c,
+    };
+    buf.set_string(
+        x + 1,
+        y,
+        icon.glyph.to_string(),
+        Style::default().fg(icon_fg).bg(bg),
+    );
+    let mut style = Style::default().fg(label_fg).bg(bg);
+    if ed.preview {
+        style = style.add_modifier(Modifier::ITALIC);
+    }
+    buf.set_string(label_x, y, label, style);
+    if is_active && has_keyboard {
+        let width = Span::raw(label).width() as u16;
+        for ux in label_x..label_x + width {
+            let cell = &mut buf[(ux, y)];
+            cell.modifier.insert(Modifier::UNDERLINED);
+            cell.underline_color = t.accent();
+        }
+    }
+    // The close slot: a thumb-tack on a pinned tab (clicking it unpins), a
+    // dot on a dirty one while the pointer is elsewhere, else the cross.
+    let (glyph, ink) = if ed.pinned {
+        ("\u{f08d}", t.muted())
+    } else if ed.dirty && !tab_hovered {
+        ("\u{25cf}", if is_active { t.text() } else { t.muted() })
+    } else if is_active || tab_hovered {
+        ("\u{2715}", t.muted())
+    } else {
+        ("\u{2715}", t.faint())
+    };
+    let close_style = if on_close {
+        // The pill names exactly the glyph the click will land on.
+        Style::default()
+            .fg(t.strong())
+            .bg(theme.tab_close_pill_bg())
+    } else {
+        Style::default().fg(ink).bg(bg)
+    };
+    buf.set_string(close_x, y, glyph, close_style);
 }
 
 impl Widget for &mut EditorTabs {
@@ -23317,7 +24958,6 @@ impl Widget for &mut EditorTabs {
         self.tab_strip_y = strip.y;
         self.tab_screen_ranges.clear();
         self.tab_close_x.clear();
-        let mut cursor_x = strip.x;
         let active = self.active;
         // Black theme (`focus_gradient` doubles as the theme flag): the
         // active tab wears the muted teal selection fill instead of the
@@ -23333,25 +24973,123 @@ impl Widget for &mut EditorTabs {
         }
         let active_tab_bg = theme.tab_active_bg();
         let pointer = self.hover_pointer;
-        let display_labels = disambiguated_tab_labels(&self.editors);
+        // A `surfaces` theme (Croft Loch) lays a tab out as
+        // ` {icon} {label} {close} `: a file-type icon leads the label, the
+        // dirty dot moves out of the label into the close slot (so a tab
+        // never changes width as its file goes dirty), and only the active
+        // tab of the group with the keyboard wears the accent, as an
+        // underline. Every other theme keeps ` {label} {close} `.
+        let tones = crate::widgets::surface::tones(theme);
+        let group_focused = self.editors[active].focused;
+        let has_keyboard = group_focused && !self.editors[active].overlay_has_keyboard;
+        let icon_w: u16 = if tones.is_some() { 2 } else { 0 };
+        let display_labels: Vec<String> = disambiguated_tab_labels(&self.editors)
+            .into_iter()
+            .zip(&self.editors)
+            .map(|(label, ed)| {
+                // The menus, status line and screen reader keep the `● `
+                // prefix (`tab_display_label`); only the strip drops it, and
+                // only where the close slot shows the dot instead: a pinned
+                // tab's slot holds the pin, so its label keeps the prefix.
+                match label.strip_prefix("\u{25cf} ") {
+                    Some(rest) if tones.is_some() && ed.dirty && !ed.pinned => rest.to_string(),
+                    _ => label,
+                }
+            })
+            .collect();
+        // Tabs never run under what the app paints at the strip's right end,
+        // and the strip scrolls by tab when they do not all fit.
+        let mut strip_right = strip.x
+            + strip
+                .width
+                .saturating_sub(self.tab_strip.reserved_right.min(strip.width));
+        let avail_full = usize::from(strip_right.saturating_sub(strip.x));
+        let widths: Vec<usize> = display_labels
+            .iter()
+            .map(|l| {
+                // Display CELLS, not chars (#168 review): a CJK file or
+                // directory name is double-width, and a char count shifted
+                // the close button and hit ranges left of the painted text.
+                // A pad either side, the close cell and a gap, plus the icon
+                // and its gap on a `surfaces` theme.
+                usize::from(Span::raw(l.as_str()).width() as u16) + 4 + usize::from(icon_w)
+            })
+            .collect();
+        let n = widths.len();
+        // Tabs that do not all fit get an "all open tabs" button in the last
+        // cells of the tab area, so the hidden ones stay reachable.
+        self.tab_strip.list_button = Rect::default();
+        if widths.iter().sum::<usize>() > avail_full && avail_full > usize::from(TAB_LIST_W) {
+            strip_right -= TAB_LIST_W;
+            self.tab_strip.list_button = Rect {
+                x: strip_right,
+                y: strip.y,
+                width: TAB_LIST_W,
+                height: 1,
+            };
+            let hovered = self.hover_pointer.is_some_and(|(px, py)| {
+                py == strip.y && px >= strip_right && px < strip_right + TAB_LIST_W
+            });
+            // As the layout icons beside it: the glyph goes from grey to the
+            // accent on hover, the cell keeps the strip's own background. On
+            // a `surfaces` theme it is a header action: muted at rest, the
+            // strong ink on a faint chip under the pointer.
+            let fg = if hovered {
+                theme.ui(Color::Rgb(0x4e, 0x9a, 0xff))
+            } else {
+                theme.ui(Color::Rgb(0xcc, 0xcc, 0xcc))
+            };
+            let mut style = Style::default().fg(fg).bg(theme.tab_strip_bg());
+            if tones.is_some() {
+                style = style.patch(crate::widgets::header_pill::action_style(theme, hovered));
+            }
+            buf.set_string(strip_right, strip.y, " \u{2261} ", style);
+        }
+        let avail = usize::from(strip_right.saturating_sub(strip.x));
+        // Last scroll that still fills the strip: past it the tail would leave
+        // blank room on the right while earlier tabs stay hidden.
+        let max_scroll = {
+            let mut first = n.saturating_sub(1);
+            let mut used = widths.get(first).copied().unwrap_or(0);
+            while first > 0 && used + widths[first - 1] <= avail {
+                first -= 1;
+                used += widths[first];
+            }
+            first
+        };
+        if self.tab_strip.revealed != Some((active, n)) {
+            self.tab_strip.revealed = Some((active, n));
+            if active < self.tab_strip.scroll {
+                self.tab_strip.scroll = active;
+            } else {
+                // Scroll right just far enough that the active tab fits whole.
+                while self.tab_strip.scroll < active
+                    && widths[self.tab_strip.scroll..=active].iter().sum::<usize>() > avail
+                {
+                    self.tab_strip.scroll += 1;
+                }
+            }
+        }
+        self.tab_strip.scroll = self.tab_strip.scroll.min(max_scroll);
+        let mut cursor_x = strip.x;
+        let mut hidden_rest = false;
         for (i, ed) in self.editors.iter().enumerate() {
             let label_text = display_labels[i].clone();
-            // Display CELLS, not chars (#168 review): a CJK file or
-            // directory name is double-width, and a char count shifted
-            // the close button and hit ranges left of the painted text.
             let label_chars = Span::raw(label_text.as_str()).width() as u16;
-            let pad: u16 = 1;
-            let close_pad: u16 = 2;
-            let width = label_chars
-                .saturating_add(pad * 2)
-                .saturating_add(close_pad);
-            if cursor_x.saturating_add(width) > strip.x + strip.width {
+            let width = widths[i] as u16;
+            if i < self.tab_strip.scroll
+                || hidden_rest
+                || usize::from(cursor_x.saturating_add(width)) > usize::from(strip_right)
+            {
+                // Scrolled off, or past the room: no cells, no hit range.
+                hidden_rest |= i >= self.tab_strip.scroll;
                 self.tab_screen_ranges.push((cursor_x, 0));
                 self.tab_close_x.push(0);
                 continue;
             }
             let is_active = i == active;
-            let close_x = cursor_x + 1 + label_chars + 1;
+            let label_x = cursor_x + 1 + icon_w;
+            let close_x = label_x + label_chars + 1;
             // Treatment C: the pointer resting anywhere on a tab lifts an
             // inactive tab's body (the active tab is already prominent), and
             // resting on the close cross gives that single cell a pill.
@@ -23367,6 +25105,31 @@ impl Widget for &mut EditorTabs {
             } else {
                 theme.tab_inactive_bg()
             };
+            if let Some(t) = tones {
+                paint_surface_tab(
+                    buf,
+                    SurfaceTab {
+                        x: cursor_x,
+                        y: strip.y,
+                        label: &label_text,
+                        label_x,
+                        close_x,
+                        ed,
+                        theme,
+                        t,
+                        bg,
+                        is_active,
+                        group_focused,
+                        has_keyboard,
+                        tab_hovered,
+                        on_close,
+                    },
+                );
+                self.tab_screen_ranges.push((cursor_x, width));
+                self.tab_close_x.push(close_x);
+                cursor_x = cursor_x.saturating_add(width);
+                continue;
+            }
             let fg = if is_active || hover_lift {
                 TAB_ACTIVE_FG
             } else {
@@ -23429,6 +25192,12 @@ impl Widget for &mut EditorTabs {
             }
             let max_x = area.x + area.width;
             let mut x = area.x + 1;
+            // On a `surfaces` theme the trail is in the theme's inks: faint
+            // separators, muted crumbs leading to the one you are in (the
+            // last) in body text, the file and symbol crumbs led by their
+            // icons.
+            let tones = crate::widgets::surface::tones(theme);
+            let last = self.breadcrumbs.len() - 1;
             for (i, crumb) in self.breadcrumbs.iter().enumerate() {
                 if i > 0 {
                     let sep = " \u{203A} "; // " › "
@@ -23436,19 +25205,31 @@ impl Widget for &mut EditorTabs {
                     if x + sw >= max_x {
                         break;
                     }
-                    buf.set_string(x, crumb_y, sep, Style::default().fg(Color::DarkGray).bg(bg));
+                    let sep_fg = tones.map_or(Color::DarkGray, |t| t.faint());
+                    buf.set_string(x, crumb_y, sep, Style::default().fg(sep_fg).bg(bg));
                     x += sw;
                 }
                 if x >= max_x {
                     break;
                 }
+                // The icon and its gap go before the label, outside its hit
+                // range, and only where a cell of the label still fits.
+                if tones.is_some()
+                    && let Some((glyph, color)) = crumb.icon
+                    && x + 2 < max_x
+                {
+                    let icon_style = Style::default().fg(theme.ui(color)).bg(bg);
+                    buf.set_string(x, crumb_y, glyph.to_string(), icon_style);
+                    x += 2;
+                }
                 let avail = (max_x - x) as usize;
                 // Symbol crumbs (clickable) read brighter than the informational
                 // path crumbs, mirroring VS Code's active/inactive breadcrumbs.
-                let fg = if crumb.target.is_some() {
-                    self.theme.ui(Color::Gray)
-                } else {
-                    Color::DarkGray
+                let fg = match tones {
+                    Some(t) if i == last => t.text(),
+                    Some(t) => t.muted(),
+                    None if crumb.target.is_some() => self.theme.ui(Color::Gray),
+                    None => Color::DarkGray,
                 };
                 // Budget and advance in display CELLS: `set_stringn` clips by
                 // grapheme width and reports where it stopped, so a CJK or
@@ -23824,7 +25605,7 @@ mod tests {
         uncommitted: bool,
     ) -> std::sync::Arc<crate::git::BlameCommit> {
         std::sync::Arc::new(crate::git::BlameCommit {
-            short_hash: "abc12345".into(),
+            hash: "abc12345".into(),
             summary: summary.into(),
             author: author.into(),
             age_secs: age,
@@ -25239,7 +27020,12 @@ mod tests {
         e.cursor_row = 0;
         e.cursor_col = 5;
         let wide: String = "\u{4e2d}".repeat(60);
-        e.ghost = Some((0, 5, e.edit_seq, format!("\n{wide}")));
+        e.ghost = Some(crate::inline_complete::Ghost::insert(
+            0,
+            5,
+            e.edit_seq,
+            format!("\n{wide}"),
+        ));
         let area = Rect {
             x: 0,
             y: 0,
@@ -25641,7 +27427,9 @@ mod tests {
 
     /// The provenance lens paints a bar in the seat's hue in the gutter's
     /// spacer cell (#349): two seats, two colours, and a line with no record
-    /// paints nothing there. Off, the lane is the git gutter's alone.
+    /// paints nothing there. Off, the lane is the git gutter's alone. On
+    /// Croft Loch (the default) the bar is the one-eighth block, the quarter
+    /// block being the change bar's there.
     #[test]
     fn provenance_overlay_paints_a_seat_coloured_bar_per_line() {
         use crate::provenance::Seat;
@@ -25661,7 +27449,7 @@ mod tests {
         let bar_x = e.last_inner.x + e.last_gutter_width;
         assert_ne!(
             buf[(bar_x, e.last_inner.y)].symbol(),
-            "\u{258e}",
+            "\u{258f}",
             "off, the lens paints nothing"
         );
         e.provenance_overlay = true;
@@ -25670,16 +27458,16 @@ mod tests {
         let me = &buf[(bar_x, e.last_inner.y)];
         let agent = &buf[(bar_x, e.last_inner.y + 1)];
         let unknown = &buf[(bar_x, e.last_inner.y + 2)];
-        assert_eq!(me.symbol(), "\u{258e}", "a line you typed gets a bar");
+        assert_eq!(me.symbol(), "\u{258f}", "a line you typed gets a bar");
         assert_eq!(
             agent.symbol(),
-            "\u{258e}",
+            "\u{258f}",
             "a line an agent typed gets a bar"
         );
         assert_ne!(me.style().fg, agent.style().fg, "in distinct hues");
         assert_ne!(
             unknown.symbol(),
-            "\u{258e}",
+            "\u{258f}",
             "a line with no record is never guessed"
         );
     }
@@ -25757,11 +27545,17 @@ mod tests {
         // cell at `inner.x + gutter_width`, one cell left of the text.
         let bar_x = e.last_inner.x + e.last_gutter_width;
         let cell = &buf[(bar_x, e.last_inner.y + 1)];
+        // Croft Loch (the default) draws the bar as a quarter block on the
+        // cell's left edge; a boxed theme keeps the heavy centred bar.
         assert_eq!(
             cell.symbol(),
-            "\u{2503}",
+            "\u{258e}",
             "modified line shows a gutter bar"
         );
+        e.theme = crate::theme::Theme::BLACK;
+        let mut buf = Buffer::empty(area);
+        (&mut e).render(area, &mut buf);
+        assert_eq!(buf[(bar_x, e.last_inner.y + 1)].symbol(), "\u{2503}");
     }
 
     /// The gutter of a rendered `e` (#1576): each screen row's number
@@ -25848,6 +27642,25 @@ mod tests {
         let active = Some(e.theme.line_number_active());
         assert_eq!(styles[4].fg, active);
         assert_eq!(styles[7].fg, active, "an extra caret's line too");
+        assert_eq!(styles[3].fg, Some(e.theme.line_number_fg()));
+        assert_ne!(active, Some(e.theme.line_number_fg()));
+    }
+
+    /// Croft Loch's gutter is in its own inks, not the host's named greys:
+    /// the faint tone for the numbers, body text for the caret's; a boxed
+    /// theme keeps the terminal's dark grey.
+    #[test]
+    fn a_surfaces_gutter_numbers_in_the_themes_inks() {
+        let mut e = ten_lines();
+        e.cursor_row = 4;
+        let (_, styles) = gutter_column(&mut e, 10);
+        let t = crate::widgets::surface::tones(e.theme).expect("Loch is the default");
+        assert_eq!(styles[3].fg, Some(t.faint()));
+        assert_eq!(styles[4].fg, Some(t.text()));
+        let mut e = ten_lines();
+        e.theme = crate::theme::Theme::BLACK;
+        e.cursor_row = 4;
+        let (_, styles) = gutter_column(&mut e, 10);
         assert_eq!(styles[3].fg, Some(Color::DarkGray));
     }
 
@@ -26333,6 +28146,8 @@ mod tests {
         // highlight were computed against the raw bytes.
         std::fs::write(&p, "plain\n\u{1b}[31mboom\u{1b}[0m tail\n").unwrap();
         let mut e = Editor::new();
+        // The boxed themes' orange active match; the columns are the point.
+        e.theme = crate::theme::Theme::BLACK;
         e.open(&p).unwrap();
         e.set_search_highlight(Some(String::from("boom")));
         e.active_search_match = Some((1, 0, 4));
@@ -26953,6 +28768,171 @@ mod tests {
         );
         assert_eq!(cell.fg, Color::DarkGray);
         assert!(!row(3).contains("NULL"), "'' stays empty: {}", row(3));
+    }
+
+    /// #1138: CJK, Hangul and emoji take two columns each. The grid sized
+    /// and filled cells in chars, so `서울특별시` showed as `서울특` and ran
+    /// into the next column (`大阪府2750000`).
+    #[test]
+    fn wide_characters_fit_their_column_and_keep_the_gap() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("cities.csv");
+        std::fs::write(
+            &p,
+            "city,pref,pop\n東京都,東京,13960000\n大阪市,大阪府,2750000\n\
+             Seoul,서울특별시,9500000\nemoji 🎉🎉🎉,x,1\n",
+        )
+        .unwrap();
+        let mut e = Editor::new();
+        e.open(&p).unwrap();
+        let view = e.sheet.as_mut().unwrap();
+        // The caret sits on the header-less last row, so the rows above
+        // draw plainly.
+        view.sheets[0].cur_row = 3;
+        let area = Rect::new(0, 0, 60, 8);
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        render_sheet(
+            view,
+            Some(&p),
+            area,
+            &mut buf,
+            Color::Reset,
+            crate::theme::Theme::default(),
+        );
+        // What a terminal shows on row `y`: a wide glyph's covered cell is
+        // skipped, as the terminal draws the glyph over it.
+        let row = |y: u16| -> String {
+            let mut out = String::new();
+            let mut x = 0;
+            while x < area.width {
+                let sym = buf[(x, y)].symbol();
+                out.push_str(sym);
+                x += unicode_width::UnicodeWidthStr::width(sym).max(1) as u16;
+            }
+            out
+        };
+        let screen: Vec<String> = (0..area.height).map(row).collect();
+        let body = screen.join("\n");
+        for whole in ["東京都", "大阪府", "서울특별시", "emoji 🎉🎉🎉"] {
+            assert!(body.contains(whole), "{whole} is drawn whole:\n{body}");
+        }
+        assert!(
+            !body.contains("大阪府2750000"),
+            "a gap between columns:\n{body}"
+        );
+        assert!(
+            !body.contains("시9500000"),
+            "a gap between columns:\n{body}"
+        );
+        // Every value of a column starts at the same screen column.
+        let col_of = |needle: &str| -> usize {
+            let line = screen.iter().find(|l| l.contains(needle)).unwrap();
+            let byte = line.find(needle).unwrap();
+            unicode_width::UnicodeWidthStr::width(&line[..byte])
+        };
+        assert_eq!(col_of("13960000"), col_of("2750000"));
+        assert_eq!(col_of("2750000"), col_of("9500000"));
+        assert_eq!(col_of("大阪府"), col_of("서울특별시"));
+    }
+
+    /// #1138: the in-grid editor windows its text in screen columns too. A
+    /// value of wide characters longer than the column shows its tail with
+    /// the caret inside the slot, not twice the slot running over the next
+    /// column.
+    #[test]
+    fn the_in_grid_editor_keeps_wide_text_inside_its_column() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("cities.csv");
+        std::fs::write(&p, "city,pref,pop\nSeoul,서울특별시,9500000\nx,y,1\n").unwrap();
+        let mut e = Editor::new();
+        e.open(&p).unwrap();
+        let view = e.sheet.as_mut().unwrap();
+        let value = "서울특별시서울특별시".to_string();
+        view.sheets[0].cur_row = 0;
+        view.sheets[0].cur_col = 1;
+        view.editing = Some(crate::sheet::CellEdit {
+            cursor: value.len(),
+            value,
+        });
+        let area = Rect::new(0, 0, 50, 6);
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        render_sheet(
+            view,
+            Some(&p),
+            area,
+            &mut buf,
+            Color::Reset,
+            crate::theme::Theme::default(),
+        );
+        let line = (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .find(|l| l.contains("Seoul"))
+            .unwrap();
+        assert!(
+            line.contains("9500000"),
+            "the next column is intact: {line:?}"
+        );
+        // The tail that fits: 4 of the 10 glyphs (8 columns), then the caret.
+        assert!(line.contains("울 특 별 시"), "{line:?}");
+        assert!(!line.contains("서 울 특 별 시 서"), "{line:?}");
+    }
+
+    /// #1138 review: 20 CJK characters make a 40-column-wide column. In a
+    /// pane narrower than that, the grid drew no column at all; it now
+    /// draws that one clipped to the pane.
+    #[test]
+    fn a_column_wider_than_a_narrow_pane_is_drawn_clipped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("long.csv");
+        let long = "東京都".repeat(7);
+        std::fs::write(&p, format!("name,n\n{long},1\nx,2\n")).unwrap();
+        let mut e = Editor::new();
+        e.open(&p).unwrap();
+        let view = e.sheet.as_mut().unwrap();
+        view.sheets[0].cur_row = 1;
+        let area = Rect::new(0, 0, 30, 6);
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        render_sheet(
+            view,
+            Some(&p),
+            area,
+            &mut buf,
+            Color::Reset,
+            crate::theme::Theme::default(),
+        );
+        let body = (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(body.contains("name"), "the header is drawn:\n{body}");
+        assert!(
+            body.contains("東 京 都 東 京 都"),
+            "the value, clipped:\n{body}"
+        );
+    }
+
+    #[test]
+    fn a_wide_glyph_that_would_straddle_the_cell_edge_is_left_out() {
+        let area = Rect::new(0, 0, 6, 1);
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        buf.set_string(0, 0, "zzzzzz", Style::default());
+        // Three columns hold one wide glyph; the second would need 4.
+        write_cell(&mut buf, 0, 0, 3, "表表", Style::default());
+        assert_eq!(buf[(0, 0)].symbol(), "表");
+        assert_eq!(buf[(2, 0)].symbol(), " ", "the edge column is blank");
+        assert_eq!(
+            buf[(3, 0)].symbol(),
+            "z",
+            "nothing past the slot is touched"
+        );
     }
 
     #[test]
@@ -27783,7 +29763,7 @@ mod tests {
             }],
         );
         assert_eq!(
-            e.diagnostics_at(0, 6),
+            e.diagnostics_at(0, 6, Path::new("/tmp")),
             vec![(
                 DiagnosticSeverity::Error,
                 String::from("Type 'number' is not assignable to type 'string'.")
@@ -27791,7 +29771,7 @@ mod tests {
             "a point inside the diagnostic range must surface its message"
         );
         assert!(
-            e.diagnostics_at(0, 0).is_empty(),
+            e.diagnostics_at(0, 0, Path::new("/tmp")).is_empty(),
             "a point outside every diagnostic range must surface nothing"
         );
     }
@@ -27832,7 +29812,7 @@ mod tests {
             ],
         );
         assert_eq!(
-            e.diagnostics_at(0, 8),
+            e.diagnostics_at(0, 8, Path::new("/tmp")),
             vec![(
                 crate::lsp::manager::DiagnosticSeverity::Warning,
                 String::from(
@@ -27841,11 +29821,50 @@ mod tests {
             )]
         );
         assert_eq!(
-            e.diagnostics_at(0, 12),
+            e.diagnostics_at(0, 12, Path::new("/tmp")),
             vec![(
                 crate::lsp::manager::DiagnosticSeverity::Warning,
                 String::from("`json` is unused")
             )]
+        );
+    }
+
+    /// #1523: the places the server points at to explain a diagnostic
+    /// follow it in the hover as `file(line, col): message`, one-based, the
+    /// file relative to the workspace.
+    #[test]
+    fn diagnostics_at_lists_the_related_locations_under_the_message() {
+        let mut e = editor_with("let first = &v[0]; v.push(2);");
+        e.path = Some(PathBuf::from("/w/src/main.rs"));
+        let at = |line, character, message: &str| lsp_types::DiagnosticRelatedInformation {
+            location: lsp_types::Location {
+                uri: lsp_types::Url::parse("file:///w/src/main.rs").unwrap(),
+                range: lsp_types::Range::new(
+                    lsp_types::Position::new(line, character),
+                    lsp_types::Position::new(line, character + 1),
+                ),
+            },
+            message: message.into(),
+        };
+        let wire = lsp_types::Diagnostic {
+            range: lsp_types::Range::new(
+                lsp_types::Position::new(0, 19),
+                lsp_types::Position::new(0, 28),
+            ),
+            message: "cannot borrow `v` as mutable".into(),
+            related_information: Some(vec![
+                at(0, 13, "immutable borrow occurs here"),
+                at(4, 15, "immutable borrow later used here"),
+            ]),
+            ..Default::default()
+        };
+        let d = crate::lsp::client::convert_diagnostic("rust-analyzer", &wire);
+        e.apply_diagnostics(PathBuf::from("/w/src/main.rs"), vec![d]);
+        assert_eq!(
+            e.diagnostics_at(0, 20, Path::new("/w"))[0].1,
+            "cannot borrow `v` as mutable\n\
+             src/main.rs(1, 14): immutable borrow occurs here\n\
+             src/main.rs(5, 16): immutable borrow later used here"
         );
     }
 
@@ -27870,7 +29889,7 @@ mod tests {
             }],
         );
         assert_eq!(
-            e.diagnostics_at(0, 6),
+            e.diagnostics_at(0, 6, Path::new("/tmp")),
             vec![(
                 DiagnosticSeverity::Warning,
                 String::from("missing semicolon")
@@ -28716,6 +30735,9 @@ mod tests {
         // keeps the BLACK foreground on a dark grey, which is unreadable,
         // and kills the orange active-match cue.
         let mut e = editor_with("config here");
+        // The boxed themes' black-on-gold block; Croft Loch's twin is
+        // `croft_loch_find_tints_stay_on_top_of_occurrence_tints`.
+        e.theme = crate::theme::Theme::BLACK;
         e.path = Some(PathBuf::from("/x/a.rs"));
         e.set_search_highlight(Some(String::from("config")));
         e.occurrences = vec![(0, 0, 6, false)];
@@ -28967,7 +30989,8 @@ mod tests {
         let mut buf = ratatui::buffer::Buffer::empty(area);
         (&mut e as &mut Editor).render(area, &mut buf);
         let text_x = e.last_inner.x + e.last_gutter_width + 1;
-        let block_x = (0..area.width).find(|&x| buf[(x, 1)].bg == Color::Rgb(0xae, 0xc6, 0xff));
+        let caret_bg = e.theme.secondary_caret_bg();
+        let block_x = (0..area.width).find(|&x| buf[(x, 1)].bg == caret_bg);
         assert_eq!(
             block_x,
             Some(text_x + 5),
@@ -29125,6 +31148,55 @@ mod tests {
             text.contains("New heading") && !text.contains("Old heading"),
             "a stale preview must rebuild against the edited buffer; got:\n{text}"
         );
+    }
+
+    /// #1605: the same-path `open` behind every FS-sync reload (a save in
+    /// another pane, an agent rewriting the file) keeps the tab rendered,
+    /// showing the new text; another file still opens as source.
+    #[test]
+    fn markdown_preview_survives_a_same_path_reload() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("doc.md");
+        std::fs::write(&path, "# Old heading\n").unwrap();
+        let mut e = Editor::new();
+        e.open(&path).unwrap();
+        assert!(e.toggle_markdown_preview());
+        std::fs::write(&path, "# Rewritten heading\n\nAnd a paragraph.\n").unwrap();
+        e.open(&path).unwrap();
+        assert!(
+            e.markdown_preview.is_some(),
+            "a reload of the same file must stay a preview"
+        );
+        let text = first_row_screen(&mut e, 60, 8);
+        assert!(
+            text.contains("Rewritten heading") && !text.contains("# Rewritten"),
+            "the preview must render the reloaded text; got:\n{text}"
+        );
+        let other = tmp.path().join("other.md");
+        std::fs::write(&other, "# Other\n").unwrap();
+        e.open(&other).unwrap();
+        assert!(e.markdown_preview.is_none(), "another file opens as source");
+    }
+
+    /// #1605 review: a preview rebuilt from another pane's text keeps its own
+    /// `built_seq`, so its row caches must still be rebuilt, or scroll sync,
+    /// link and play-glyph clicks use the first build's rows.
+    #[test]
+    fn a_preview_rebuilt_from_another_pane_refreshes_its_row_caches() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("doc.md");
+        std::fs::write(&path, "# Title\n").unwrap();
+        let mut e = Editor::new();
+        e.open(&path).unwrap();
+        assert!(e.toggle_markdown_preview());
+        first_row_screen(&mut e, 60, 20);
+        let typed = "# Title\n\nA new paragraph.\n\n```sh\necho hi\n```\n";
+        e.rebuild_markdown_preview_from(typed, Some((7, 7)));
+        first_row_screen(&mut e, 60, 20);
+        let md = e.markdown_preview.as_ref().unwrap();
+        assert_eq!(md.row_of_line.len(), md.lines.len(), "scroll-sync rows");
+        assert_eq!(md.runnables.len(), 1);
+        assert_eq!(md.run_rows.len(), 1, "the new block's play glyph has a row");
     }
 
     /// Render into a fresh buffer and return the whole screen as one string.
@@ -32163,6 +34235,65 @@ mod tests {
         );
     }
 
+    /// #1569: with `home_walks_rows`, Home on a continuation row's start goes
+    /// to the start of the row above, one row per press, and off it keeps
+    /// VS Code's jump to the line's own stops.
+    #[test]
+    fn home_walks_back_one_wrapped_row_per_press_when_asked() {
+        let (mut e, segs) = wrapped_paragraph(true);
+        e.home_walks_rows = true;
+        e.cursor_col = segs[2].0 + 5;
+        e.home_key();
+        assert_eq!(e.cursor_col, segs[2].0, "the start of row 3: {segs:?}");
+        e.home_key();
+        assert_eq!(e.cursor_col, segs[1].0, "the start of row 2: {segs:?}");
+        e.home_key();
+        assert_eq!(e.cursor_col, segs[0].0, "the start of row 1: {segs:?}");
+        e.home_key();
+        assert_eq!(e.cursor_col, 0, "the line starts at column 0, so it stays");
+        // Off: from a row's start straight to the line's start.
+        let (mut e, segs) = wrapped_paragraph(true);
+        e.cursor_col = segs[2].0;
+        e.home_key();
+        assert_eq!(e.cursor_col, 0, "not the row above: {segs:?}");
+    }
+
+    /// #1569: on an indented line the walk ends at the line's own stops: the
+    /// first non-blank, then column 0, then back.
+    #[test]
+    fn home_walk_ends_at_the_indentation_stops() {
+        let text = format!("    {}", "word ".repeat(40));
+        let mut e = editor_with(&text);
+        e.wrap_override = Some(true);
+        e.home_walks_rows = true;
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 60,
+            height: 20,
+        };
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        (&mut e as &mut Editor).render(area, &mut buf);
+        let segs = e.line_segments(0, e.visible_text_width().max(1));
+        assert!(segs.len() > 2, "the line wraps: {segs:?}");
+        let (row_start, row_end) = segs[1];
+        let chars: Vec<char> = e.lines[0].chars().collect();
+        let word = (row_start + 1..row_end)
+            .rfind(|&i| !chars[i].is_whitespace() && chars[i - 1].is_whitespace())
+            .expect("a word starts inside row 2");
+        e.cursor_col = word + 2;
+        e.home_key();
+        assert_eq!(e.cursor_col, row_start, "the start of row 2: {segs:?}");
+        e.home_key();
+        assert_eq!(e.cursor_col, segs[0].0, "the start of row 1: {segs:?}");
+        e.home_key();
+        assert_eq!(e.cursor_col, 4, "the line's first non-blank");
+        e.home_key();
+        assert_eq!(e.cursor_col, 0, "column 0");
+        e.home_key();
+        assert_eq!(e.cursor_col, 4);
+    }
+
     /// #1569: a wrapped row can begin on a combining mark (the row before
     /// broke after the space it combines with); Home must not leave the caret
     /// inside that cluster.
@@ -33250,7 +35381,11 @@ mod tests {
             e.diagnostic_spans[0],
             vec![(11, 12, DiagnosticSeverity::Error)]
         );
-        assert_eq!(e.diagnostics_at(0, 11).len(), 1, "hovered at the row's end");
+        assert_eq!(
+            e.diagnostics_at(0, 11, Path::new("/tmp")).len(),
+            1,
+            "hovered at the row's end"
+        );
     }
 
     /// #911: a formatter's edit up to the end of that text keeps the final
@@ -34698,33 +36833,29 @@ mod tests {
 
     #[test]
     fn build_line_spans_no_highlights() {
-        let spans = build_line_spans("hello", &[]);
+        let spans = build_line_spans("hello", &[], 0);
         assert_eq!(spans.len(), 1);
-    }
-
-    fn chars(s: &str) -> Vec<char> {
-        s.chars().collect()
     }
 
     #[test]
     fn wrap_segments_short_line_is_one_segment() {
-        assert_eq!(wrap_segments(&chars("hello"), 20), vec![(0, 5)]);
-        assert_eq!(wrap_segments(&chars(""), 20), vec![(0, 0)]);
+        assert_eq!(wrap_segments("hello", 20), vec![(0, 5)]);
+        assert_eq!(wrap_segments("", 20), vec![(0, 0)]);
         // width 0 must not loop forever - one segment covering the line.
-        assert_eq!(wrap_segments(&chars("abc"), 0), vec![(0, 3)]);
+        assert_eq!(wrap_segments("abc", 0), vec![(0, 3)]);
     }
 
     #[test]
     fn wrap_segments_breaks_after_a_space() {
         // "the quick brown" at width 10 breaks after "the quick " (10 chars).
-        let segs = wrap_segments(&chars("the quick brown"), 10);
+        let segs = wrap_segments("the quick brown", 10);
         assert_eq!(segs, vec![(0, 10), (10, 15)]);
     }
 
     #[test]
     fn wrap_segments_hard_breaks_a_too_long_word() {
         // No space in the first 6 chars, so the word is split at the column.
-        let segs = wrap_segments(&chars("abcdefghij"), 6);
+        let segs = wrap_segments("abcdefghij", 6);
         assert_eq!(segs, vec![(0, 6), (6, 10)]);
     }
 
@@ -34732,18 +36863,18 @@ mod tests {
     fn wrap_segments_breaks_after_punctuation_like_vscode() {
         // VS Code breaks after `/` (a break-after char), so a path folds at
         // the slash rather than mid-segment.
-        let segs = wrap_segments(&chars("abc/defgh"), 6);
+        let segs = wrap_segments("abc/defgh", 6);
         assert_eq!(segs, vec![(0, 4), (4, 9)]);
     }
 
     #[test]
     fn wrap_segments_count_wide_characters_as_two_cells() {
         let line: String = std::iter::repeat_n('漢', 60).collect();
-        let segs = wrap_segments(&chars(&line), 30);
+        let segs = wrap_segments(&line, 30);
         assert_eq!(segs.len(), 4, "{segs:?}");
         assert!(segs.iter().all(|&(s, e)| e - s == 15), "{segs:?}");
         // A char wider than the pane still makes progress.
-        assert_eq!(wrap_segments(&chars("漢漢"), 1), vec![(0, 1), (1, 2)]);
+        assert_eq!(wrap_segments("漢漢", 1), vec![(0, 1), (1, 2)]);
     }
 
     #[test]
@@ -34787,10 +36918,24 @@ mod tests {
         }
     }
 
+    /// Each wrapped row counts tab stops from its own left edge: `⇥ef` on
+    /// the second row is 4 + 2 cells, so it fits in 6.
+    #[test]
+    fn wrap_segments_count_tab_stops_from_each_rows_left_edge() {
+        set_tab_cells(4);
+        assert_eq!(wrap_segments("abcd\tef", 6), vec![(0, 4), (4, 7)]);
+        assert_eq!(
+            wrap_segments("ab\tc", 5),
+            vec![(0, 4)],
+            "the tab stops at 4"
+        );
+        assert_eq!(wrap_segments("ab\tc", 4), vec![(0, 3), (3, 4)]);
+    }
+
     #[test]
     fn wrap_segments_tile_the_line_without_gaps() {
         let line = "alpha beta gamma delta epsilon zeta eta theta";
-        let segs = wrap_segments(&chars(line), 12);
+        let segs = wrap_segments(line, 12);
         assert_eq!(segs.first().unwrap().0, 0);
         assert_eq!(segs.last().unwrap().1, line.chars().count());
         for pair in segs.windows(2) {
@@ -34805,7 +36950,7 @@ mod tests {
             end: 5,
             style: Style::default(),
         }];
-        let spans = build_line_spans("hello", &hi);
+        let spans = build_line_spans("hello", &hi, 0);
         assert_eq!(spans.len(), 1);
     }
 
@@ -34816,7 +36961,7 @@ mod tests {
             end: 3,
             style: Style::default(),
         }];
-        let spans = build_line_spans("abcde", &hi);
+        let spans = build_line_spans("abcde", &hi, 0);
         // Expect: "a", "bc", "de"
         assert_eq!(spans.len(), 3);
     }
@@ -35209,8 +37354,8 @@ mod tests {
             let text_x = e.last_inner.x + e.last_gutter_width + 1;
             let y = e.last_inner.y;
             assert_eq!(
-                row_text(&buf, y, text_x, text_x + 6),
-                "x y z ",
+                row_text(&buf, y, text_x, text_x + 9),
+                "x   y   z",
                 "wrap {wrap}"
             );
             let (cx, cy) = e.cursor_screen_pos().expect("the caret is on screen");
@@ -35220,11 +37365,251 @@ mod tests {
                 "the caret sits on z, wrap {wrap}"
             );
             assert_eq!(
-                e.buffer_pos_at(text_x + 2, y),
+                e.buffer_pos_at(text_x + 4, y),
                 Some((0, 2)),
                 "a click on y lands on y, wrap {wrap}"
             );
         }
+    }
+
+    /// A tab is drawn as the buffer's Tab Size, and the caret, clicks and
+    /// horizontal scroll follow it.
+    #[test]
+    fn a_tab_is_as_wide_as_the_tab_size() {
+        for width in [2u32, 4, 8] {
+            let mut e = editor_with("\t\tz");
+            e.set_indent_style(IndentStyle {
+                width,
+                use_spaces: false,
+            });
+            e.wrap_override = Some(false);
+            e.cursor_col = 2;
+            let buf = guide_buf(&mut e, 40, 5);
+            let text_x = e.last_inner.x + e.last_gutter_width + 1;
+            let y = e.last_inner.y;
+            let z_cell = text_x + 2 * width as u16;
+            assert_eq!(buf[(z_cell, y)].symbol(), "z", "tab size {width}");
+            assert_eq!(e.cursor_screen_pos(), Some((z_cell, y)), "tab size {width}");
+            assert_eq!(e.buffer_pos_at(z_cell, y), Some((0, 2)), "tab size {width}");
+        }
+    }
+
+    /// A tab runs to the next tab stop, so text after tabs lines up in columns
+    /// whatever sits before them (vim, VS Code), and Col counts those cells.
+    #[test]
+    fn a_tab_runs_to_the_next_tab_stop() {
+        let mut e = editor_with(" *   bits\t\tmodifier\n *   is_text\tthe key\n\tx\nab\tc");
+        e.set_indent_style(IndentStyle {
+            width: 8,
+            use_spaces: false,
+        });
+        e.wrap_override = Some(false);
+        let buf = guide_buf(&mut e, 60, 8);
+        let text_x = e.last_inner.x + e.last_gutter_width + 1;
+        let y0 = e.last_inner.y;
+        let row = |r: u16| -> Vec<String> {
+            (0..40)
+                .map(|x| buf[(text_x + x, y0 + r)].symbol().to_string())
+                .collect()
+        };
+        let find = |r: u16, s: &str| row(r).iter().position(|c| c == s);
+        // "bits" ends at cell 9, "is_text" at 12: both second words start at
+        // the stops 16 and 24 resp. 16, so "modifier" and "the key" line up
+        // only where the stops do.
+        assert_eq!(find(0, "m"), Some(24), "{:?}", row(0));
+        assert_eq!(
+            find(1, "k"),
+            Some(20),
+            "the key starts at the stop 16: {:?}",
+            row(1)
+        );
+        assert_eq!(find(2, "x"), Some(8));
+        assert_eq!(find(3, "c"), Some(8), "ab then a tab to the stop");
+        // The caret, a click and Col agree with the drawing.
+        e.cursor_row = 3;
+        e.cursor_col = 3;
+        assert_eq!(e.cursor_screen_pos(), Some((text_x + 8, y0 + 3)));
+        assert_eq!(e.buffer_pos_at(text_x + 8, y0 + 3), Some((3, 3)));
+        assert_eq!(
+            e.buffer_pos_at(text_x + 2, y0 + 3),
+            Some((3, 2)),
+            "the tab starts at cell 2"
+        );
+        assert_eq!(e.cursor_visual_col(), 9, "ab, the tab's 6 cells, then c");
+        e.cursor_row = 2;
+        e.cursor_col = 1;
+        assert_eq!(e.cursor_visual_col(), 9, "after one tab at Tab Size 8");
+        e.cursor_col = 0;
+        assert_eq!(e.cursor_visual_col(), 1);
+    }
+
+    /// A tab after a grapheme cluster runs from where the cluster ends as
+    /// drawn: `👍🏽` is two cells, not the four its two characters measure one
+    /// by one, so the text after the tab, the caret and a click agree.
+    #[test]
+    fn a_tab_after_an_emoji_cluster_counts_from_its_drawn_cells() {
+        for wrap in [false, true] {
+            let mut e = editor_with("\u{1f44d}\u{1f3fd}\tX");
+            e.set_indent_style(IndentStyle {
+                width: 4,
+                use_spaces: false,
+            });
+            e.wrap_override = Some(wrap);
+            let buf = guide_buf(&mut e, 40, 4);
+            let text_x = e.last_inner.x + e.last_gutter_width + 1;
+            let y = e.last_inner.y;
+            assert_eq!(buf[(text_x + 4, y)].symbol(), "X", "wrap {wrap}");
+            e.cursor_col = 3;
+            assert_eq!(e.cursor_screen_pos(), Some((text_x + 4, y)), "wrap {wrap}");
+            assert_eq!(
+                e.buffer_pos_at(text_x + 4, y),
+                Some((0, 3)),
+                "a click on X lands before X, wrap {wrap}"
+            );
+            assert_eq!(e.cursor_visual_col(), 5, "the cluster counts one column");
+        }
+    }
+
+    #[test]
+    fn the_diff_maps_clicks_and_the_caret_through_the_cells_a_tab_takes() {
+        use crate::widgets::diff::DiffSide;
+        let f1 = NamedTempFile::new().unwrap();
+        let f2 = NamedTempFile::new().unwrap();
+        std::fs::write(f1.path(), "\tx\n").unwrap();
+        std::fs::write(f2.path(), "\ty\n").unwrap();
+        let mut t = EditorTabs::new();
+        t.open_diff(f1.path(), f2.path()).unwrap();
+        let i = t.active_index();
+        t.editors[i].focused = true;
+        t.editors[i].set_indent_style(IndentStyle {
+            width: 4,
+            use_spaces: false,
+        });
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 10,
+        };
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        ratatui::widgets::Widget::render(&mut t.editors[i], area, &mut buf);
+        let ed = &t.editors[i];
+        let diff = ed.diff.as_ref().unwrap();
+        let body_top = ed.last_inner.y + 1;
+        let l_gutter = (diff.left_lines.len() + 1).to_string().len() as u16 + 1;
+        let l_text_x = ed.last_inner.x + l_gutter + 2;
+        // Cells 0-3 are the tab, cell 4 the "x": a click on it is char 1, and
+        // one on the tab is char 0.
+        let hit = |dx: u16| {
+            crate::widgets::editor::diff_hit_test(diff, ed.last_inner, l_text_x + dx, body_top)
+        };
+        assert_eq!(hit(4), Some((DiffSide::Left, 0, 1)));
+        assert_eq!(hit(2), Some((DiffSide::Left, 0, 0)));
+        // And the caret on char 1 is drawn on cell 4.
+        t.editors[i]
+            .diff
+            .as_mut()
+            .unwrap()
+            .start_selection(DiffSide::Left, 0, 1);
+        assert_eq!(
+            t.editors[i].diff_caret_screen_pos(),
+            Some((l_text_x + 4, body_top))
+        );
+    }
+
+    #[test]
+    fn a_line_of_tabs_wider_than_the_pane_can_scroll_to_its_tail() {
+        let mut e = editor_with(&"\t".repeat(10));
+        e.set_indent_style(IndentStyle {
+            width: 8,
+            use_spaces: false,
+        });
+        e.wrap_override = Some(false);
+        // Ten tabs are 80 cells: in a 30-cell column the bar must appear and
+        // reach the scroll that shows the last of them, in char columns.
+        let cols = e.content_cols(30);
+        assert!(cols > 30, "the line overflows, got extent {cols}");
+        let max_scroll = cols - 30;
+        let tail: usize = 10 - max_scroll;
+        assert!(
+            tail * 8 <= 30 && (tail + 1) * 8 > 30,
+            "{max_scroll} chars scroll off"
+        );
+        // A different Tab Size is a different extent, not a stale cache hit.
+        e.set_indent_style(IndentStyle {
+            width: 2,
+            use_spaces: false,
+        });
+        assert_eq!(e.content_cols(30), 10, "20 cells fit in 30");
+        // `ab⇥c` at Tab Size 8 is 9 cells, the tab running from cell 2 to 8:
+        // in 5 cells only `c` fits, so 3 chars scroll off.
+        e.lines = vec!["ab\tc".to_string()];
+        e.set_indent_style(IndentStyle {
+            width: 8,
+            use_spaces: false,
+        });
+        assert_eq!(e.content_cols(5), 3 + 5);
+        // `⇥👍🏽123456789` at Tab Size 4 is 15 cells. The scroll that shows its
+        // tail in 10 passes the whole emoji, not just its first char, which
+        // would leave the skin tone drawn alone and the last digit cut off.
+        e.lines = vec!["\t\u{1f44d}\u{1f3fd}123456789".to_string()];
+        e.set_indent_style(IndentStyle {
+            width: 4,
+            use_spaces: false,
+        });
+        assert_eq!(e.content_cols(10), 3 + 10);
+    }
+
+    #[test]
+    fn a_crowded_tab_strip_scrolls_and_stops_short_of_the_layout_icons() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut tabs = EditorTabs::new();
+        for i in 0..12 {
+            let f = tmp.path().join(format!("file_{i:02}.txt"));
+            std::fs::write(&f, "x\n").unwrap();
+            tabs.open_pinned(&f).unwrap();
+        }
+        let area = Rect::new(0, 0, 60, 10);
+        let strip_right = 60 - 9;
+        let draw = |tabs: &mut EditorTabs| {
+            tabs.set_tab_reserved_right(9);
+            let mut buf = ratatui::buffer::Buffer::empty(area);
+            ratatui::widgets::Widget::render(&mut *tabs, area, &mut buf);
+        };
+        let visible = |tabs: &EditorTabs| -> Vec<usize> {
+            (0..12)
+                .filter(|&i| tabs.tab_screen_x(i).is_some_and(|(_, w)| w > 0))
+                .collect()
+        };
+        draw(&mut tabs);
+        // The last tab is active, so the strip has scrolled to show it whole,
+        // and nothing reaches the cells the layout icons own.
+        let vis = visible(&tabs);
+        assert!(vis.contains(&11), "the active tab is on screen: {vis:?}");
+        assert!(vis.len() < 12, "not every tab fits");
+        for &i in &vis {
+            let (x, w) = tabs.tab_screen_x(i).unwrap();
+            assert!(x + w <= strip_right, "tab {i} runs under the icons");
+        }
+        // The wheel brings earlier tabs back without activating anything.
+        for _ in 0..12 {
+            tabs.scroll_tabs(-1);
+        }
+        draw(&mut tabs);
+        let vis = visible(&tabs);
+        assert_eq!(vis.first(), Some(&0), "scrolled back to the first tab");
+        assert!(
+            !vis.contains(&11),
+            "the scroll is not snapped back: {vis:?}"
+        );
+        assert_eq!(tabs.active_index(), 11);
+        // Picking another tab reveals it again.
+        tabs.select(0);
+        draw(&mut tabs);
+        assert!(visible(&tabs).contains(&0));
+        tabs.select(11);
+        draw(&mut tabs);
+        assert!(visible(&tabs).contains(&11));
     }
 
     #[test]
@@ -35474,6 +37859,9 @@ mod tests {
     fn editor_render_paints_search_match_cells_with_yellow_bg() {
         use ratatui::buffer::Buffer;
         let mut e = editor_with("alpha needle bravo needle zulu");
+        // The boxed themes' solid find block; Croft Loch tints matches
+        // amber (`croft_loch_tints_find_matches_amber_and_the_current_one_stronger`).
+        e.theme = crate::theme::Theme::BLACK;
         e.set_search_highlight(Some(String::from("needle")));
         e.focused = true;
         let area = Rect {
@@ -35600,6 +37988,9 @@ mod tests {
     fn editor_render_does_not_paint_search_highlight_when_unset() {
         use ratatui::buffer::Buffer;
         let mut e = editor_with("alpha needle bravo");
+        // Pins the boxed themes' yellow; the Croft Loch twin is
+        // `croft_loch_paints_no_find_tint_when_the_highlight_is_unset`.
+        e.theme = crate::theme::Theme::BLACK;
         e.set_search_highlight(None);
         e.focused = true;
         let area = Rect {
@@ -35626,6 +38017,8 @@ mod tests {
     fn editor_render_search_highlight_is_case_insensitive() {
         use ratatui::buffer::Buffer;
         let mut e = editor_with("Foo bar FOO baz");
+        // Read through the boxed themes' solid find block.
+        e.theme = crate::theme::Theme::BLACK;
         e.set_search_highlight(Some(String::from("foo")));
         e.focused = true;
         let area = Rect {
@@ -35645,6 +38038,93 @@ mod tests {
         for col in 8..11u16 {
             assert_eq!(buf[(text_x + col, y)].bg, yellow, "cell {col} of 'FOO'");
         }
+    }
+
+    /// Croft Loch: a find match is an amber tint of the row it sits on, not
+    /// the solid yellow block, with the match's own ink kept (or lifted)
+    /// so it reads at 4.5:1 or better and no bold added; the current match
+    /// is a clearly stronger tint of the same amber.
+    #[test]
+    fn croft_loch_tints_find_matches_amber_and_the_current_one_stronger() {
+        use crate::widgets::surface;
+        use ratatui::buffer::Buffer;
+        let mut e = editor_with("alpha needle bravo needle zulu");
+        let t = surface::tones(e.theme).expect("the default theme is Croft Loch");
+        e.set_search_highlight(Some(String::from("needle")));
+        e.active_search_match = Some((0, 19, 6));
+        e.focused = true;
+        let area = Rect::new(0, 0, 60, 3);
+        let mut buf = Buffer::empty(area);
+        (&mut e).render(area, &mut buf);
+        let text_x = e.last_inner.x + e.last_gutter_width + 1;
+        let y = e.last_inner.y;
+        // The space before the first match carries the row's own fill (the
+        // current line's, as the caret is on this row).
+        let row = buf[(text_x + 5, y)].bg;
+        let tint = |active: bool| {
+            surface::match_style(Style::default().bg(row), t, e.theme, active)
+                .bg
+                .unwrap()
+        };
+        assert_ne!(tint(false), Color::Rgb(0xff, 0xd7, 0x4a));
+        assert_ne!(tint(false), tint(true));
+        let lum = |c: Color| match c {
+            Color::Rgb(r, g, b) => crate::theme::contrast_ratio((r, g, b), (0, 0, 0)),
+            _ => 0.0,
+        };
+        assert!(
+            lum(tint(true)) > lum(tint(false)) + 0.5,
+            "the current match is a clearly stronger tint"
+        );
+        for (cols, active) in [(6..12u16, false), (19..25u16, true)] {
+            for col in cols {
+                let cell = &buf[(text_x + col, y)];
+                assert_eq!(cell.bg, tint(active), "match cell {col}");
+                let (Color::Rgb(fr, fg, fb), Color::Rgb(br, bg, bb)) = (cell.fg, cell.bg) else {
+                    panic!("cell {col} has RGB inks: {cell:?}");
+                };
+                assert!(
+                    crate::theme::contrast_ratio((fr, fg, fb), (br, bg, bb)) >= 4.5,
+                    "cell {col} reads on its tint"
+                );
+                assert!(!cell.modifier.contains(Modifier::BOLD), "no bold on {col}");
+            }
+        }
+        assert_eq!(buf[(text_x + 12, y)].bg, row, "the tint stops at the match");
+    }
+
+    /// Croft Loch negative: with no find highlight set, no cell of the row
+    /// wears the amber tint.
+    #[test]
+    fn croft_loch_paints_no_find_tint_when_the_highlight_is_unset() {
+        let mut e = editor_with("alpha needle bravo");
+        e.set_search_highlight(None);
+        e.focused = true;
+        let buf = guide_buf(&mut e, 40, 3);
+        assert_eq!(glyphs_where(&e, &buf, loch_find_tint), "");
+    }
+
+    /// Croft Loch: Cmd+F then Enter parks the caret on a match whose
+    /// occurrences the idle documentHighlight then greys; the find tint is
+    /// laid over the occurrence grey (so it still reads as a match) and its
+    /// ink stays legible on it.
+    #[test]
+    fn croft_loch_find_tints_stay_on_top_of_occurrence_tints() {
+        let mut e = editor_with("config here");
+        e.path = Some(PathBuf::from("/x/a.rs"));
+        e.set_search_highlight(Some(String::from("config")));
+        e.occurrences = vec![(0, 0, 6, false)];
+        let buf = guide_buf(&mut e, 40, 5);
+        assert_eq!(glyphs_where(&e, &buf, loch_find_tint), "config");
+        let occ = e.theme.occurrence_bg();
+        assert_eq!(glyphs_where(&e, &buf, |c| c.bg == occ), "");
+        let y = e.last_inner.y;
+        let x = e.last_inner.x + e.last_gutter_width + 1;
+        let (Color::Rgb(fr, fg, fb), Color::Rgb(br, bg, bb)) = (buf[(x, y)].fg, buf[(x, y)].bg)
+        else {
+            panic!("RGB inks");
+        };
+        assert!(crate::theme::contrast_ratio((fr, fg, fb), (br, bg, bb)) >= 4.5);
     }
 
     #[test]
@@ -35942,30 +38422,31 @@ mod tests {
         (l_text_x, y)
     }
 
-    fn intraline(rgb: (u8, u8, u8)) -> Color {
-        Color::Rgb(rgb.0, rgb.1, rgb.2)
+    /// The inks the default theme's diff view paints with, for the
+    /// tests that check where a mark lands rather than what it looks like.
+    fn default_inks() -> DiffInks {
+        diff_inks(crate::theme::Theme::default())
     }
 
     /// #1351: a one-character edit marks just that character on each side,
     /// in a stronger tint than the rest of the changed line.
     #[test]
     fn a_one_character_change_is_marked_within_the_line() {
-        use crate::widgets::diff::{INTRALINE_ADDED_BG, INTRALINE_REMOVED_BG};
         let (buf, inner, r_text_x) = render_wide_diff("x\nbackoff=1.5\n", "x\nbackoff=2.5\n");
         let (l_text_x, y) = left_text_at(&buf, inner, 2, "backoff=1.5");
         assert_eq!(buf[(l_text_x + 8, y)].symbol(), "1");
-        assert_eq!(buf[(l_text_x + 8, y)].bg, intraline(INTRALINE_REMOVED_BG));
+        assert_eq!(buf[(l_text_x + 8, y)].bg, default_inks().intraline_removed);
         assert_eq!(buf[(r_text_x + 8, y)].symbol(), "2");
-        assert_eq!(buf[(r_text_x + 8, y)].bg, intraline(INTRALINE_ADDED_BG));
+        assert_eq!(buf[(r_text_x + 8, y)].bg, default_inks().intraline_added);
         for col in [0u16, 7, 9, 10] {
             assert_ne!(
                 buf[(l_text_x + col, y)].bg,
-                intraline(INTRALINE_REMOVED_BG),
+                default_inks().intraline_removed,
                 "col {col}"
             );
             assert_ne!(
                 buf[(r_text_x + col, y)].bg,
-                intraline(INTRALINE_ADDED_BG),
+                default_inks().intraline_added,
                 "col {col}"
             );
         }
@@ -35975,13 +38456,12 @@ mod tests {
     /// marks, so it does not turn into confetti.
     #[test]
     fn a_rewritten_line_gets_no_character_marks() {
-        use crate::widgets::diff::{INTRALINE_ADDED_BG, INTRALINE_REMOVED_BG};
         let (buf, inner, _) = render_wide_diff("x\nalpha beta gamma\n", "x\nquite other words\n");
         let marked = (inner.y..inner.bottom())
             .flat_map(|y| (inner.x..inner.right()).map(move |x| (x, y)))
             .filter(|&p| {
                 let bg = buf[p].bg;
-                bg == intraline(INTRALINE_REMOVED_BG) || bg == intraline(INTRALINE_ADDED_BG)
+                bg == default_inks().intraline_removed || bg == default_inks().intraline_added
             })
             .count();
         assert_eq!(marked, 0);
@@ -35991,7 +38471,6 @@ mod tests {
     /// that edge, so two lines that look the same on screen say they differ.
     #[test]
     fn a_change_past_the_right_edge_is_flagged_at_the_edge() {
-        use crate::widgets::diff::INTRALINE_ADDED_BG;
         let line = |v: &str| {
             format!(
                 "TIMEOUT_SECONDS = compute_timeout(base=30, retries=3, backoff={v}, jitter=True)"
@@ -36008,22 +38487,21 @@ mod tests {
             "precondition: the change is off-screen"
         );
         assert_eq!(buf[(edge, y)].symbol(), "\u{203a}");
-        assert_eq!(buf[(edge, y)].bg, intraline(INTRALINE_ADDED_BG));
+        assert_eq!(buf[(edge, y)].bg, default_inks().intraline_added);
     }
 
     /// #1351: wide characters before the change keep the mark on the right
     /// cells (#1248): `語` takes two cells, so `b` is at cell 6.
     #[test]
     fn the_mark_stays_aligned_after_wide_characters() {
-        use crate::widgets::diff::INTRALINE_ADDED_BG;
         let (buf, inner, r_text_x) = render_wide_diff("x\n日本語a\n", "x\n日本語b\n");
         let (_, y) = left_text_at(&buf, inner, 2, "日");
         assert_eq!(buf[(r_text_x + 6, y)].symbol(), "b");
-        assert_eq!(buf[(r_text_x + 6, y)].bg, intraline(INTRALINE_ADDED_BG));
+        assert_eq!(buf[(r_text_x + 6, y)].bg, default_inks().intraline_added);
         for col in 0..6u16 {
             assert_ne!(
                 buf[(r_text_x + col, y)].bg,
-                intraline(INTRALINE_ADDED_BG),
+                default_inks().intraline_added,
                 "col {col}"
             );
         }
@@ -36041,7 +38519,7 @@ mod tests {
         for y in inner.y + 1..inner.y + 4 {
             assert_eq!(
                 buf[(seam_x, y)].symbol(),
-                "\u{2502}",
+                default_inks().seam.0,
                 "row {y}: {:?}",
                 row_text(&buf, y, inner.x, inner.right())
             );
@@ -36069,17 +38547,63 @@ mod tests {
         assert_eq!(clip_pad_cells("ab日", 0, 3), "ab ");
     }
 
+    /// The diff measures a tab after a grapheme cluster from the cells the
+    /// cluster is drawn in, so its text, marks and clicks stay together.
+    #[test]
+    fn the_diff_counts_a_tab_after_an_emoji_cluster_from_its_drawn_cells() {
+        set_tab_cells(4);
+        let line = "\u{1f44d}\u{1f3fd}\tX";
+        assert_eq!(clip_pad_cells(line, 0, 6), "\u{1f44d}\u{1f3fd}  X ");
+        assert_eq!(char_at_cell_from(line, 0, 4), 3, "a click on X lands on X");
+    }
+
+    /// A change to a character inside a grapheme cluster, such as only the
+    /// skin tone of `👍🏽`, marks the cells the whole cluster is drawn in.
+    #[test]
+    fn a_change_inside_an_emoji_cluster_marks_the_whole_cluster() {
+        let mut buf = Buffer::empty(Rect::new(0, 0, 6, 1));
+        let bg = Color::Red;
+        let line = "a\u{1f44d}\u{1f3fd}b";
+        paint_intraline_range(&mut buf, 0, 0, 6, line, 0, (2, 3), bg, Color::White, None);
+        let marked: Vec<bool> = (0..6).map(|x| buf[(x, 0)].bg == bg).collect();
+        assert_eq!(marked, [false, true, true, false, false, false]);
+        assert_ne!(buf[(5, 0)].symbol(), "\u{203a}", "no off-screen marker");
+    }
+
+    /// The diff's syntax colours land on the cells its text is drawn in, so a
+    /// token after a tab is coloured at the tab stop, not Tab Size cells on.
+    #[test]
+    fn the_diffs_syntax_colours_follow_the_tab_stops() {
+        set_tab_cells(4);
+        let mut buf = Buffer::empty(Rect::new(0, 0, 8, 1));
+        let red = Style::default().fg(Color::Red);
+        paint_diff_syntax(
+            &mut buf,
+            0,
+            0,
+            8,
+            "a\tb",
+            0,
+            &[HiSpan::new(2, 3, red)],
+            DiffInkLift::new(None, Color::Reset),
+        );
+        assert_eq!(clip_pad_cells("a\tb", 0, 8), "a   b   ");
+        assert_eq!(buf[(4, 0)].fg, Color::Red, "b is drawn at the stop, cell 4");
+        assert_eq!(buf[(5, 0)].fg, Color::Reset);
+    }
+
     /// #891: a tab takes one cell in the diff, as its selection, find
     /// highlight and clicks count it, so a tab-indented line is not drawn
     /// flush-left and its changed character is marked where it is drawn.
     #[test]
     fn a_tab_takes_its_cell_in_the_side_by_side_diff() {
-        use crate::widgets::diff::INTRALINE_REMOVED_BG;
+        set_tab_cells(1);
         assert_eq!(clip_pad_cells("\tx", 0, 4), " x  ");
+        // The diff draws a tab as the Tab Size of the buffer (4 by default).
         let (buf, inner, _) = render_wide_diff("x\n\tn = 1\n", "x\n\tn = 2\n");
-        let (l_text_x, y) = left_text_at(&buf, inner, 2, " n = 1");
-        assert_eq!(buf[(l_text_x + 5, y)].symbol(), "1");
-        assert_eq!(buf[(l_text_x + 5, y)].bg, intraline(INTRALINE_REMOVED_BG));
+        let (l_text_x, y) = left_text_at(&buf, inner, 2, "    n = 1");
+        assert_eq!(buf[(l_text_x + 8, y)].symbol(), "1");
+        assert_eq!(buf[(l_text_x + 8, y)].bg, default_inks().intraline_removed);
     }
 
     /// Narrow text clips and pads exactly as before: by character, to the
@@ -36095,8 +38619,386 @@ mod tests {
             .expect("ascii right line drawn at its column");
         assert_eq!(
             buf[(inner.x + inner.width / 2, changed)].symbol(),
-            "\u{2502}"
+            default_inks().seam.0
         );
+    }
+
+    /// #2020: the diff view paints code in its language's colours, on the
+    /// rows' red, green and plain backgrounds, as the editor does.
+    #[test]
+    fn the_diff_view_paints_code_in_its_syntax_colours() {
+        let file = |text: &str| {
+            let f = tempfile::Builder::new().suffix(".rs").tempfile().unwrap();
+            std::fs::write(f.path(), text).unwrap();
+            f
+        };
+        let f1 = file("fn main() {\n    let x = 1;\n}\n");
+        let f2 = file("fn main() {\n    let x = 2;\n}\n");
+        let mut t = EditorTabs::new();
+        t.open_diff(f1.path(), f2.path()).unwrap();
+        let idx = t.active_index();
+        t.editors[idx].diff.as_mut().unwrap().colour_syntax(None);
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 10,
+        };
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        ratatui::widgets::Widget::render(&mut t.editors[idx], area, &mut buf);
+        let ed = &t.editors[idx];
+        let inner = ed.last_inner;
+        let (l_text_x, unchanged) = left_text_at(&buf, inner, 3, "fn main() {");
+        assert_ne!(
+            buf[(l_text_x, unchanged)].fg,
+            buf[(l_text_x + 3, unchanged)].fg,
+            "the keyword `fn` and the name `main` read in different colours"
+        );
+        let (_, changed) = left_text_at(&buf, inner, 3, "    let x = 1;");
+        let r_text_x = inner.x + inner.width / 2 + 1 + 2 + 2;
+        assert_eq!(
+            row_text(&buf, changed, r_text_x, r_text_x + 14),
+            "    let x = 2;"
+        );
+        let DiffInks {
+            removed_bg,
+            added_bg,
+            ..
+        } = diff_inks(ed.theme);
+        for (x, bg, side) in [
+            (l_text_x, removed_bg, "removed"),
+            (r_text_x, added_bg, "added"),
+        ] {
+            let keyword = &buf[(x + 4, changed)];
+            let name = &buf[(x + 8, changed)];
+            assert_eq!(keyword.symbol(), "l");
+            assert_ne!(
+                keyword.fg, name.fg,
+                "`let` and `x` differ on the {side} side"
+            );
+            assert_eq!(keyword.bg, bg, "the {side} row keeps its background");
+            assert_eq!(name.bg, bg);
+        }
+    }
+
+    /// A file with no grammar keeps the diff's own tints: red text on the
+    /// removed side, green on the added (Croft Loch's are the body ink
+    /// leaning toward each hue, and on the changed characters' brighter
+    /// tint that ink is lifted to read but still leans the same way).
+    #[test]
+    fn a_diff_with_no_grammar_keeps_its_red_and_green_text() {
+        let (buf, inner, r_text_x) = render_wide_diff("x\nold line\n", "x\nnew line\n");
+        let (l_text_x, y) = left_text_at(&buf, inner, 2, "old line");
+        let inks = default_inks();
+        // " line" is the unchanged tail; "old" / "new" are the change.
+        assert_eq!(buf[(l_text_x + 4, y)].fg, inks.removed_fg);
+        assert_eq!(buf[(r_text_x + 4, y)].fg, inks.added_fg);
+        for (ink, changed) in [
+            (inks.removed_fg, buf[(l_text_x, y)].fg),
+            (inks.added_fg, buf[(r_text_x, y)].fg),
+        ] {
+            for c in [ink, changed] {
+                let Color::Rgb(r, g, _) = c else {
+                    panic!("an RGB ink");
+                };
+                if ink == inks.removed_fg {
+                    assert!(r > g, "removed text leans red ({c:?})");
+                } else {
+                    assert!(g > r, "added text leans green ({c:?})");
+                }
+            }
+        }
+    }
+
+    /// A two-file diff of a one-line change plus an inserted line, drawn
+    /// 80 by 10 under `theme` with the pointer at `pointer`; returns the
+    /// buffer, the inner rect and the arrows' hit rects.
+    fn render_diff_in(
+        theme: crate::theme::Theme,
+        pointer: Option<(u16, u16)>,
+    ) -> (ratatui::buffer::Buffer, Rect, (Rect, Rect)) {
+        let f1 = tempfile::Builder::new().suffix(".txt").tempfile().unwrap();
+        let f2 = tempfile::Builder::new().suffix(".txt").tempfile().unwrap();
+        std::fs::write(f1.path(), "keep\nbackoff=1.5\ntail\n").unwrap();
+        std::fs::write(f2.path(), "keep\nbackoff=2.5\nnew line\ntail\n").unwrap();
+        let mut t = EditorTabs::new();
+        t.open_diff(f1.path(), f2.path()).unwrap();
+        let idx = t.active_index();
+        t.editors[idx].theme = theme;
+        t.editors[idx].pointer = pointer;
+        let area = Rect::new(0, 0, 80, 10);
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        ratatui::widgets::Widget::render(&mut t.editors[idx], area, &mut buf);
+        let ed = &t.editors[idx];
+        (buf, ed.last_inner, (ed.diff_prev_arrow, ed.diff_next_arrow))
+    }
+
+    /// Croft Loch: the diff header sits on the chrome tone (not the teal
+    /// band), each file's name over its own column with the current side's
+    /// in the strong ink and `↔` faint on the seam; the `‹ ›` arrows are
+    /// muted at rest and strong under the pointer, on the same hit cells a
+    /// boxed theme gives them.
+    #[test]
+    fn croft_loch_diff_header_sits_on_chrome() {
+        let theme = crate::theme::Theme::LOCH;
+        let t = crate::widgets::surface::tones(theme).unwrap();
+        let (buf, inner, (prev, next)) = render_diff_in(theme, None);
+        for x in inner.x..inner.right() {
+            assert_eq!(buf[(x, inner.y)].bg, t.chrome(), "({x}) header on chrome");
+            assert!(!buf[(x, inner.y)].modifier.contains(Modifier::BOLD));
+        }
+        let row = row_text(&buf, inner.y, inner.x, inner.right());
+        assert!(!row.contains("diff:"), "{row:?}");
+        let seam_x = inner.x + inner.width / 2;
+        assert_eq!(buf[(seam_x, inner.y)].symbol(), "\u{2194}");
+        assert_eq!(buf[(seam_x, inner.y)].fg, t.faint());
+        // Two digits of gutter (3 lines + 1), a space, the sign and its pad.
+        let l_text_x = inner.x + 2 + 2;
+        let r_text_x = seam_x + 1 + 2 + 2;
+        assert_eq!(buf[(l_text_x, inner.y)].fg, t.text(), "the old side");
+        assert_eq!(buf[(r_text_x, inner.y)].fg, t.strong(), "the current side");
+        assert_ne!(buf[(r_text_x, inner.y)].symbol(), " ");
+        assert_eq!(buf[(prev.x, prev.y)].symbol(), "\u{2039}");
+        assert_eq!(buf[(prev.x, prev.y)].fg, t.muted());
+        assert_eq!(buf[(next.x, next.y)].fg, t.muted());
+        let (_, _, boxed) = render_diff_in(crate::theme::Theme::BLACK, None);
+        assert_eq!((prev, next), boxed, "the arrows keep their hit cells");
+        let (hovered, _, _) = render_diff_in(theme, Some((next.x, next.y)));
+        assert_eq!(hovered[(next.x, next.y)].fg, t.strong());
+        assert_eq!(hovered[(next.x, next.y)].bg, t.hover_on(t.chrome));
+        assert_eq!(hovered[(prev.x, prev.y)].fg, t.muted());
+    }
+
+    /// Croft Loch: a changed row is a tint of its hue over the canvas, its
+    /// changed characters a stronger tint, its sign in the hue and its line
+    /// number muted (an unchanged row's stays faint); the blank side
+    /// opposite an inserted line is a faint hatch, and the footer is muted
+    /// text with keycaps on chrome.
+    #[test]
+    fn croft_loch_diff_rows_are_soft_tints() {
+        let theme = crate::theme::Theme::LOCH;
+        let t = crate::widgets::surface::tones(theme).unwrap();
+        let inks = diff_inks(theme);
+        let tint = |c: Color, k: f32| {
+            let Color::Rgb(r, g, b) = c else {
+                panic!("an RGB colour");
+            };
+            diff_tint(t, (r, g, b), k)
+        };
+        assert_eq!(inks.removed_bg, tint(theme.git_deleted(), DIFF_ROW_TINT.0));
+        assert_eq!(inks.added_bg, tint(theme.git_added(), DIFF_ROW_TINT.1));
+        let Color::Rgb(r, g, b) = inks.removed_bg else {
+            panic!("an RGB tint");
+        };
+        assert!(r > g && r > b, "the removed tint is still plainly red");
+        let Color::Rgb(r, g, b) = inks.added_bg else {
+            panic!("an RGB tint");
+        };
+        assert!(g > r && g > b, "the added tint is still plainly green");
+        let (buf, inner, _) = render_diff_in(theme, None);
+        let (l_text_x, y) = left_text_at(&buf, inner, 3, "backoff=1.5");
+        let seam_x = inner.x + inner.width / 2;
+        let r_text_x = seam_x + 1 + 2 + 2;
+        assert_eq!(buf[(l_text_x, y)].bg, inks.removed_bg);
+        assert_eq!(buf[(r_text_x, y)].bg, inks.added_bg);
+        assert_eq!(buf[(l_text_x + 8, y)].bg, inks.intraline_removed, "the 1");
+        assert_eq!(buf[(r_text_x + 8, y)].bg, inks.intraline_added, "the 2");
+        assert_eq!(buf[(l_text_x - 2, y)].symbol(), "-");
+        assert_eq!(buf[(l_text_x - 2, y)].fg, theme.git_deleted());
+        assert_eq!(buf[(r_text_x - 2, y)].fg, theme.git_added());
+        assert_eq!(buf[(inner.x, y)].symbol(), "2");
+        assert_eq!(buf[(inner.x, y)].fg, t.muted(), "a changed line number");
+        assert_eq!(buf[(inner.x, y - 1)].symbol(), "1");
+        assert_eq!(buf[(inner.x, y - 1)].fg, t.faint(), "an unchanged one");
+        assert_eq!(buf[(seam_x - 1, y)].bg, inks.removed_bg, "tint to the seam");
+        assert_eq!(buf[(seam_x, y)].symbol(), "\u{258f}");
+        // The inserted line: hatched on the left, tinted on the right.
+        let ins = y + 1;
+        assert_eq!(row_text(&buf, ins, r_text_x, r_text_x + 8), "new line");
+        for x in inner.x..seam_x {
+            assert_eq!(buf[(x, ins)].symbol(), "\u{2571}", "({x}) hatched");
+            assert_eq!(buf[(x, ins)].bg, t.canvas());
+        }
+        assert_eq!(buf[(r_text_x, ins)].bg, inks.added_bg);
+        // The footer: muted on chrome, the keys as keycaps.
+        let foot = inner.bottom() - 1;
+        let text = row_text(&buf, foot, inner.x, inner.right());
+        assert!(text.contains(" F7 "), "{text:?}");
+        assert_eq!(buf[(inner.x + 1, foot)].fg, t.muted());
+        assert_eq!(buf[(inner.right() - 1, foot)].bg, t.chrome());
+        let cells: Vec<&str> = (inner.x..inner.right())
+            .map(|x| buf[(x, foot)].symbol())
+            .collect();
+        let f7 = cells.windows(2).position(|w| w == ["F", "7"]).unwrap() as u16;
+        assert_eq!(buf[(inner.x + f7, foot)].bg, t.keycap_on(t.chrome()));
+    }
+
+    /// Croft Loch: a changed row's tint stands 1.5 to 1.7:1 off the black
+    /// canvas, so a change is seen at a glance and still sits calmly, its
+    /// changed characters a further 1.5:1 or more off the row, and its line
+    /// number reads at 3:1 on the tint; the hatch opposite an insertion
+    /// stays a whisper. A boxed theme lifts nothing and keeps one gutter
+    /// ink.
+    #[test]
+    fn croft_loch_diff_tints_are_plain_at_a_glance() {
+        use crate::theme::contrast_ratio;
+        let rgb = |c: Color| match c {
+            Color::Rgb(r, g, b) => (r, g, b),
+            other => panic!("an RGB colour, not {other:?}"),
+        };
+        let theme = crate::theme::Theme::LOCH;
+        let t = crate::widgets::surface::tones(theme).unwrap();
+        let inks = diff_inks(theme);
+        for (side, row, change) in [
+            ("removed", inks.removed_bg, inks.intraline_removed),
+            ("added", inks.added_bg, inks.intraline_added),
+        ] {
+            let tint = contrast_ratio(rgb(row), t.canvas);
+            assert!((1.5..=1.7).contains(&tint), "{side} row {tint:.2}:1");
+            let mark = contrast_ratio(rgb(change), rgb(row));
+            assert!(mark >= 1.5, "{side} change {mark:.2}:1 on its row");
+            let number = contrast_ratio(rgb(inks.changed_gutter_fg), rgb(row));
+            assert!(number >= 3.0, "{side} line number {number:.2}:1");
+            let faint = contrast_ratio(t.faint, rgb(row));
+            assert!(
+                faint < 3.0,
+                "the faint ink would not have read ({faint:.2}:1)"
+            );
+        }
+        let (_, hatch) = inks.hatch.expect("Loch hatches its filler");
+        assert!(
+            contrast_ratio(rgb(hatch), t.canvas) < 1.3,
+            "the hatch is subtle"
+        );
+
+        let boxed = diff_inks(crate::theme::Theme::BLACK);
+        assert!(boxed.legible.is_none(), "a boxed theme lifts no ink");
+        assert_eq!(boxed.changed_gutter_fg, boxed.gutter_fg);
+    }
+
+    /// Croft Loch: code on a changed row reads at 4.5:1 or better on the
+    /// row's tint and on its changed characters' stronger one. A colour
+    /// that already does (a keyword on the row) is left as the editor
+    /// draws it; one that would not (a comment) is lifted only as far as
+    /// it must, keeping its hue rather than turning into the strong ink.
+    #[test]
+    fn croft_loch_diff_lifts_code_that_would_not_read_on_a_tint() {
+        use crate::theme::contrast_ratio;
+        let rgb = |c: Color| match c {
+            Color::Rgb(r, g, b) => (r, g, b),
+            other => panic!("an RGB colour, not {other:?}"),
+        };
+        let file = |text: &str| {
+            let f = tempfile::Builder::new().suffix(".rs").tempfile().unwrap();
+            std::fs::write(f.path(), text).unwrap();
+            f
+        };
+        let head = "fn main() {\n    let a = 1;\n    // keep\n";
+        let f1 = file(&format!("{head}    // read the text\n    let n = 8;\n}}\n"));
+        let f2 = file(&format!(
+            "{head}    // read the file\n    let n = 12;\n}}\n"
+        ));
+        let mut t = EditorTabs::new();
+        t.open_diff(f1.path(), f2.path()).unwrap();
+        let idx = t.active_index();
+        t.editors[idx].theme = crate::theme::Theme::LOCH;
+        t.editors[idx].diff.as_mut().unwrap().colour_syntax(None);
+        let area = Rect::new(0, 0, 80, 14);
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        ratatui::widgets::Widget::render(&mut t.editors[idx], area, &mut buf);
+        let ed = &t.editors[idx];
+        let tones = crate::widgets::surface::tones(ed.theme).unwrap();
+        let inner = ed.last_inner;
+        let seam_x = inner.x + inner.width / 2;
+        let r_text_x = seam_x + 1 + 2 + 2;
+        let (l_text_x, kept_let) = left_text_at(&buf, inner, 6, "    let a = 1;");
+        let (_, kept_comment) = left_text_at(&buf, inner, 6, "    // keep");
+        let (_, comment) = left_text_at(&buf, inner, 6, "    // read the text");
+        let (_, number) = left_text_at(&buf, inner, 6, "    let n = 8;");
+        let inks = diff_inks(ed.theme);
+        assert_eq!(buf[(l_text_x + 4, comment)].bg, inks.removed_bg);
+        assert_eq!(buf[(l_text_x + 16, comment)].bg, inks.intraline_removed);
+        for y in [comment, number] {
+            for x in (l_text_x..seam_x - 1).chain(r_text_x..inner.right()) {
+                let cell = &buf[(x, y)];
+                if cell.symbol() == " " {
+                    continue;
+                }
+                let ratio = contrast_ratio(rgb(cell.fg), rgb(cell.bg));
+                assert!(
+                    ratio >= 4.5,
+                    "{:?} at ({x},{y}): {ratio:.2}:1",
+                    cell.symbol()
+                );
+            }
+        }
+        assert_eq!(
+            buf[(l_text_x + 4, number)].fg,
+            buf[(l_text_x + 4, kept_let)].fg,
+            "`let` reads on the tint as it is"
+        );
+        let lifted = buf[(l_text_x + 4, comment)].fg;
+        assert_ne!(lifted, buf[(l_text_x + 4, kept_comment)].fg, "lifted");
+        assert_ne!(lifted, tones.strong(), "only as far as it must");
+    }
+
+    /// A boxed theme's diff is the one it always drew: the teal header
+    /// band in bold white, the saturated red and green rows and the solid
+    /// filler, the `│` seam and the grey footer band.
+    #[test]
+    fn a_boxed_diff_keeps_its_bands_and_saturated_rows() {
+        let theme = crate::theme::Theme::BLACK;
+        let (buf, inner, _) = render_diff_in(theme, None);
+        assert_eq!(
+            buf[(inner.x, inner.y)].bg,
+            theme.ui(Color::Rgb(0x09, 0x4d, 0x77))
+        );
+        assert!(row_text(&buf, inner.y, inner.x, inner.right()).starts_with(" diff: "));
+        let (l_text_x, y) = left_text_at(&buf, inner, 3, "backoff=1.5");
+        assert_eq!(
+            buf[(l_text_x, y)].bg,
+            theme.ui(Color::Rgb(0x4a, 0x1f, 0x1f))
+        );
+        let (r, g, b) = crate::widgets::diff::INTRALINE_REMOVED_BG;
+        assert_eq!(buf[(l_text_x + 8, y)].bg, Color::Rgb(r, g, b));
+        assert_eq!(
+            buf[(inner.x, y + 1)].bg,
+            theme.ui(Color::Rgb(0x1f, 0x42, 0x2a)),
+            "the filler is the solid green"
+        );
+        assert_eq!(buf[(inner.x, y + 1)].symbol(), " ");
+        assert_eq!(buf[(inner.x + inner.width / 2, y)].symbol(), "\u{2502}");
+        assert_eq!(
+            buf[(inner.x, inner.bottom() - 1)].bg,
+            theme.ui(Color::Rgb(0x14, 0x18, 0x22))
+        );
+    }
+
+    /// Croft Loch's deleted-file view: the same chrome header (the name in
+    /// the strong ink, the note muted), soft red rows and a chrome footer.
+    #[test]
+    fn croft_loch_deleted_file_diff_is_calm() {
+        let theme = crate::theme::Theme::LOCH;
+        let t = crate::widgets::surface::tones(theme).unwrap();
+        let inks = diff_inks(theme);
+        let mut diff = crate::widgets::diff::DiffData::build_unified_deletion(
+            std::path::PathBuf::from("gone.txt"),
+            "one\ntwo\n",
+        );
+        let area = Rect::new(0, 0, 60, 8);
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        render_diff(&mut diff, area, &mut buf, theme.editor_bg(), theme, None);
+        assert_eq!(buf[(0, 0)].bg, t.chrome());
+        let head = row_text(&buf, 0, 0, 60);
+        assert!(head.starts_with(" gone.txt  \u{b7}  deleted"), "{head:?}");
+        assert_eq!(buf[(1, 0)].fg, t.strong());
+        assert_eq!(buf[(14, 0)].symbol(), "d");
+        assert_eq!(buf[(14, 0)].fg, t.muted());
+        let text_x = 2 + 2;
+        assert_eq!(row_text(&buf, 1, text_x, text_x + 3), "one");
+        assert_eq!(buf[(text_x, 1)].bg, inks.removed_bg);
+        assert_eq!(buf[(text_x - 2, 1)].fg, theme.git_deleted());
+        assert_eq!(buf[(59, 7)].bg, t.chrome(), "footer on chrome");
     }
 
     #[test]
@@ -37072,13 +39974,18 @@ mod tests {
         t.hover_pointer = Some((cx, area.y));
         let mut buf = Buffer::empty(area);
         (&mut t).render(area, &mut buf);
-        let pill = crate::theme::Theme::default().tab_close_pill_bg();
+        let theme = crate::theme::Theme::default();
+        let pill = theme.tab_close_pill_bg();
         assert_eq!(
             buf[(cx, area.y)].bg,
             pill,
             "the hovered cross cell wears the pill"
         );
-        assert_eq!(buf[(cx, area.y)].fg, Color::White);
+        // Croft Loch inks the glyph on its neutral pill in the strong grey,
+        // not bold white.
+        let t = crate::widgets::surface::tones(theme).expect("Loch is the default");
+        assert_eq!(buf[(cx, area.y)].fg, t.strong());
+        assert!(!buf[(cx, area.y)].modifier.contains(Modifier::BOLD));
         assert_eq!(
             buf[(cx, area.y)].symbol(),
             "\u{2715}",
@@ -37158,7 +40065,7 @@ mod tests {
         for (id, want) in [
             ("hc-black", Color::Black),
             ("hc-light", Color::White),
-            ("dark", Color::White),
+            ("dark-blue", Color::White),
         ] {
             let theme = crate::theme::Theme::from_id(id);
             let mut t = EditorTabs::new();
@@ -37255,6 +40162,281 @@ mod tests {
             hover,
             "the active tab keeps its own bg when a sibling is hovered"
         );
+    }
+
+    /// Two tabs on Croft Loch, `foo.rs` inactive and `bar.rs` active, the
+    /// group focused or not, rendered on an 80x10 area.
+    fn loch_tab_pair(focused: bool) -> (EditorTabs, Buffer) {
+        let mut t = EditorTabs::new();
+        t.editors[0].path = Some(PathBuf::from("/foo.rs"));
+        t.add_tab_with_path(PathBuf::from("/bar.rs"));
+        t.editors[1].focused = focused;
+        let mut buf = Buffer::empty(Rect::new(0, 0, 80, 10));
+        let area = buf.area;
+        (&mut t).render(area, &mut buf);
+        (t, buf)
+    }
+
+    /// Croft Loch lays a tab out as ` {icon} {label} {close} `: the
+    /// Explorer's file icon leads, an inactive label is muted with a faint
+    /// cross, and the active tab of the focused group is the strong ink,
+    /// never bold, with the accent only as an underline under its label.
+    #[test]
+    fn a_loch_tab_leads_with_its_icon_and_marks_the_focused_active_tab() {
+        let (t, buf) = loch_tab_pair(true);
+        let s = crate::widgets::surface::tones(crate::theme::Theme::default()).unwrap();
+        let (x0, w0) = t.tab_screen_x(0).unwrap();
+        let (x1, _) = t.tab_screen_x(1).unwrap();
+        assert_eq!(w0, 6 + 6, "pad, icon, gap, label, gap, close, pad");
+        let icon = crate::icons::for_path("foo.rs", ".rs");
+        assert_eq!(buf[(x0 + 1, 0)].symbol(), icon.glyph.to_string());
+        let (inactive, active) = (&buf[(x0 + 3, 0)], &buf[(x1 + 3, 0)]);
+        assert_eq!((inactive.symbol(), active.symbol()), ("f", "b"));
+        assert_eq!(inactive.fg, s.muted());
+        assert_eq!(active.fg, s.strong());
+        assert!(!active.modifier.contains(Modifier::BOLD), "no bold tabs");
+        assert!(active.modifier.contains(Modifier::UNDERLINED));
+        assert_eq!(active.underline_color, s.accent());
+        assert!(!inactive.modifier.contains(Modifier::UNDERLINED));
+        assert!(
+            !buf[(x1 + 1, 0)].modifier.contains(Modifier::UNDERLINED),
+            "the underline sits under the label, not the icon"
+        );
+        let (c0, c1) = (t.close_screen_x(0).unwrap(), t.close_screen_x(1).unwrap());
+        assert_eq!(buf[(c0, 0)].symbol(), "\u{2715}");
+        assert_eq!(buf[(c0, 0)].fg, s.faint(), "an inactive cross recedes");
+        assert_eq!(buf[(c1, 0)].fg, s.muted());
+    }
+
+    /// The accent means "has the keyboard": an unfocused group's active
+    /// tab is body text without the underline, and a modal over a focused
+    /// group takes the underline but leaves the tab its strong ink.
+    #[test]
+    fn a_loch_tab_wears_the_accent_only_while_its_group_has_the_keyboard() {
+        let s = crate::widgets::surface::tones(crate::theme::Theme::default()).unwrap();
+        let (t, buf) = loch_tab_pair(false);
+        let label = &buf[(t.tab_screen_x(1).unwrap().0 + 3, 0)];
+        assert_eq!(label.fg, s.text());
+        assert!(!label.modifier.contains(Modifier::UNDERLINED));
+        let (mut t, _) = loch_tab_pair(true);
+        t.editors[1].overlay_has_keyboard = true;
+        let mut buf = Buffer::empty(Rect::new(0, 0, 80, 10));
+        let area = buf.area;
+        (&mut t).render(area, &mut buf);
+        let label = &buf[(t.tab_screen_x(1).unwrap().0 + 3, 0)];
+        assert_eq!(label.fg, s.strong());
+        assert!(!label.modifier.contains(Modifier::UNDERLINED));
+    }
+
+    /// A dirty file's tab keeps its width on Croft Loch: the dot moves from
+    /// the label into the close slot, turns back into the cross under the
+    /// pointer, and the label the menus read still carries it.
+    #[test]
+    fn a_loch_dirty_tab_shows_its_dot_in_the_close_slot_without_moving() {
+        let (mut t, _) = loch_tab_pair(true);
+        let clean = t.tab_screen_x(0).unwrap();
+        t.editors[0].dirty = true;
+        let mut buf = Buffer::empty(Rect::new(0, 0, 80, 10));
+        let area = buf.area;
+        (&mut t).render(area, &mut buf);
+        assert_eq!(t.tab_screen_x(0).unwrap(), clean, "no width jump");
+        let c0 = t.close_screen_x(0).unwrap();
+        assert_eq!(buf[(c0, 0)].symbol(), "\u{25cf}");
+        assert_eq!(
+            buf[(clean.0 + 3, 0)].symbol(),
+            "f",
+            "no dot before the label"
+        );
+        assert!(t.tab_display_label(0).starts_with("\u{25cf} "));
+        t.hover_pointer = Some((clean.0 + 3, 0));
+        let mut buf = Buffer::empty(area);
+        (&mut t).render(area, &mut buf);
+        assert_eq!(buf[(c0, 0)].symbol(), "\u{2715}", "the cross on hover");
+        // A boxed theme keeps the dot in front of the label.
+        for ed in t.editors.iter_mut() {
+            ed.theme = crate::theme::Theme::BLACK;
+        }
+        t.hover_pointer = None;
+        let mut buf = Buffer::empty(area);
+        (&mut t).render(area, &mut buf);
+        assert_eq!(
+            buf[(t.tab_screen_x(0).unwrap().0 + 1, 0)].symbol(),
+            "\u{25cf}"
+        );
+    }
+
+    /// A pinned tab's close slot holds its pin, so on Croft Loch a dirty
+    /// pinned tab keeps the dot in front of its label: editing it never
+    /// makes it look saved.
+    #[test]
+    fn a_loch_dirty_pinned_tab_keeps_its_dot_beside_the_pin() {
+        let (mut t, _) = loch_tab_pair(true);
+        t.editors[0].pinned = true;
+        t.editors[0].dirty = true;
+        let mut buf = Buffer::empty(Rect::new(0, 0, 80, 10));
+        let area = buf.area;
+        (&mut t).render(area, &mut buf);
+        let (x0, _) = t.tab_screen_x(0).unwrap();
+        assert_eq!(
+            buf[(t.close_screen_x(0).unwrap(), 0)].symbol(),
+            "\u{f08d}",
+            "the pin keeps the close slot"
+        );
+        assert_eq!(
+            buf[(x0 + 3, 0)].symbol(),
+            "\u{25cf}",
+            "the dot leads the label"
+        );
+    }
+
+    /// Hover on Croft Loch is a neutral lift: the hovered tab's label rises
+    /// to body text on the chrome's hover tone, and the close pill is a
+    /// neutral step above it, never the teal.
+    #[test]
+    fn a_loch_hover_is_a_neutral_lift() {
+        let theme = crate::theme::Theme::default();
+        let s = crate::widgets::surface::tones(theme).unwrap();
+        assert_eq!(theme.tab_hover_bg(), s.hover_on(s.chrome));
+        assert_ne!(theme.tab_close_pill_bg(), theme.tab_hover_bg());
+        assert_ne!(theme.tab_close_pill_bg(), theme.tab_active_bg());
+        let (mut t, _) = loch_tab_pair(true);
+        let (x0, _) = t.tab_screen_x(0).unwrap();
+        t.hover_pointer = Some((x0 + 3, 0));
+        let mut buf = Buffer::empty(Rect::new(0, 0, 80, 10));
+        let area = buf.area;
+        (&mut t).render(area, &mut buf);
+        assert_eq!(buf[(x0 + 3, 0)].fg, s.text());
+        assert_eq!(buf[(x0 + 1, 0)].bg, theme.tab_hover_bg());
+        assert_eq!(
+            buf[(t.close_screen_x(0).unwrap(), 0)].fg,
+            s.muted(),
+            "a hovered tab's cross comes forward"
+        );
+    }
+
+    /// Croft Loch's breadcrumbs are in its inks: faint separators, muted
+    /// crumbs, the last one in body text, and a crumb's icon drawn before
+    /// its label without joining the label's hit range.
+    #[test]
+    fn loch_breadcrumbs_lead_to_the_last_crumb_with_icons_outside_the_hit_range() {
+        let s = crate::widgets::surface::tones(crate::theme::Theme::default()).unwrap();
+        let mut tabs = EditorTabs::new();
+        tabs.breadcrumbs = vec![
+            Crumb {
+                label: "src".into(),
+                target: None,
+                icon: None,
+            },
+            Crumb {
+                label: "m.rs".into(),
+                target: None,
+                icon: Some(('R', Color::Rgb(0xde, 0xa5, 0x84))),
+            },
+            Crumb {
+                label: "build".into(),
+                target: Some((5, 2)),
+                icon: Some(('F', Color::Rgb(0xb1, 0x80, 0xd7))),
+            },
+        ];
+        let area = Rect::new(0, 0, 60, 10);
+        let mut buf = Buffer::empty(area);
+        (&mut tabs).render(area, &mut buf);
+        let row: String = (0..area.width).map(|x| buf[(x, 1)].symbol()).collect();
+        assert!(
+            row.starts_with(" src \u{203a} R m.rs \u{203a} F build"),
+            "{row:?}"
+        );
+        let sep = row.find('\u{203a}').unwrap();
+        let sep_x = row[..sep].chars().count() as u16;
+        assert_eq!(buf[(sep_x, 1)].fg, s.faint());
+        assert_eq!(buf[(1, 1)].fg, s.muted(), "a path crumb is muted");
+        let (fx, fw, _) = tabs.breadcrumb_ranges[1];
+        assert_eq!(buf[(fx, 1)].symbol(), "m");
+        assert_eq!(fw, 4, "the hit range is the label alone");
+        assert_eq!(buf[(fx - 2, 1)].symbol(), "R");
+        let theme = crate::theme::Theme::default();
+        assert_eq!(buf[(fx - 2, 1)].fg, theme.ui(Color::Rgb(0xde, 0xa5, 0x84)));
+        let (lx, _, target) = tabs.breadcrumb_ranges[2];
+        assert_eq!(target, Some((5, 2)));
+        assert_eq!(
+            buf[(lx, 1)].fg,
+            s.text(),
+            "the crumb you are in reads first"
+        );
+        // A boxed theme draws no icons.
+        for ed in tabs.editors.iter_mut() {
+            ed.theme = crate::theme::Theme::BLACK;
+        }
+        let mut buf = Buffer::empty(area);
+        (&mut tabs).render(area, &mut buf);
+        let row: String = (0..area.width).map(|x| buf[(x, 1)].symbol()).collect();
+        assert!(
+            row.starts_with(" src \u{203a} m.rs \u{203a} build"),
+            "{row:?}"
+        );
+    }
+
+    /// The seam under Croft Loch's header is always drawn: the plain
+    /// hairline while the editor is unfocused or a modal quick input has the
+    /// keyboard, the accent lip while it has the keyboard itself.
+    #[test]
+    fn a_loch_editor_always_draws_its_top_seam_and_lights_it_with_the_keyboard() {
+        let theme = crate::theme::Theme::default();
+        let s = crate::widgets::surface::tones(theme).unwrap();
+        let area = Rect::new(0, 0, 30, 6);
+        let top = |e: &mut Editor| {
+            let mut buf = Buffer::empty(area);
+            (&mut *e).render(area, &mut buf);
+            (buf[(0, 0)].symbol().to_string(), buf[(0, 0)].fg)
+        };
+        let mut e = editor_with("a\nb");
+        e.focused = false;
+        assert_eq!(top(&mut e), ("\u{2594}".to_string(), s.hairline()));
+        e.focused = true;
+        assert_eq!(top(&mut e), ("\u{2594}".to_string(), s.accent()));
+        e.overlay_has_keyboard = true;
+        assert_eq!(top(&mut e), ("\u{2594}".to_string(), s.hairline()));
+        assert!(e.focused, "the modal leaves focus where it was");
+    }
+
+    /// Croft Loch keeps an expanded fold's chevron out of the gutter until
+    /// the caret is on its line or the pointer is over the gutter; a
+    /// collapsed fold's chevron always shows, in the muted ink.
+    #[test]
+    fn loch_fold_chevrons_wait_for_the_caret_or_the_pointer() {
+        let s = crate::widgets::surface::tones(crate::theme::Theme::default()).unwrap();
+        let mut e = editor_with("fn a() {\n    x\n}\nfn b() {\n    y\n}");
+        e.cursor_row = 1;
+        let area = Rect::new(0, 0, 30, 10);
+        let chevrons = |e: &mut Editor| -> Vec<String> {
+            let mut buf = Buffer::empty(area);
+            (&mut *e).render(area, &mut buf);
+            let x = e.last_inner.x + 1;
+            (0..6)
+                .map(|r| buf[(x, e.last_inner.y + r)].symbol().to_string())
+                .collect()
+        };
+        assert!(e.is_foldable(0) && e.is_foldable(3));
+        let quiet = chevrons(&mut e);
+        assert_eq!(quiet[0], " ", "no chevron off the caret's line");
+        assert_eq!(quiet[3], " ");
+        e.cursor_row = 0;
+        assert_eq!(chevrons(&mut e)[0], "\u{25be}", "the caret's line shows it");
+        assert_eq!(chevrons(&mut e)[3], " ");
+        e.cursor_row = 1;
+        e.pointer = Some((e.last_inner.x, e.last_inner.y + 4));
+        let hovered = chevrons(&mut e);
+        assert_eq!(
+            (hovered[0].as_str(), hovered[3].as_str()),
+            ("\u{25be}", "\u{25be}")
+        );
+        e.pointer = None;
+        e.toggle_fold(3);
+        let mut buf = Buffer::empty(area);
+        (&mut e).render(area, &mut buf);
+        let cell = &buf[(e.last_inner.x + 1, e.last_inner.y + 3)];
+        assert_eq!(cell.symbol(), "\u{25b8}", "a collapsed fold always shows");
+        assert_eq!(cell.fg, s.muted());
     }
 
     /// The ten manifest themes recolor the editor body; the tab strip must
@@ -38824,6 +42006,94 @@ mod tests {
         assert_eq!(e.lines, vec!["Hello There World"]);
     }
 
+    /// #956: Enter, Enter inside a block leaves the first new line blank,
+    /// not holding the indentation, and the next line is still indented.
+    #[test]
+    fn enter_twice_leaves_no_indentation_on_the_blank_line() {
+        let mut e = editor_with("def area(w, h):\n    return w * h");
+        e.cursor_row = 1;
+        e.cursor_col = 16;
+        e.insert_newline();
+        assert_eq!(e.lines[2], "    ", "Enter indents the new line");
+        e.insert_newline();
+        for c in "total".chars() {
+            e.insert_char(c);
+        }
+        assert_eq!(
+            e.lines,
+            ["def area(w, h):", "    return w * h", "", "    total"]
+        );
+        // One Ctrl+Z per Enter, as before: the clear is part of the second.
+        e.undo();
+        e.undo();
+        assert_eq!(e.lines, ["def area(w, h):", "    return w * h", "    "]);
+    }
+
+    /// #956: leaving the indented line by moving off it clears it too; one
+    /// that got text keeps its indentation.
+    #[test]
+    fn leaving_an_indented_blank_line_clears_it_but_typing_keeps_it() {
+        let mut e = editor_with("if x:\n    a = 1\n    b = 2");
+        e.cursor_row = 1;
+        e.cursor_col = 9;
+        e.insert_newline();
+        e.move_down();
+        e.trim_auto_indent(false);
+        assert_eq!(e.lines[2], "", "moved off with nothing typed");
+        assert!(e.dirty);
+        let mut e = editor_with("if x:\n    a = 1\n    b = 2");
+        e.cursor_row = 1;
+        e.cursor_col = 9;
+        e.insert_newline();
+        e.insert_char('c');
+        e.move_down();
+        e.trim_auto_indent(false);
+        assert_eq!(e.lines[2], "    c", "typed-on lines keep their indentation");
+        // A selection from the line keeps its end on the line once cleared.
+        let mut e = editor_with("if x:\n    a = 1\n    b = 2");
+        e.cursor_row = 1;
+        e.cursor_col = 9;
+        e.insert_newline();
+        e.selection = Some(EditorSelection {
+            anchor: (2, 4),
+            head: (3, 4),
+        });
+        e.cursor_row = 3;
+        e.cursor_col = 4;
+        e.trim_auto_indent(false);
+        assert_eq!(e.lines[2], "");
+        assert_eq!(e.selection.map(|s| s.anchor), Some((2, 0)));
+        // Negative: staying on the line keeps the indent where the caret is.
+        let mut e = editor_with("if x:\n    a = 1");
+        e.cursor_row = 1;
+        e.cursor_col = 9;
+        e.insert_newline();
+        e.trim_auto_indent(false);
+        assert_eq!(e.lines[2], "    ");
+        assert_eq!(e.cursor_col, 4);
+    }
+
+    /// #1016: an apostrophe inside a word doesn't start a new one, so
+    /// contractions and possessives keep their lower-case tail; one that
+    /// opens a word (`'tis`) still capitalises the letter after it.
+    #[test]
+    fn title_case_keeps_contractions_whole() {
+        assert_eq!(
+            title_case("## don't stop believing: it's the journey's end"),
+            "## Don't Stop Believing: It's The Journey's End"
+        );
+        assert_eq!(
+            title_case("we'll be there by o'clock, won't we?"),
+            "We'll Be There By O'clock, Won't We?"
+        );
+        assert_eq!(
+            title_case("don\u{2019}t it\u{2019}s"),
+            "Don\u{2019}t It\u{2019}s"
+        );
+        assert_eq!(title_case("'tis the season"), "'Tis The Season");
+        assert_eq!(title_case("say 'hello' twice"), "Say 'Hello' Twice");
+    }
+
     /// #1573: the four naming styles, from each other.
     #[test]
     fn identifiers_change_naming_style() {
@@ -39128,7 +42398,8 @@ mod tests {
         }];
         e.transform_selection_case(CaseTransform::Upper);
         assert_eq!(e.lines, vec!["HELLO world"]);
-        assert_eq!(selected_texts(&e), vec!["HELLO", "L"]);
+        // One inside the other is an overlap: they come back as one (#1570).
+        assert_eq!(selected_texts(&e), vec!["HELLO"]);
     }
 
     #[test]
@@ -39144,8 +42415,10 @@ mod tests {
         }];
         e.transform_selection_case(CaseTransform::Upper);
         assert_eq!(e.lines, vec!["HELLO WOrld"]);
-        assert_eq!(selected_texts(&e), vec!["HELLO", "LO WO"]);
-        assert_eq!(e.selection.unwrap().head, (0, 3), "direction is kept");
+        // The two overlap, so they come back as one (#1570): kept apart,
+        // typing over them would edit the shared text twice.
+        assert_eq!(selected_texts(&e), vec!["HELLO WO"]);
+        assert_eq!(e.selection.unwrap().head, (0, 0), "direction is kept");
     }
 
     #[test]
@@ -40451,14 +43724,17 @@ mod tests {
             Crumb {
                 label: "src".into(),
                 target: None,
+                icon: None,
             },
             Crumb {
                 label: "m.rs".into(),
                 target: None,
+                icon: None,
             },
             Crumb {
                 label: "build".into(),
                 target: Some((5, 2)),
+                icon: None,
             },
         ];
         let area = Rect {
@@ -40490,10 +43766,12 @@ mod tests {
             Crumb {
                 label: "文档文档".into(),
                 target: None,
+                icon: None,
             },
             Crumb {
                 label: "build".into(),
                 target: Some((5, 2)),
+                icon: None,
             },
         ];
         let area = Rect {
@@ -41007,6 +44285,24 @@ mod tests {
         let kept = normalize_rulers(&huge);
         assert_eq!(kept.len(), MAX_RULERS);
         assert!(kept.windows(2).all(|w| w[0] < w[1]));
+    }
+
+    #[test]
+    fn blank_line_guides_follow_the_neighbours_tab_cells() {
+        let mut e = editor_with("\t\tfoo\n\n\t\tbar");
+        e.set_indent_style(IndentStyle {
+            width: 4,
+            use_spaces: false,
+        });
+        e.show_indent_guides = true;
+        let buf = guide_buf(&mut e, 40, 6);
+        let text_x = e.last_inner.x + e.last_gutter_width + 1;
+        let y = e.last_inner.y + 1;
+        let width = e.indent_style().width as u16;
+        let at = |dx: u16| buf[(text_x + dx, y)].symbol().to_string();
+        assert_eq!(at(0), "\u{2502}", "first level");
+        assert_eq!(at(width), "\u{2502}", "second level, one tab further");
+        assert_eq!(at(1), " ", "no guide inside the tab");
     }
 
     #[test]
@@ -41781,6 +45077,13 @@ mod tests {
 
     // ---- Overlays after wide characters (#873) ----
 
+    /// A cell Croft Loch has tinted as a find match: an amber fill, red
+    /// well above blue, which no other Loch editor fill (canvas, current
+    /// line, selection, occurrence grey) is.
+    fn loch_find_tint(c: &ratatui::buffer::Cell) -> bool {
+        matches!(c.bg, Color::Rgb(r, _, b) if r > b.saturating_add(24))
+    }
+
     /// The glyphs on the first text row whose cells `pick` selects, left to
     /// right: what an overlay covers on screen.
     fn glyphs_where(
@@ -41799,13 +45102,13 @@ mod tests {
     #[test]
     fn row_cells_count_a_wide_character_as_two_cells_and_splice_hints() {
         let mut row = RowCells::default();
-        row.fill("a\u{8cbb}b", 0, [(2, 3)]);
+        row.fill("a\u{8cbb}b", 0, 0, [(2, 3)]);
         assert_eq!((row.cell(1), row.width(1)), (1, 2), "費 takes two cells");
         assert_eq!(row.cell(2), 6, "b sits past 費 and the hint anchored at it");
         assert_eq!(row.caret(2), 3, "a caret at the anchor is left of it");
         assert_eq!(row.end(2), 3, "a range ending there leaves it out");
         assert_eq!(row.end(4), 8, "the newline cell follows the text");
-        row.fill("\u{8cbb}b", 1, []);
+        row.fill("\u{8cbb}b", 1, 0, []);
         assert_eq!((row.cell(0), row.cell(2)), (0, 2), "scrolled to 費");
     }
 
@@ -41832,8 +45135,7 @@ mod tests {
         let mut e = editor_with("x = \"\u{1f44d}\u{1f3fd}\u{2764}\u{fe0f}\"  # food");
         e.set_search_highlight(Some("food".into()));
         let buf = guide_buf(&mut e, 60, 5);
-        let find_bg = Color::Rgb(0xff, 0xd7, 0x4a);
-        assert_eq!(glyphs_where(&e, &buf, |c| c.bg == find_bg), "food");
+        assert_eq!(glyphs_where(&e, &buf, loch_find_tint), "food");
     }
 
     #[test]
@@ -41842,8 +45144,7 @@ mod tests {
         e.set_search_highlight(Some("food".into()));
         e.occurrences = vec![(0, 22, 31, false)];
         let buf = guide_buf(&mut e, 60, 5);
-        let find_bg = Color::Rgb(0xff, 0xd7, 0x4a);
-        assert_eq!(glyphs_where(&e, &buf, |c| c.bg == find_bg), "food");
+        assert_eq!(glyphs_where(&e, &buf, loch_find_tint), "food");
         let occ_bg = e.theme.occurrence_bg();
         assert_eq!(glyphs_where(&e, &buf, |c| c.bg == occ_bg), "groceries");
     }
@@ -41925,8 +45226,8 @@ mod tests {
         let text_x = e.last_inner.x + e.last_gutter_width + 1;
         let y0 = e.last_inner.y;
         assert_eq!(
-            row_text(&buf, y0, text_x, text_x + 9),
-            "\u{2192}return\u{b7}1"
+            row_text(&buf, y0, text_x, text_x + 12),
+            "\u{2192}   return\u{b7}1"
         );
         assert_eq!(
             row_text(&buf, y0 + 1, text_x, text_x + 13),

@@ -16,6 +16,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use unicode_width::UnicodeWidthStr;
 
+use crate::glob_list::split_globs;
+
 const MAX_LINE_LEN: usize = 200;
 
 /// Per-channel lift applied to the theme background to fill an idle input row,
@@ -349,29 +351,12 @@ fn build_searcher() -> Searcher {
 #[derive(Clone, Debug, Default)]
 pub struct PathFilter {
     include: Option<GlobSet>,
+    /// The include globs that name a folder (#958): those whose last part
+    /// has no wildcard, such as `tests` or `src/widgets`. They also admit
+    /// what is inside the folder; `*.rs` does not admit a folder named
+    /// `generated.rs`.
+    include_dirs: Option<GlobSet>,
     exclude: Option<GlobSet>,
-}
-
-/// The entries of a comma-separated glob list. Commas inside `{...}`
-/// belong to a brace alternate, so `*.{ts,tsx}, docs/**` is two entries
-/// (#1251).
-pub(crate) fn split_globs(raw: &str) -> impl Iterator<Item = &str> {
-    let mut depth = 0usize;
-    let mut start = 0;
-    let mut parts = Vec::new();
-    for (i, c) in raw.char_indices() {
-        match c {
-            '{' => depth += 1,
-            '}' => depth = depth.saturating_sub(1),
-            ',' if depth == 0 => {
-                parts.push(&raw[start..i]);
-                start = i + 1;
-            }
-            _ => {}
-        }
-    }
-    parts.push(&raw[start..]);
-    parts.into_iter().map(str::trim).filter(|p| !p.is_empty())
 }
 
 fn compile_glob(pat: &str) -> Option<Glob> {
@@ -410,10 +395,15 @@ pub fn invalid_globs(raw: &str) -> Vec<&str> {
 /// include list (`fail_closed`) yields an empty set that matches nothing, so
 /// a broken filter never widens a search or Replace All to every file.
 fn build_glob_set(raw: &str, fail_closed: bool) -> Option<GlobSet> {
+    build_glob_set_of(raw, fail_closed, |_| true)
+}
+
+/// [`build_glob_set`] over the entries `keep` accepts.
+fn build_glob_set_of(raw: &str, fail_closed: bool, keep: impl Fn(&str) -> bool) -> Option<GlobSet> {
     let mut builder = GlobSetBuilder::new();
     let mut any = false;
     let mut typed = false;
-    for pat in split_globs(raw) {
+    for pat in split_globs(raw).filter(|p| keep(p)) {
         typed = true;
         if let Some(g) = compile_glob(pat) {
             builder.add(g);
@@ -426,12 +416,28 @@ fn build_glob_set(raw: &str, fail_closed: bool) -> Option<GlobSet> {
     builder.build().ok()
 }
 
+/// Whether a glob names a folder rather than a kind of file: its last part
+/// is a plain name, as in `tests`, `src/widgets` or `./src`, not a pattern
+/// such as `*.rs` (#958).
+fn names_a_folder(pat: &str) -> bool {
+    let last = pat.trim_end_matches('/').rsplit('/').next().unwrap_or(pat);
+    !last.is_empty() && !last.contains(['*', '?', '[', '{'])
+}
+
+/// True when `rel` or one of the folders above it matches `set`: a glob that
+/// names a folder stands for everything inside it.
+fn matches_self_or_parent(set: &GlobSet, rel: &Path) -> bool {
+    rel.ancestors()
+        .any(|p| !p.as_os_str().is_empty() && set.is_match(p))
+}
+
 impl PathFilter {
     /// Compile a filter from the raw include/exclude input strings. An empty
     /// (or all-whitespace) string disables that side of the filter.
     pub fn new(include: &str, exclude: &str) -> Self {
         Self {
             include: build_glob_set(include, true),
+            include_dirs: build_glob_set_of(include, false, names_a_folder),
             exclude: build_glob_set(exclude, false),
         }
     }
@@ -446,17 +452,26 @@ impl PathFilter {
     /// done against the path relative to `root` (falling back to the full path
     /// when it isn't under `root`). Include wins first: if an include set is
     /// present, the path must match it; then any exclude match drops the path.
+    /// On both sides a glob that names a folder covers what is inside it, as
+    /// in VS Code, so include `tests` or `src/widgets` searches those folders
+    /// (#958) and exclude `dist` hides everything under it (#1345). A folder
+    /// is only looked for inside the workspace: a file outside it (an open
+    /// buffer elsewhere) is not let in by a folder above the workspace.
     pub fn allows(&self, root: &Path, path: &Path) -> bool {
-        let rel = path.strip_prefix(root).unwrap_or(path);
+        let inside = path.strip_prefix(root).ok();
+        let rel = inside.unwrap_or(path);
         if let Some(inc) = &self.include
             && !inc.is_match(rel)
+            && !inside.is_some_and(|rel| {
+                self.include_dirs
+                    .as_ref()
+                    .is_some_and(|dirs| matches_self_or_parent(dirs, rel))
+            })
         {
             return false;
         }
         if let Some(exc) = &self.exclude
-            && rel
-                .ancestors()
-                .any(|p| !p.as_os_str().is_empty() && exc.is_match(p))
+            && matches_self_or_parent(exc, rel)
         {
             return false;
         }
@@ -468,10 +483,9 @@ impl PathFilter {
     /// Code's exclude settings do (#1345).
     pub fn excludes(&self, root: &Path, path: &Path) -> bool {
         let rel = path.strip_prefix(root).unwrap_or(path);
-        self.exclude.as_ref().is_some_and(|exc| {
-            rel.ancestors()
-                .any(|p| !p.as_os_str().is_empty() && exc.is_match(p))
-        })
+        self.exclude
+            .as_ref()
+            .is_some_and(|exc| matches_self_or_parent(exc, rel))
     }
 
     /// An exclude-only filter from a list of globs (the project's exclude
@@ -1448,6 +1462,15 @@ pub struct SearchPanel {
     pub complete: bool,
     /// Selection range within the currently focused field's text.
     pub field_selection: Option<(usize, usize)>,
+    /// Caret of each field as a char index (#1729), indexed by
+    /// [`SearchField::index`]. `None` is "at the end of the text, wherever
+    /// that is now": a field nobody moved a caret in follows its text when
+    /// the text is assigned from outside. Reads clamp, so a mid-text caret
+    /// left past a shortened text falls back to the end too.
+    carets: [Option<usize>; 4],
+    /// Where each field's text starts on screen and the first char it shows,
+    /// captured each render so a click can place the caret.
+    field_origin: [(u16, usize); 4],
 
     // --- Hit-test geometry captured during render (absolute screen coords) ---
     /// The left expand chevron (toggles the Replace row).
@@ -1503,6 +1526,17 @@ pub enum SearchField {
     Exclude,
 }
 
+impl SearchField {
+    fn index(self) -> usize {
+        match self {
+            SearchField::Query => 0,
+            SearchField::Replace => 1,
+            SearchField::Include => 2,
+            SearchField::Exclude => 3,
+        }
+    }
+}
+
 impl SearchPanel {
     pub fn new(root: PathBuf) -> Self {
         Self {
@@ -1539,6 +1573,8 @@ impl SearchPanel {
             field: SearchField::Query,
             complete: false,
             field_selection: None,
+            carets: [None; 4],
+            field_origin: [(0, 0); 4],
             chevron_x: 0,
             chevron_y: 0,
             replace_all_x: 0,
@@ -1595,6 +1631,73 @@ impl SearchPanel {
         self.field = SearchField::Query;
         self.selection = None;
         self.field_selection = None;
+        for f in [
+            SearchField::Query,
+            SearchField::Include,
+            SearchField::Exclude,
+        ] {
+            self.carets[f.index()] = None;
+        }
+    }
+
+    /// The focused field's caret as a char index into its text.
+    pub fn caret(&self) -> usize {
+        self.field_caret(self.field)
+    }
+
+    fn field_text(&self, field: SearchField) -> &str {
+        match field {
+            SearchField::Query => &self.query,
+            SearchField::Replace => &self.replace,
+            SearchField::Include => &self.include,
+            SearchField::Exclude => &self.exclude,
+        }
+    }
+
+    fn field_caret(&self, field: SearchField) -> usize {
+        let text = self.field_text(field);
+        crate::widgets::line_edit::clamp(text, self.carets[field.index()].unwrap_or(usize::MAX))
+    }
+
+    /// Record `at` as `field`'s caret; the end of the text is stored as
+    /// "follow the end".
+    fn store_caret(&mut self, field: SearchField, at: usize) {
+        let len = crate::widgets::line_edit::char_len(self.field_text(field));
+        self.carets[field.index()] = (at < len).then_some(at);
+    }
+
+    fn set_caret(&mut self, at: usize) {
+        self.store_caret(self.field, at);
+    }
+
+    /// Move the focused field's caret with `step(text, caret)`, dropping the
+    /// field's selection as any caret key does.
+    pub fn move_caret(&mut self, step: impl FnOnce(&str, usize) -> usize) {
+        let at = step(self.active_text(), self.caret());
+        self.set_active_selection(None);
+        self.set_caret(at);
+    }
+
+    /// Put the focused field's caret under screen column `col`, from a click
+    /// in it (the text origin is the one the last render captured).
+    pub fn click_caret(&mut self, col: u16) {
+        let (text_x, start) = self.field_origin[self.field.index()];
+        let at = crate::widgets::line_edit::char_at_cell(
+            self.active_text(),
+            start,
+            usize::from(col.saturating_sub(text_x)),
+        );
+        self.set_active_selection(None);
+        self.set_caret(at);
+    }
+
+    /// Apply `edit(text, caret) -> (text, caret)` to the focused field.
+    fn edit_active(&mut self, edit: impl FnOnce(&str, usize) -> (String, usize)) -> bool {
+        let (text, caret) = edit(self.active_text(), self.caret());
+        let changed = text != self.active_text();
+        *self.active_text_mut() = text;
+        self.set_caret(caret);
+        changed
     }
 
     pub fn select_all_query(&mut self) {
@@ -1603,6 +1706,7 @@ impl SearchPanel {
         } else {
             self.selection = Some((0, self.query.len()));
         }
+        self.carets[SearchField::Query.index()] = None;
     }
 
     pub fn clear_selection(&mut self) {
@@ -1619,6 +1723,8 @@ impl SearchPanel {
         }
         self.query.replace_range(a..b, "");
         self.selection = None;
+        let at = crate::widgets::line_edit::char_of(&self.query, a);
+        self.store_caret(SearchField::Query, at);
         true
     }
 
@@ -1626,18 +1732,6 @@ impl SearchPanel {
         match self.selection_range() {
             Some((a, b)) if a < b => self.query[a..b].to_string(),
             _ => String::new(),
-        }
-    }
-
-    /// Insert `s` at the end of the query, replacing the current selection
-    /// (if any) first. Newlines and carriage returns are stripped — search
-    /// queries are single-line.
-    pub fn insert_str_into_query(&mut self, s: &str) {
-        self.delete_selection();
-        for c in s.chars() {
-            if c != '\n' && c != '\r' {
-                self.query.push(c);
-            }
         }
     }
 
@@ -1666,6 +1760,7 @@ impl SearchPanel {
     /// Clear the focused field's text entirely (used by Esc).
     pub fn active_text_mut_clear(&mut self) {
         self.active_text_mut().clear();
+        self.set_caret(0);
     }
 
     /// Clear the selection of the focused field.
@@ -1694,7 +1789,8 @@ impl SearchPanel {
             return;
         }
         self.delete_active_selection();
-        self.active_text_mut().push(c);
+        let typed = c.to_string();
+        self.edit_active(|t, at| crate::widgets::line_edit::insert_at(t, at, &typed));
     }
 
     /// Backspace one char (or the selection) from the focused field. Returns
@@ -1703,19 +1799,32 @@ impl SearchPanel {
         if self.delete_active_selection() {
             return true;
         }
-        self.active_text_mut().pop().is_some()
+        self.edit_active(|t, at| crate::widgets::line_edit::delete_before(t, at, false))
+    }
+
+    /// Delete the cluster (or, with `word`, the run) before the caret, or the
+    /// selection. Returns true when the text changed.
+    pub fn backspace_by(&mut self, word: bool) -> bool {
+        if self.delete_active_selection() {
+            return true;
+        }
+        self.edit_active(|t, at| crate::widgets::line_edit::delete_before(t, at, word))
+    }
+
+    /// Delete ahead of the caret (the Delete key), or the selection.
+    /// Returns true when the text changed.
+    pub fn delete_forward(&mut self, word: bool) -> bool {
+        if self.delete_active_selection() {
+            return true;
+        }
+        self.edit_active(|t, at| crate::widgets::line_edit::delete_at(t, at, word))
     }
 
     /// Insert `s` into the focused field, replacing the selection and stripping
     /// newlines (all Search inputs are single-line).
     pub fn insert_str(&mut self, s: &str) {
         self.delete_active_selection();
-        let text = self.active_text_mut();
-        for c in s.chars() {
-            if c != '\n' && c != '\r' {
-                text.push(c);
-            }
-        }
+        self.edit_active(|t, at| crate::widgets::line_edit::insert_at(t, at, s));
     }
 
     /// Select the whole text of the focused field.
@@ -1726,6 +1835,8 @@ impl SearchPanel {
         } else {
             self.set_active_selection(Some((0, len)));
         }
+        let end = crate::widgets::line_edit::char_len(self.active_text());
+        self.set_caret(end);
     }
 
     fn delete_active_selection(&mut self) -> bool {
@@ -1738,6 +1849,8 @@ impl SearchPanel {
         }
         self.active_text_mut().replace_range(a..b, "");
         self.set_active_selection(None);
+        let at = crate::widgets::line_edit::char_of(self.active_text(), a);
+        self.set_caret(at);
         true
     }
 
@@ -1892,6 +2005,24 @@ impl SearchPanel {
         None
     }
 
+    /// The full path of the result row under `(col, row)`, for its hover hint
+    /// (#2008): a row names only the file, so hits in same-named files
+    /// (`mod.rs`, `index.ts`) read the same. `None` off the rows and on the
+    /// scrollbar.
+    pub fn result_path_at(&self, col: u16, row: u16) -> Option<&Path> {
+        let inner = self.last_inner;
+        // The scrollbar takes the right column once the hits overflow, as the
+        // render draws it. Judged by the hits listed now, not the last
+        // frame's bar: hits that stream in under a resting pointer can make
+        // the list overflow before the next render.
+        let overflows = self.hits.len() > self.results_viewport_height();
+        let right = inner.x + inner.width - u16::from(overflows && inner.width > 0);
+        if col < inner.x || col >= right {
+            return None;
+        }
+        self.hit_at_y(row).map(|i| self.hits[i].path.as_path())
+    }
+
     /// Clear the search like VS Code's "Clear Search Results": empty the query
     /// (and the replace text typed against it) and drop every hit, resetting
     /// selection and scroll. The include/exclude glob filters are intentionally
@@ -1899,6 +2030,8 @@ impl SearchPanel {
     pub fn clear_all(&mut self) {
         self.query.clear();
         self.replace.clear();
+        self.carets[SearchField::Query.index()] = None;
+        self.carets[SearchField::Replace.index()] = None;
         self.hits.clear();
         self.selected = 0;
         self.scroll = 0;
@@ -2048,28 +2181,61 @@ impl SearchPanel {
 
     /// Take in streamed hits, each landing in its final place
     /// ([`Self::hit_order`]) so the list reads the same however the walk
-    /// went. One merge pass over the list, not an insert per hit: a broad
-    /// query streams thousands of files. The selection stays on its hit.
+    /// went. The selection stays on its hit.
+    ///
+    /// This runs on the UI thread for every drain while a scan streams
+    /// (#2007), so its cost must not grow with the hits already listed: each
+    /// arriving file finds its place by binary search, and the listed hits
+    /// are only moved, never compared one by one. Comparing every listed hit
+    /// on each drain made a broad query's results crawl in, the UI busier
+    /// with each file that arrived.
     pub fn add_hits(&mut self, mut batch: Vec<SearchHit>) {
         if batch.is_empty() {
             return;
         }
-        batch.sort_by(|a, b| self.hit_order(a).cmp(&self.hit_order(b)));
+        batch.sort_by_cached_key(|h| {
+            let (root, rel, line) = self.hit_order(h);
+            (root, rel.to_path_buf(), line)
+        });
         let old = std::mem::take(&mut self.hits);
         let selected = (self.selected < old.len()).then_some(self.selected);
         let mut merged = Vec::with_capacity(old.len() + batch.len());
-        let mut new = batch.into_iter().peekable();
-        for (i, hit) in old.into_iter().enumerate() {
-            let key = self.hit_order(&hit);
-            while new.peek().is_some_and(|n| self.hit_order(n) < key) {
-                merged.extend(new.next());
+        let mut rest = old.into_iter();
+        // How many of the listed hits are already in `merged`.
+        let mut moved = 0usize;
+        let mut prev_path: Option<PathBuf> = None;
+        for hit in batch {
+            let pending = rest.as_slice();
+            // The batch is sorted, so every pending hit sorts after the
+            // previous arrival. When that was this same file, a pending hit
+            // of another file is past this whole file: only one of this file
+            // can still go first, and the search is skipped without it.
+            let same_file = prev_path.as_deref() == Some(hit.path.as_path());
+            let n = if same_file && pending.first().is_none_or(|o| o.path != hit.path) {
+                0
+            } else {
+                // A listed hit stays ahead of an equal one arriving.
+                let key = self.hit_order(&hit);
+                pending.partition_point(|o| self.hit_order(o) <= key)
+            };
+            if let Some(s) = selected
+                && (moved..moved + n).contains(&s)
+            {
+                self.selected = merged.len() + (s - moved);
             }
-            if selected == Some(i) {
-                self.selected = merged.len();
+            merged.extend(rest.by_ref().take(n));
+            moved += n;
+            if !same_file {
+                prev_path = Some(hit.path.clone());
             }
             merged.push(hit);
         }
-        merged.extend(new);
+        if let Some(s) = selected
+            && s >= moved
+        {
+            self.selected = merged.len() + (s - moved);
+        }
+        merged.extend(rest);
         self.hits = merged;
     }
 
@@ -2277,6 +2443,8 @@ struct FieldArgs<'a> {
     lead_glyph: Option<&'a str>,
     /// Current text of the field.
     text: &'a str,
+    /// The caret as a char index into `text` (#1729).
+    caret: usize,
     /// Placeholder shown italic-grey when `text` is empty.
     placeholder: &'a str,
     /// Selection range within `text`, already normalised (a <= b).
@@ -2338,6 +2506,7 @@ fn render_field(
     args: FieldArgs,
     theme: crate::theme::Theme,
     caret_out: &mut Option<(u16, u16)>,
+    origin_out: &mut (u16, usize),
 ) -> Rect {
     if args.fill_right <= args.bar_x {
         return Rect {
@@ -2369,12 +2538,16 @@ fn render_field(
         buf[(x, args.y)].set_symbol(" ").set_style(fill_style);
     }
 
+    // Croft Loch writes the field in its ink ramp: the text in body ink,
+    // the placeholder and an idle lead glyph muted. A boxed theme keeps its
+    // historical colours.
+    let tones = crate::widgets::surface::tones(theme);
     let lead_w: u16 = if args.lead_glyph.is_some() { 2 } else { 0 };
     if let Some(g) = args.lead_glyph {
-        let lead_color = if args.field_focused {
-            args.accent
-        } else {
-            theme.ui(Color::Rgb(0x9d, 0xa5, 0xb4))
+        let lead_color = match tones {
+            _ if args.field_focused => args.accent,
+            Some(t) => t.muted(),
+            None => theme.ui(Color::Rgb(0x9d, 0xa5, 0xb4)),
         };
         buf.set_string(fill_x, args.y, g, Style::default().fg(lead_color).bg(fill));
     }
@@ -2385,30 +2558,51 @@ fn render_field(
     let text_w = text_right.saturating_sub(text_x).saturating_add(1);
 
     let mut spans: Vec<Span> = Vec::with_capacity(4);
+    let win = crate::widgets::line_edit::window(args.text, args.caret, usize::from(text_w));
+    *origin_out = (text_x, win.start);
     if args.text.is_empty() {
+        let ink = match tones {
+            Some(t) => t.muted(),
+            None => theme.ui(Color::Rgb(0x6c, 0x7d, 0x9c)),
+        };
         spans.push(Span::styled(
             args.placeholder.to_string(),
             Style::default()
-                .fg(theme.ui(Color::Rgb(0x6c, 0x7d, 0x9c)))
+                .fg(ink)
                 .bg(fill)
                 .add_modifier(Modifier::ITALIC),
         ));
     } else {
-        let plain = Style::default().fg(theme.ui(Color::White)).bg(fill);
+        let ink = match tones {
+            Some(t) => t.text(),
+            None => theme.ui(Color::White),
+        };
+        let plain = Style::default().fg(ink).bg(fill);
         let selected = Style::default()
-            .fg(theme.ui(Color::White))
+            .fg(ink)
             .bg(theme.ui(Color::Rgb(0x26, 0x4f, 0x78)));
-        match args.selection {
-            Some((a, b)) if a < b => {
+        // Only the part of the text the row has room for, scrolled so the
+        // caret is in view; the selection is clipped to it.
+        let (sb, eb) = (
+            crate::widgets::line_edit::byte_of(args.text, win.start),
+            crate::widgets::line_edit::byte_of(args.text, win.end),
+        );
+        let shown = &args.text[sb..eb];
+        let sel = args
+            .selection
+            .map(|(a, b)| (a.max(sb) - sb.min(a.max(sb)), b.min(eb).saturating_sub(sb)))
+            .filter(|&(a, b)| a < b && b <= shown.len());
+        match sel {
+            Some((a, b)) => {
                 if a > 0 {
-                    spans.push(Span::styled(args.text[..a].to_string(), plain));
+                    spans.push(Span::styled(shown[..a].to_string(), plain));
                 }
-                spans.push(Span::styled(args.text[a..b].to_string(), selected));
-                if b < args.text.len() {
-                    spans.push(Span::styled(args.text[b..].to_string(), plain));
+                spans.push(Span::styled(shown[a..b].to_string(), selected));
+                if b < shown.len() {
+                    spans.push(Span::styled(shown[b..].to_string(), plain));
                 }
             }
-            _ => spans.push(Span::styled(args.text.to_string(), plain)),
+            None => spans.push(Span::styled(shown.to_string(), plain)),
         }
     }
     if text_w > 0 {
@@ -2418,10 +2612,10 @@ fn render_field(
     // The caret rides just past the text (at the field's left edge when empty),
     // clamped inside the editable span. The app shows the host's blinking
     // hardware caret here only while this field is focused, so we record the
-    // cell for the focused field alone. Char count matches the commit box's
-    // caret model (`message_cursor`); Search has no mid-text caret.
+    // cell for the focused field alone. The caret is a char index, the
+    // commit box's model (`message_cursor`), drawn where the text window put it.
     if args.field_focused && text_w > 0 {
-        let off = (args.text.chars().count() as u16).min(text_w.saturating_sub(1));
+        let off = (win.caret_cell as u16).min(text_w.saturating_sub(1));
         *caret_out = Some((text_x + off, args.y));
     }
 
@@ -2472,16 +2666,21 @@ impl Widget for &mut SearchPanel {
             return;
         }
 
+        // Croft Loch's inks and fills; `None` on a boxed theme, which keeps
+        // the colours below exactly as they were.
+        let tones = crate::widgets::surface::tones(self.theme);
+
         // Row 0: "SEARCH" header (top-left) plus the VS Code SEARCH header
-        // actions (refresh / clear) at the top-right.
-        buf.set_string(
-            inner.x,
-            inner.y,
-            "SEARCH",
-            Style::default()
+        // actions (refresh / clear) at the top-right. Croft Loch titles the
+        // view as the Explorer does: the strong ink while it has the
+        // keyboard, muted otherwise, and never bold.
+        let title_style = match tones {
+            Some(t) => Style::default().fg(if self.focused { t.strong() } else { t.muted() }),
+            None => Style::default()
                 .fg(self.theme.ui(Color::Rgb(0xb0, 0xb8, 0xc8)))
                 .add_modifier(Modifier::BOLD),
-        );
+        };
+        buf.set_string(inner.x, inner.y, "SEARCH", title_style);
 
         // Header action icons, laid out from the right edge: clear (rightmost)
         // then refresh, each a single-cell click target that lifts to the accent
@@ -2500,12 +2699,17 @@ impl Widget for &mut SearchPanel {
                 let hot = self
                     .hover_pointer
                     .is_some_and(|(px, py)| py == inner.y && px == x);
-                let color = if hot {
-                    accent
+                // Croft Loch: the side bar's header actions, muted at rest
+                // and lifted to the strong ink on a faint chip under the
+                // pointer; the accent stays for focus.
+                let style = if tones.is_some() {
+                    crate::widgets::header_pill::action_style(self.theme, hot)
+                } else if hot {
+                    Style::default().fg(accent)
                 } else {
-                    self.theme.ui(Color::Rgb(0x8b, 0x94, 0xa4))
+                    Style::default().fg(self.theme.ui(Color::Rgb(0x8b, 0x94, 0xa4)))
                 };
-                buf.set_string(x, inner.y, glyph.to_string(), Style::default().fg(color));
+                buf.set_string(x, inner.y, glyph.to_string(), style);
             }
             self.refresh_x = refresh_x;
             self.clear_x = clear_x;
@@ -2546,23 +2750,25 @@ impl Widget for &mut SearchPanel {
         let query_reserve = query_fill_right.saturating_sub(case_x).saturating_add(1);
 
         // Expand chevron (far left). ▾ when Replace is open, ▸ when collapsed.
-        let chevron_color = if self.focused {
-            accent
-        } else {
-            Color::DarkGray
+        // Croft Loch: the side bar's codicon chevron in the muted ink, an
+        // idle icon like the Explorer's; the field's bar already says where
+        // focus is.
+        let chevron_style = match tones {
+            Some(t) => Style::default().fg(t.muted()),
+            None => Style::default()
+                .fg(if self.focused {
+                    accent
+                } else {
+                    Color::DarkGray
+                })
+                .add_modifier(Modifier::BOLD),
         };
-        let chevron_glyph = if self.replace_open {
-            crate::icons::CHEVRON_OPEN
-        } else {
-            crate::icons::CHEVRON_CLOSED
-        };
+        let chevron_glyph = crate::widgets::surface::chevron(self.theme, self.replace_open);
         buf.set_string(
             chevron_x,
             content_y,
             chevron_glyph.to_string(),
-            Style::default()
-                .fg(chevron_color)
-                .add_modifier(Modifier::BOLD),
+            chevron_style,
         );
         self.chevron_x = chevron_x;
         self.chevron_y = content_y;
@@ -2572,6 +2778,7 @@ impl Widget for &mut SearchPanel {
         // it accumulates the single focused field's caret across the calls
         // below; committed to `self.caret_cell` once the cluster is laid out.
         let mut caret: Option<(u16, u16)> = None;
+        let mut origins = self.field_origin;
 
         // Query field: filled single row, magnifier lead, inset toggles.
         let query_focused = self.focused && self.field == SearchField::Query;
@@ -2583,6 +2790,7 @@ impl Widget for &mut SearchPanel {
                 fill_right: query_fill_right,
                 lead_glyph: Some("\u{ea6d}"),
                 text: &self.query,
+                caret: self.field_caret(SearchField::Query),
                 placeholder: "Search",
                 selection: self.selection_range(),
                 field_focused: query_focused,
@@ -2592,6 +2800,7 @@ impl Widget for &mut SearchPanel {
             },
             self.theme,
             &mut caret,
+            &mut origins[SearchField::Query.index()],
         );
 
         // Inset toggles `Aa ab .*`, painted on top of the query fill at its
@@ -2609,12 +2818,22 @@ impl Widget for &mut SearchPanel {
                 FIELD_FILL_LIFT_IDLE
             },
         );
-        let active_style = Style::default()
-            .fg(Color::White)
-            .bg(crate::gradient::rgb_color(crate::gradient::POPUP_SEL_BG))
-            .add_modifier(Modifier::BOLD);
+        // Croft Loch: an on toggle is the strong ink on the selection chip
+        // (no bold: weight is rare), an off one the muted ink.
+        let active_style = match tones {
+            Some(t) => Style::default()
+                .fg(t.strong())
+                .bg(crate::gradient::rgb_color(crate::gradient::POPUP_SEL_BG)),
+            None => Style::default()
+                .fg(Color::White)
+                .bg(crate::gradient::rgb_color(crate::gradient::POPUP_SEL_BG))
+                .add_modifier(Modifier::BOLD),
+        };
         let inactive_style = Style::default()
-            .fg(self.theme.ui(Color::Rgb(0x79, 0x82, 0x8f)))
+            .fg(match tones {
+                Some(t) => t.muted(),
+                None => self.theme.ui(Color::Rgb(0x79, 0x82, 0x8f)),
+            })
             .bg(toggle_fill);
         self.toggle_y = content_y;
         self.toggle_case_x = case_x;
@@ -2630,10 +2849,11 @@ impl Widget for &mut SearchPanel {
         }
 
         // `...` details expander, just past the query field. Accent when open.
-        let ellipsis_style = if self.details_open {
-            Style::default().fg(accent).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(self.theme.ui(Color::Rgb(0x79, 0x82, 0x8f)))
+        let ellipsis_style = match tones {
+            Some(t) if self.details_open => Style::default().fg(t.accent()),
+            Some(t) => Style::default().fg(t.muted()),
+            None if self.details_open => Style::default().fg(accent).add_modifier(Modifier::BOLD),
+            None => Style::default().fg(self.theme.ui(Color::Rgb(0x79, 0x82, 0x8f))),
         };
         buf.set_string(
             ellipsis_x,
@@ -2670,6 +2890,7 @@ impl Widget for &mut SearchPanel {
                     fill_right: replace_fill_right,
                     lead_glyph: Some(&crate::icons::SEARCH_REPLACE.to_string()),
                     text: &self.replace,
+                    caret: self.field_caret(SearchField::Replace),
                     placeholder: "Replace (Tab switches)",
                     selection: if self.field == SearchField::Replace {
                         self.active_selection()
@@ -2683,6 +2904,7 @@ impl Widget for &mut SearchPanel {
                 },
                 self.theme,
                 &mut caret,
+                &mut origins[SearchField::Replace.index()],
             );
             // `AB` (Preserve Case) inset at the replace field's right edge,
             // where VS Code keeps it, styled like the query's toggles.
@@ -2709,10 +2931,11 @@ impl Widget for &mut SearchPanel {
                 replace_all_x,
                 next_y,
                 crate::icons::SEARCH_REPLACE_ALL.to_string(),
-                Style::default().fg(if self.focused {
-                    accent
-                } else {
-                    self.theme.ui(Color::Rgb(0x9d, 0xa5, 0xb4))
+                Style::default().fg(match tones {
+                    // Croft Loch: an action icon, muted like the header's.
+                    Some(t) => t.muted(),
+                    None if self.focused => accent,
+                    None => self.theme.ui(Color::Rgb(0x9d, 0xa5, 0xb4)),
                 }),
             );
             self.replace_all_x = replace_all_x;
@@ -2729,7 +2952,10 @@ impl Widget for &mut SearchPanel {
         self.project_exclude_rect = Rect::default();
         if self.details_open {
             let detail_fill_right = inner_right.saturating_sub(1).max(bar_x + 1);
-            let caption_style = Style::default().fg(self.theme.ui(Color::Rgb(0x9d, 0xa5, 0xb4)));
+            let caption_style = Style::default().fg(match tones {
+                Some(t) => t.muted(),
+                None => self.theme.ui(Color::Rgb(0x9d, 0xa5, 0xb4)),
+            });
 
             if next_y + 2 < inner.y + inner.height {
                 // Hairline before the include group, matching the query/replace
@@ -2754,6 +2980,7 @@ impl Widget for &mut SearchPanel {
                         fill_right: detail_fill_right,
                         lead_glyph: None,
                         text: &self.include,
+                        caret: self.field_caret(SearchField::Include),
                         placeholder: "e.g. src/**/*.rs",
                         selection: if self.field == SearchField::Include {
                             self.active_selection()
@@ -2767,6 +2994,7 @@ impl Widget for &mut SearchPanel {
                     },
                     self.theme,
                     &mut caret,
+                    &mut origins[SearchField::Include.index()],
                 );
                 next_y += 1;
             }
@@ -2792,6 +3020,7 @@ impl Widget for &mut SearchPanel {
                         fill_right: detail_fill_right,
                         lead_glyph: None,
                         text: &self.exclude,
+                        caret: self.field_caret(SearchField::Exclude),
                         placeholder: "e.g. target, dist",
                         selection: if self.field == SearchField::Exclude {
                             self.active_selection()
@@ -2805,6 +3034,7 @@ impl Widget for &mut SearchPanel {
                     },
                     self.theme,
                     &mut caret,
+                    &mut origins[SearchField::Exclude.index()],
                 );
                 next_y += 1;
                 if !self.project_exclude.is_empty() && next_y + 1 < inner.y + inner.height {
@@ -2837,13 +3067,23 @@ impl Widget for &mut SearchPanel {
         // laid out. Always runs (the optional rows above only skip their own
         // render), so the app sees `None` whenever no field carried a caret.
         self.caret_cell = caret;
+        self.field_origin = origins;
 
         // ---- Separator + match-count caption ----
         let separator_y = next_y;
         if separator_y < inner.y + inner.height {
-            let sep_style = Style::default().fg(self.theme.ui(Color::Rgb(0x40, 0x48, 0x58)));
+            // Croft Loch: a hairline seam hugging the results below, as
+            // Source Control draws above its changes, not a line twice as
+            // bright as every other seam in the side bar.
+            let (sep_glyph, sep_style) = match tones {
+                Some(t) => ("\u{2581}", Style::default().fg(t.hairline())),
+                None => (
+                    "─",
+                    Style::default().fg(self.theme.ui(Color::Rgb(0x40, 0x48, 0x58))),
+                ),
+            };
             for x in inner.x..inner.x + inner.width {
-                buf.set_string(x, separator_y, "─", sep_style);
+                buf.set_string(x, separator_y, sep_glyph, sep_style);
             }
         }
         let caption_y = separator_y + 1;
@@ -2865,17 +3105,32 @@ impl Widget for &mut SearchPanel {
                 results_start_y = y.max(caption_y + 1);
             } else {
                 let (results, files) = self.result_counts();
-                let header = format!(
-                    "{results} result{} in {files} file{}",
+                let (r_s, f_s) = (
                     if results == 1 { "" } else { "s" },
-                    if files == 1 { "" } else { "s" }
+                    if files == 1 { "" } else { "s" },
                 );
-                let caption = Line::from(Span::styled(
-                    header,
-                    Style::default()
-                        .fg(self.theme.ui(Color::Rgb(0x9d, 0xa5, 0xb4)))
-                        .add_modifier(Modifier::ITALIC),
-                ));
+                let caption = match tones {
+                    // Croft Loch: a quiet sentence in the muted ink whose
+                    // two counts, the part worth reading, are body text.
+                    Some(t) => {
+                        let (num, word) = (
+                            Style::default().fg(t.text()),
+                            Style::default().fg(t.muted()),
+                        );
+                        Line::from(vec![
+                            Span::styled(results.to_string(), num),
+                            Span::styled(format!(" result{r_s} in "), word),
+                            Span::styled(files.to_string(), num),
+                            Span::styled(format!(" file{f_s}"), word),
+                        ])
+                    }
+                    None => Line::from(Span::styled(
+                        format!("{results} result{r_s} in {files} file{f_s}"),
+                        Style::default()
+                            .fg(self.theme.ui(Color::Rgb(0x9d, 0xa5, 0xb4)))
+                            .add_modifier(Modifier::ITALIC),
+                    )),
+                };
                 buf.set_line(inner.x, caption_y, &caption, inner.width);
             }
         }
@@ -2936,7 +3191,12 @@ impl Widget for &mut SearchPanel {
                 width: row_width,
                 height: 1,
             };
-            if hit_idx != self.selected
+            let is_selected = hit_idx == self.selected;
+            // The fill under the row's text on Croft Loch (chrome, the hover
+            // lift or the selected band), which a match's amber tint is
+            // blended from so it reads the same on every row.
+            let mut row_fill = tones.map(|t| t.chrome());
+            if !is_selected
                 && let Some(bg) =
                     crate::widgets::hover::row_hover_bg(row_rect, self.hover_pointer, self.theme)
             {
@@ -2944,6 +3204,28 @@ impl Widget for &mut SearchPanel {
                 for rx in 0..row_width {
                     buf[(inner.x + rx, y)].set_symbol(" ").set_style(fill);
                 }
+                row_fill = row_fill.map(|_| bg);
+            }
+            // Croft Loch: the one selected-row anatomy, the band across the
+            // full row with the accent bar standing in the pane's left
+            // padding column (as the Explorer's does) so the names keep
+            // their column; greyed, barless, while another pane has the
+            // keyboard.
+            if is_selected && let Some(t) = tones {
+                crate::widgets::surface::paint_selected_row(
+                    buf,
+                    Rect {
+                        x: area.x,
+                        width: row_width.saturating_add(inner.x - area.x),
+                        ..row_rect
+                    },
+                    t,
+                    t.chrome,
+                    self.focused,
+                );
+                row_fill = Some(crate::gradient::rgb_color(
+                    crate::widgets::surface::selected_row_fill(t, t.chrome, self.focused),
+                ));
             }
             // Show just the basename so the matched line itself has room
             // to render inside a narrow side panel — without this, deep
@@ -2983,7 +3265,11 @@ impl Widget for &mut SearchPanel {
                 });
             // Black theme: selected result row matches the Explorer's
             // white-on-dark-teal selection; Croft Dark keeps black-on-blue.
-            let header_style = if hit_idx == self.selected {
+            let header_style = if let Some(t) = tones {
+                // Croft Loch: the file name is body text on every row; the
+                // band says which one is selected.
+                Style::default().fg(t.text())
+            } else if is_selected {
                 if self.focus_gradient {
                     Style::default()
                         .fg(Color::White)
@@ -3007,13 +3293,42 @@ impl Widget for &mut SearchPanel {
                 .fg(Color::Black)
                 .bg(self.theme.ui(Color::Rgb(0xff, 0xd7, 0x4a)))
                 .add_modifier(Modifier::BOLD);
-            let plain_style = Style::default().fg(self.theme.ui(Color::Gray));
-            let mut spans: Vec<Span> = vec![
-                Span::styled(format!(" {path_display}"), header_style),
-                Span::styled(
-                    format!(":{}: ", hit.line_no),
+            // Croft Loch reads a row in two inks: the file name in body
+            // text, the line number and the preview muted, with each match
+            // tinted amber over the row's own fill. The line number is where
+            // the result is, a fact read as often as the name, so it never
+            // drops to the faint ink kept for marks. On the selected row the
+            // preview steps up an ink, so it keeps its contrast on the band;
+            // the muted line number already does. The selected row's first
+            // match is the one opening it lands on, so it takes the current
+            // match's stronger tint, as it will in the editor.
+            let (plain_style, line_no_style) = match tones {
+                Some(t) if is_selected => (
+                    Style::default().fg(t.text()),
+                    Style::default().fg(t.muted()),
+                ),
+                Some(t) => (
+                    Style::default().fg(t.muted()),
+                    Style::default().fg(t.muted()),
+                ),
+                None => (
+                    Style::default().fg(self.theme.ui(Color::Gray)),
                     Style::default().fg(self.theme.ui(Color::Rgb(0xeb, 0xcb, 0x8b))),
                 ),
+            };
+            let match_style = |active: bool| match (tones, row_fill) {
+                (Some(t), Some(fill)) => crate::widgets::surface::match_style(
+                    plain_style.bg(fill),
+                    t,
+                    self.theme,
+                    active,
+                ),
+                _ => highlight_style,
+            };
+            let mut active_pending = is_selected;
+            let mut spans: Vec<Span> = vec![
+                Span::styled(format!(" {path_display}"), header_style),
+                Span::styled(format!(":{}: ", hit.line_no), line_no_style),
             ];
             // Inline replace preview (#123): while a replacement is typed,
             // each match renders dim and crossed out with the expanded
@@ -3053,14 +3368,13 @@ impl Widget for &mut SearchPanel {
                     ));
                     continue;
                 }
-                spans.push(Span::styled(
-                    chunk,
-                    if is_match {
-                        highlight_style
-                    } else {
-                        plain_style
-                    },
-                ));
+                let style = if is_match {
+                    let active = std::mem::take(&mut active_pending);
+                    match_style(active)
+                } else {
+                    plain_style
+                };
+                spans.push(Span::styled(chunk, style));
             }
             let line = Line::from(spans);
             buf.set_line(inner.x, y, &line, row_width);
@@ -4578,6 +4892,59 @@ mod tests {
         assert_eq!((sel.path.clone(), sel.line_no), (root.join("m.rs"), 5));
     }
 
+    /// #2007: hits now find their place by binary search instead of being
+    /// compared against every listed hit, so the list must still come out as
+    /// one full sort would put it, whatever the arrival order, with the
+    /// selection on its hit. One file's hits arriving in two drains, and two
+    /// roots that both hold a file, are the cases the shortcut must not skip.
+    #[test]
+    fn hits_arriving_in_any_order_and_drain_size_list_as_one_sort_would() {
+        let tmp = TempDir::new().unwrap();
+        let outer = tmp.path().to_path_buf();
+        let inner = outer.join("pkg");
+        let mut all: Vec<SearchHit> = Vec::new();
+        for f in 0..60 {
+            let dir = if f % 3 == 0 { &inner } else { &outer };
+            let path = dir.join(format!("d{}/f{f}.rs", f % 7));
+            all.extend((0..f % 5 + 1).map(|l| hit(&path, l * 4 + 1)));
+        }
+        let mut want = SearchPanel::new(outer.clone());
+        want.roots = vec![outer.clone(), inner.clone()];
+        want.add_hits(all.clone());
+        let mut x = 0x9e37_79b9u64;
+        let mut next = move |n: usize| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x as usize) % n.max(1)
+        };
+        for _round in 0..20 {
+            let mut shuffled = all.clone();
+            for i in (1..shuffled.len()).rev() {
+                shuffled.swap(i, next(i + 1));
+            }
+            let mut panel = SearchPanel::new(outer.clone());
+            panel.roots = vec![outer.clone(), inner.clone()];
+            let mut picked: Option<SearchHit> = None;
+            let mut rest = shuffled.as_slice();
+            while !rest.is_empty() {
+                let (drain, after) = rest.split_at(next(8).min(rest.len() - 1) + 1);
+                // A drain holds files in walk order, each file's hits by line.
+                let mut drain = drain.to_vec();
+                drain.sort_by_key(|h| (h.path.clone(), h.line_no));
+                panel.add_hits(drain);
+                rest = after;
+                if let Some(p) = &picked {
+                    assert_eq!(panel.selected_hit(), Some(p), "the selection moved");
+                } else if panel.hits.len() > 3 {
+                    panel.selected = panel.hits.len() / 2;
+                    picked = panel.selected_hit().cloned();
+                }
+            }
+            assert_eq!(panel.hits, want.hits);
+        }
+    }
+
     fn make_panel_with_hits(tmp: &TempDir, n: usize) -> SearchPanel {
         let mut panel = SearchPanel::new(tmp.path().to_path_buf());
         panel.query = "needle".into();
@@ -4833,6 +5200,37 @@ mod tests {
         // Negative: a name that only starts like the folder stays.
         assert!(f.allows(root, Path::new("/proj/generated_stub.py")));
         assert!(f.allows(root, Path::new("/proj/src/targets/x.rs")));
+    }
+
+    /// #958: an include glob that names a folder searches what is inside
+    /// it: a bare `tests` at any depth, `src/widgets` and `./src` from the
+    /// workspace root.
+    #[test]
+    fn an_included_folder_searches_the_files_inside_it() {
+        let root = Path::new("/proj");
+        let f = PathFilter::new("tests", "");
+        assert!(f.allows(root, Path::new("/proj/tests/cli.rs")));
+        assert!(f.allows(root, Path::new("/proj/crate/tests/deep/x.rs")));
+        assert!(!f.allows(root, Path::new("/proj/src/main.rs")));
+        // Negative: a name that only starts like the folder is left out.
+        assert!(!f.allows(root, Path::new("/proj/tests_old/x.rs")));
+        let f = PathFilter::new("src/widgets", "");
+        assert!(f.allows(root, Path::new("/proj/src/widgets/search.rs")));
+        assert!(!f.allows(root, Path::new("/proj/src/app/mod.rs")));
+        let f = PathFilter::new("./src", "");
+        assert!(f.allows(root, Path::new("/proj/src/app/mod.rs")));
+        assert!(!f.allows(root, Path::new("/proj/vendor/src/x.rs")));
+        // A file glob names files, not a folder that happens to match it,
+        // and a folder above the workspace lets nothing in.
+        let f = PathFilter::new("*.rs, src", "");
+        assert!(f.allows(root, Path::new("/proj/a/main.rs")));
+        assert!(!f.allows(root, Path::new("/proj/generated.rs/notes.txt")));
+        assert!(!f.allows(root, Path::new("/home/me/src/elsewhere.txt")));
+        // The same folder names on the exclude side drop their contents.
+        let f = PathFilter::new("", "src/widgets, dist");
+        assert!(!f.allows(root, Path::new("/proj/src/widgets/search.rs")));
+        assert!(!f.allows(root, Path::new("/proj/dist/bundle.js")));
+        assert!(f.allows(root, Path::new("/proj/src/app/mod.rs")));
     }
 
     #[test]
@@ -5494,6 +5892,78 @@ mod tests {
         assert_eq!(panel.replace, "b");
     }
 
+    /// #1729: the hardware caret sits on the cell of the char it is before,
+    /// and a query longer than the row scrolls so the caret stays inside it.
+    #[test]
+    fn the_caret_follows_its_char_and_a_long_query_scrolls() {
+        use ratatui::buffer::Buffer;
+        let tmp = TempDir::new().unwrap();
+        let mut panel = SearchPanel::new(tmp.path().to_path_buf());
+        panel.focused = true;
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 30,
+            height: 20,
+        };
+        let draw = |panel: &mut SearchPanel| {
+            let mut buf = Buffer::empty(area);
+            Widget::render(panel, area, &mut buf);
+            buf
+        };
+        for c in "abcdef".chars() {
+            panel.type_char(c);
+        }
+        draw(&mut panel);
+        let (end_x, _) = panel.cursor_screen_pos().unwrap();
+        panel.move_caret(|_, _| 3);
+        draw(&mut panel);
+        let (mid_x, y) = panel.cursor_screen_pos().unwrap();
+        assert_eq!(end_x - mid_x, 3, "three chars left of the end");
+        assert_eq!(y, panel.query_input_rect.y);
+        // Far longer than the row: the caret stays inside it either way.
+        panel.seed("0123456789".repeat(6), String::new(), String::new());
+        let buf = draw(&mut panel);
+        let r = panel.query_input_rect;
+        let (cx, cy) = panel.cursor_screen_pos().unwrap();
+        assert!(cx >= r.x && cx < r.right(), "caret {cx} inside {r:?}");
+        let row: String = (r.x..r.right())
+            .map(|x| buf[(x, cy)].symbol().to_string())
+            .collect();
+        assert!(row.contains("789"), "the tail is the part in view: {row:?}");
+        panel.move_caret(|_, _| 0);
+        let buf = draw(&mut panel);
+        let row: String = (r.x..r.right())
+            .map(|x| buf[(x, cy)].symbol().to_string())
+            .collect();
+        assert!(row.contains("0123"), "Home brings the head back: {row:?}");
+    }
+
+    /// #1729: a click in the text puts the caret under it.
+    #[test]
+    fn a_click_in_the_query_places_the_caret_under_it() {
+        use ratatui::buffer::Buffer;
+        let tmp = TempDir::new().unwrap();
+        let mut panel = SearchPanel::new(tmp.path().to_path_buf());
+        panel.focused = true;
+        for c in "abcdef".chars() {
+            panel.type_char(c);
+        }
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 30,
+            height: 20,
+        };
+        let mut buf = Buffer::empty(area);
+        Widget::render(&mut panel, area, &mut buf);
+        let (end_x, _) = panel.cursor_screen_pos().unwrap();
+        panel.click_caret(end_x - 4);
+        assert_eq!(panel.caret(), 2);
+        panel.click_caret(end_x + 5);
+        assert_eq!(panel.caret(), 6, "past the text is the end");
+    }
+
     #[test]
     fn focused_query_field_exposes_a_caret_and_paints_no_static_block() {
         use ratatui::buffer::Buffer;
@@ -5998,6 +6468,38 @@ mod tests {
             .to_string()
     }
 
+    /// #2008: the right column becomes the scrollbar once the list
+    /// overflows, and a hit that streams in can do that before the next
+    /// render draws the bar: that column then has no path hint.
+    #[test]
+    fn the_column_the_scrollbar_takes_has_no_path_hint() {
+        let tmp = TempDir::new().unwrap();
+        let mut panel = make_panel_with_hits(&tmp, 1);
+        render_panel(&mut panel, 40);
+        let fits = panel.results_viewport_height();
+        panel.hits.clear();
+        panel.add_hits(
+            (0..fits)
+                .map(|i| hit(&tmp.path().join("a.txt"), i + 1))
+                .collect(),
+        );
+        render_panel(&mut panel, 40);
+        let inner = panel.last_inner;
+        let (row, right) = (
+            inner.y + panel.results_start_offset,
+            inner.x + inner.width - 1,
+        );
+        assert_eq!(
+            panel.last_scrollbar,
+            Rect::default(),
+            "precondition: no overflow yet"
+        );
+        assert!(panel.result_path_at(right, row).is_some());
+        panel.add_hits(vec![hit(&tmp.path().join("b.txt"), 1)]);
+        assert_eq!(panel.result_path_at(right, row), None);
+        assert!(panel.result_path_at(right - 1, row).is_some());
+    }
+
     fn render_panel(panel: &mut SearchPanel, width: u16) -> Buffer {
         let area = Rect {
             x: 0,
@@ -6086,5 +6588,238 @@ mod tests {
         assert!(row.contains("note"), "{row:?}");
         assert!(row.starts_with("a.txt:1: "), "{row:?}");
         assert!(!row.contains('…'), "{row:?}");
+    }
+
+    /// A panel with two results for `needle` in `a.rs`, the first one
+    /// selected, on the default theme (Croft Loch).
+    fn loch_results_panel(tmp: &TempDir) -> SearchPanel {
+        let mut panel = SearchPanel::new(tmp.path().to_path_buf());
+        assert!(
+            crate::widgets::surface::tones(panel.theme).is_some(),
+            "the default theme is Croft Loch"
+        );
+        panel.query = "needle".into();
+        panel.hits = (1..=2)
+            .map(|line_no| SearchHit {
+                path: tmp.path().join("a.rs"),
+                line_no,
+                line_text: String::from("let needle = 1;"),
+                matches: 1,
+            })
+            .collect();
+        panel.selected = 0;
+        panel
+    }
+
+    /// The column and row where `label` starts on screen.
+    fn cell_of(buf: &Buffer, label: &str) -> (u16, u16) {
+        for y in buf.area.top()..buf.area.bottom() {
+            let row: String = (buf.area.left()..buf.area.right())
+                .map(|x| buf[(x, y)].symbol())
+                .collect();
+            if let Some(i) = row.find(label) {
+                return (row[..i].chars().count() as u16, y);
+            }
+        }
+        panic!("{label} not on screen:\n{}", buffer_to_string(buf));
+    }
+
+    /// Croft Loch: a result row reads in the ink ramp (file name in body
+    /// text, line number and preview muted), the selected row wears the
+    /// shared selected-row anatomy across its full width (the band, and
+    /// the accent bar in the pane's left padding while the view has focus)
+    /// with its inks a step up, and the file name is never a teal chip.
+    #[test]
+    fn croft_loch_result_rows_use_the_ink_ramp_and_the_selected_row_band() {
+        use crate::widgets::surface::{ROW_BAR, selected_row_fill, tones};
+        let tmp = TempDir::new().unwrap();
+        let mut panel = loch_results_panel(&tmp);
+        let t = tones(panel.theme).unwrap();
+        panel.focused = true;
+        let buf = render_panel(&mut panel, 40);
+        let band = crate::gradient::rgb_color(selected_row_fill(t, t.chrome, true));
+
+        let (x, y) = cell_of(&buf, "a.rs:1:");
+        let area = panel.last_area;
+        assert_eq!(buf[(area.x, y)].symbol(), ROW_BAR, "the bar in the padding");
+        assert_eq!(buf[(area.x, y)].fg, t.accent());
+        let right = panel.last_inner.x + panel.last_inner.width - 1;
+        for cx in area.x..=right {
+            if (x + 12..x + 18).contains(&cx) {
+                continue; // the match's own tint
+            }
+            assert_eq!(buf[(cx, y)].bg, band, "the band spans the row ({cx})");
+        }
+        assert_eq!(buf[(x, y)].fg, t.text(), "the file name is body text");
+        assert!(!buf[(x, y)].modifier.contains(Modifier::BOLD));
+        assert_eq!(buf[(x + 5, y)].fg, t.muted(), "the line number");
+        assert_eq!(buf[(x + 8, y)].fg, t.text(), "a step-up preview");
+
+        let (x2, y2) = cell_of(&buf, "a.rs:2:");
+        assert_eq!(buf[(x2, y2)].fg, t.text());
+        assert_eq!(buf[(x2, y2)].bg, t.chrome(), "other rows sit on the chrome");
+        assert_eq!(buf[(x2 + 5, y2)].fg, t.muted(), "the line number is muted");
+        assert_eq!(buf[(x2 + 8, y2)].fg, t.muted(), "the preview is muted");
+        assert_ne!(buf[(area.x, y2)].symbol(), ROW_BAR);
+
+        // Without focus the band greys and the bar goes.
+        panel.focused = false;
+        let buf = render_panel(&mut panel, 40);
+        let (_, y) = cell_of(&buf, "a.rs:1:");
+        assert_ne!(buf[(area.x, y)].symbol(), ROW_BAR, "no bar without focus");
+        assert_eq!(
+            buf[(area.x + 3, y)].bg,
+            crate::gradient::rgb_color(selected_row_fill(t, t.chrome, false))
+        );
+    }
+
+    /// Croft Loch: a result's `:N:` line number is where the hit is, so it
+    /// reads at 3:1 or better on every row it sits on, the plain chrome and
+    /// the selected row's band with and without focus, never in the faint
+    /// ink that sank to about 2:1.
+    #[test]
+    fn croft_loch_result_line_numbers_stay_readable_on_every_row() {
+        use crate::theme::contrast_ratio;
+        use crate::widgets::surface::tones;
+        let rgb = |c: Color| match c {
+            Color::Rgb(r, g, b) => (r, g, b),
+            other => panic!("an RGB colour, not {other:?}"),
+        };
+        let tmp = TempDir::new().unwrap();
+        let mut panel = loch_results_panel(&tmp);
+        let t = tones(panel.theme).unwrap();
+        for focused in [true, false] {
+            panel.focused = focused;
+            let buf = render_panel(&mut panel, 40);
+            for label in ["a.rs:1:", "a.rs:2:"] {
+                let (x, y) = cell_of(&buf, label);
+                let digit = &buf[(x + 5, y)];
+                assert_eq!(digit.symbol(), &label[5..6]);
+                assert_ne!(digit.fg, t.faint(), "{label} focused={focused}");
+                let ratio = contrast_ratio(rgb(digit.fg), rgb(digit.bg));
+                assert!(ratio >= 3.0, "{label} focused={focused}: {ratio:.2}:1");
+            }
+        }
+    }
+
+    /// Croft Loch: a match in a result's preview is the amber tint over
+    /// the row's own fill (the selected row's first match the stronger,
+    /// current one), never the solid yellow block, and its ink reads on it
+    /// at 4.5:1 or better.
+    #[test]
+    fn croft_loch_result_matches_are_an_amber_tint_of_their_row() {
+        use crate::widgets::surface::{match_style, selected_row_fill, tones};
+        let tmp = TempDir::new().unwrap();
+        let mut panel = loch_results_panel(&tmp);
+        let t = tones(panel.theme).unwrap();
+        panel.focused = true;
+        let buf = render_panel(&mut panel, 40);
+        let band = crate::gradient::rgb_color(selected_row_fill(t, t.chrome, true));
+        let tint = |row: Color, active: bool| {
+            match_style(Style::default().bg(row), t, panel.theme, active)
+                .bg
+                .unwrap()
+        };
+        for (label, row, active) in [("a.rs:1:", band, true), ("a.rs:2:", t.chrome(), false)] {
+            let (x, y) = cell_of(&buf, label);
+            let first = x + 12; // past "a.rs:N: let "
+            for cx in first..first + 6 {
+                let cell = &buf[(cx, y)];
+                assert_eq!(cell.symbol(), &"needle"[usize::from(cx - first)..][..1]);
+                assert_eq!(cell.bg, tint(row, active), "{label} match cell {cx}");
+                assert_ne!(cell.bg, Color::Rgb(0xff, 0xd7, 0x4a));
+                assert!(!cell.modifier.contains(Modifier::BOLD));
+                let (Color::Rgb(fr, fg, fb), Color::Rgb(br, bg, bb)) = (cell.fg, cell.bg) else {
+                    panic!("RGB inks: {cell:?}");
+                };
+                assert!(crate::theme::contrast_ratio((fr, fg, fb), (br, bg, bb)) >= 4.5);
+            }
+            assert_eq!(buf[(first + 6, y)].bg, row, "the tint stops at the match");
+        }
+    }
+
+    /// Croft Loch: the pointer over an unselected result lifts it with the
+    /// neutral hover fill, and its match is tinted over that lift.
+    #[test]
+    fn croft_loch_hovered_result_rows_take_the_neutral_lift() {
+        use crate::widgets::surface::{match_style, tones};
+        let tmp = TempDir::new().unwrap();
+        let mut panel = loch_results_panel(&tmp);
+        let t = tones(panel.theme).unwrap();
+        let buf = render_panel(&mut panel, 40);
+        let (x, y) = cell_of(&buf, "a.rs:2:");
+        panel.hover_pointer = Some((x, y));
+        let buf = render_panel(&mut panel, 40);
+        let lift = t.hover_on(t.chrome);
+        assert_eq!(buf[(x, y)].bg, lift);
+        assert_eq!(buf[(x, y)].fg, t.text());
+        assert_eq!(
+            buf[(x + 12, y)].bg,
+            match_style(Style::default().bg(lift), t, panel.theme, false)
+                .bg
+                .unwrap()
+        );
+    }
+
+    /// Croft Loch: the result summary is a muted sentence whose counts are
+    /// body text, without the italic, and the title follows the Explorer's
+    /// (strong while focused, muted otherwise, never bold).
+    #[test]
+    fn croft_loch_summary_and_title_follow_the_ink_ramp() {
+        let tmp = TempDir::new().unwrap();
+        let mut panel = loch_results_panel(&tmp);
+        let t = crate::widgets::surface::tones(panel.theme).unwrap();
+        panel.focused = true;
+        let buf = render_panel(&mut panel, 40);
+        let (x, y) = cell_of(&buf, "2 results in 1 file");
+        assert_eq!(buf[(x, y)].fg, t.text(), "the count");
+        assert_eq!(buf[(x + 2, y)].fg, t.muted(), "the words");
+        assert_eq!(buf[(x + 13, y)].fg, t.text(), "the file count");
+        assert!(!buf[(x + 2, y)].modifier.contains(Modifier::ITALIC));
+        let (tx, ty) = cell_of(&buf, "SEARCH");
+        assert_eq!(buf[(tx, ty)].fg, t.strong());
+        assert!(!buf[(tx, ty)].modifier.contains(Modifier::BOLD));
+        // The query (the first "needle" on screen, above the results) is
+        // body text in its field.
+        let (qx, qy) = cell_of(&buf, "needle");
+        assert!(qy < y, "the field sits above the summary");
+        assert_eq!(buf[(qx, qy)].fg, t.text(), "the query is body text");
+        panel.focused = false;
+        let buf = render_panel(&mut panel, 40);
+        assert_eq!(buf[(tx, ty)].fg, t.muted());
+        // An empty field's placeholder is muted.
+        panel.query.clear();
+        let buf = render_panel(&mut panel, 40);
+        let (px, py) = cell_of(&buf, "Search");
+        assert_eq!(buf[(px, py)].fg, t.muted(), "the placeholder is muted");
+    }
+
+    /// The boxed themes keep their result rows exactly: Croft Black's
+    /// selected file name on the teal chip in bold white and its matches
+    /// black on the gold block, with no row bar.
+    #[test]
+    fn croft_black_result_rows_keep_the_teal_chip_and_gold_matches() {
+        let tmp = TempDir::new().unwrap();
+        let mut panel = loch_results_panel(&tmp);
+        panel.theme = crate::theme::Theme::BLACK;
+        panel.focus_gradient = true;
+        panel.focused = true;
+        let buf = render_panel(&mut panel, 40);
+        let (x, y) = cell_of(&buf, "a.rs:1:");
+        let chip = crate::gradient::rgb_color(crate::gradient::POPUP_SEL_BG);
+        assert_eq!(buf[(x, y)].bg, chip);
+        assert_eq!(buf[(x, y)].fg, Color::White);
+        assert!(buf[(x, y)].modifier.contains(Modifier::BOLD));
+        assert_ne!(
+            buf[(x + 5, y)].bg,
+            chip,
+            "only the file name wears the chip"
+        );
+        assert_eq!(buf[(x + 12, y)].bg, Color::Rgb(0xff, 0xd7, 0x4a));
+        assert_eq!(buf[(x + 12, y)].fg, Color::Black);
+        assert_ne!(
+            buf[(panel.last_area.x, y)].symbol(),
+            crate::widgets::surface::ROW_BAR
+        );
     }
 }

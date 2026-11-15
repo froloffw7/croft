@@ -95,7 +95,7 @@ fn the_palette_goes_to_implementations_at_the_caret() {
     let mut app = app_with_open_file(tmp.path(), "lib.rs", "trait Shape {}\n");
     app.editor.cursor_col = 7;
     assert!(app.implementation_request_id.is_none());
-    assert!(run_from_palette(&mut app, "Go to Implementations"));
+    assert!(run_palette_row_titled(&mut app, "Go to Implementations"));
     assert!(
         app.implementation_request_id.is_some(),
         "the request went to the language servers"
@@ -109,7 +109,7 @@ fn the_palette_opens_the_zoxide_jump_from_any_pane() {
     let tmp = tempfile::tempdir().unwrap();
     let mut app = App::new(tmp.path().to_path_buf()).unwrap();
     app.focus_pane(Pane::Editor);
-    assert!(run_from_palette(
+    assert!(run_palette_row_titled(
         &mut app,
         "Explorer: Jump to Directory (zoxide)"
     ));
@@ -126,10 +126,16 @@ fn the_palette_focuses_the_left_and_right_editor_groups() {
     app.split_editor();
     assert_eq!(app.editor_layout.active_dfs_index(), 1);
     app.focus_pane(Pane::Tree);
-    assert!(run_from_palette(&mut app, "View: Focus Left Editor Group"));
+    assert!(run_palette_row_titled(
+        &mut app,
+        "View: Focus Left Editor Group"
+    ));
     assert_eq!(app.editor_layout.active_dfs_index(), 0);
     assert!(app.focus == Pane::Editor);
-    assert!(run_from_palette(&mut app, "View: Focus Right Editor Group"));
+    assert!(run_palette_row_titled(
+        &mut app,
+        "View: Focus Right Editor Group"
+    ));
     assert_eq!(app.editor_layout.active_dfs_index(), 1);
 }
 
@@ -144,15 +150,18 @@ fn the_palette_focuses_the_next_and_previous_terminal() {
     app.split_terminal().unwrap();
     app.active_terminal = 0;
     app.focus_pane(Pane::Editor);
-    assert!(run_from_palette(&mut app, "Terminal: Focus Next Terminal"));
+    assert!(run_palette_row_titled(
+        &mut app,
+        "Terminal: Focus Next Terminal"
+    ));
     assert_eq!(app.active_terminal, 1);
     assert!(app.focus == Pane::Terminal);
-    assert!(run_from_palette(
+    assert!(run_palette_row_titled(
         &mut app,
         "Terminal: Focus Previous Terminal"
     ));
     assert_eq!(app.active_terminal, 0);
-    assert!(run_from_palette(
+    assert!(run_palette_row_titled(
         &mut app,
         "Terminal: Focus Previous Terminal"
     ));
@@ -203,7 +212,7 @@ fn the_palette_selects_the_whole_buffer() {
     let tmp = tempfile::tempdir().unwrap();
     let mut app = app_with_open_file(tmp.path(), "notes.txt", "one\ntwo");
     app.focus_pane(Pane::Tree);
-    assert!(run_from_palette(&mut app, "Select All"));
+    assert!(run_palette_row_titled(&mut app, "Select All"));
     assert!(app.focus == Pane::Editor);
     assert_eq!(app.editor.selection_text(), "one\ntwo");
 }
@@ -232,7 +241,7 @@ fn the_palette_runs_the_markdown_code_block_at_the_caret() {
     let tmp = tempfile::tempdir().unwrap();
     let mut app = markdown_fence_app(tmp.path());
     let panes = app.terminals.len();
-    assert!(run_from_palette(
+    assert!(run_palette_row_titled(
         &mut app,
         "Markdown: Run Code Block at Cursor"
     ));
@@ -260,10 +269,10 @@ fn insert_line_below_and_above_are_palette_commands() {
     let tmp = tempfile::tempdir().unwrap();
     let mut app = app_with_open_file(tmp.path(), "i.py", "a = 1\nb = 2\n");
     app.editor.cursor_col = 2;
-    assert!(run_from_palette(&mut app, "Insert Line Below"));
+    assert!(run_palette_row_titled(&mut app, "Insert Line Below"));
     assert_eq!(app.editor.lines, ["a = 1", "", "b = 2"]);
     app.editor.cursor_row = 2;
-    assert!(run_from_palette(&mut app, "Insert Line Above"));
+    assert!(run_palette_row_titled(&mut app, "Insert Line Above"));
     assert_eq!(app.editor.lines, ["a = 1", "", "", "b = 2"]);
     assert_eq!(app.editor.cursor_row, 2);
 }
@@ -348,6 +357,112 @@ fn esc_closes_the_file_finder_modal() {
         app.file_finder.is_none(),
         "Esc must dismiss the file finder"
     );
+}
+
+/// Croft Loch: while the Command Palette is open the terminal's caret is
+/// the palette query's, never the editor's blinking through the card; a
+/// boxed theme paints its own caret block and keeps its caret rules.
+#[test]
+fn the_palette_owns_the_caret_while_it_is_open() {
+    let tmp = tempfile::tempdir().unwrap();
+    let a = tmp.path().join("a.txt");
+    std::fs::write(&a, "alpha\nbeta\n").unwrap();
+    for (theme, loch) in [
+        (crate::theme::Theme::from_id("loch"), true),
+        (crate::theme::Theme::BLACK, false),
+    ] {
+        let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+        app.apply_theme(theme);
+        app.editor.open_in_new_tab(&a).unwrap();
+        app.focus_pane(Pane::Editor);
+        app.screen_reader = true;
+        app.open_command_palette();
+        for c in "tog".chars() {
+            app.handle_key(key(KeyCode::Char(c), KeyModifiers::NONE))
+                .unwrap();
+        }
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 40)).unwrap();
+        term.draw(|f| app.render(f)).unwrap();
+        let palette = app.command_palette.as_ref().unwrap();
+        let rect = palette.last_rect;
+        if loch {
+            assert_eq!(
+                app.quick_input_caret(),
+                Some((rect.x + 7, rect.y + 1)),
+                "after `tog` on the input row"
+            );
+            assert!(app.cursor_should_be_visible());
+        } else {
+            assert_eq!(app.quick_input_caret(), None, "a painted caret block");
+            assert!(!app.quick_input_owns_caret(), "boxed caret rules as before");
+        }
+    }
+}
+
+/// Screen reader mode parks the terminal's caret on the picker's
+/// announcement, so on Croft Loch, whose query has no caret of its own, a
+/// block marks where the typing lands instead of the query losing its caret.
+#[test]
+fn a_screen_reader_keeps_a_visible_caret_in_the_loch_palette_query() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    app.screen_reader = true;
+    app.open_command_palette();
+    for c in "tog".chars() {
+        app.handle_key(key(KeyCode::Char(c), KeyModifiers::NONE))
+            .unwrap();
+    }
+    let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 40)).unwrap();
+    term.draw(|f| app.render(f)).unwrap();
+    let (cx, cy) = app
+        .quick_input_caret()
+        .expect("Loch hands the query a caret");
+    let buf = term.backend().buffer();
+    assert!(
+        buf[(cx, cy)].modifier.contains(Modifier::REVERSED),
+        "the query's caret is painted while the announcement has the terminal's"
+    );
+    let parked = term.get_cursor_position().unwrap();
+    assert_eq!(
+        Some((parked.x, parked.y)),
+        app.announce_pos,
+        "the terminal's caret stays on the announcement"
+    );
+}
+
+/// Croft Loch dims the screen behind a quick input, except where the
+/// terminal draws inline images, which are baked and would stay lit.
+#[test]
+fn the_quick_input_scrim_is_withheld_where_inline_images_draw() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("alpha.rs"), "fn main() {}\n").unwrap();
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    app.open_file_finder();
+    let draw = |app: &mut App| {
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 40)).unwrap();
+        term.draw(|f| app.render(f)).unwrap();
+        term.backend().buffer().clone()
+    };
+    let dimmed = draw(&mut app);
+    app.inline_protocol = crate::iterm2_inline::InlineImageProtocol::Kitty;
+    let lit = draw(&mut app);
+    let card = app.file_finder.as_ref().unwrap().last_rect;
+    let luma = |c: ratatui::style::Color| match c {
+        ratatui::style::Color::Rgb(r, g, b) => u32::from(r) + u32::from(g) + u32::from(b),
+        _ => 0,
+    };
+    let status = 39;
+    assert!(status > card.bottom(), "the status bar is off the card");
+    let darker = (0..120).any(|x| luma(dimmed[(x, status)].fg) < luma(lit[(x, status)].fg));
+    assert!(darker, "the scrim sinks the status bar");
+    for x in 0..120 {
+        if matches!(lit[(x, status)].fg, ratatui::style::Color::Rgb(..)) {
+            assert!(
+                luma(dimmed[(x, status)].fg) <= luma(lit[(x, status)].fg),
+                "nothing behind the card gets brighter ({x})"
+            );
+        }
+    }
 }
 
 /// Issue #207: under Croft Light the quick-input popups must paint light
@@ -624,10 +739,7 @@ fn quick_open_with_a_line_range_lands_on_the_line_and_selects_the_range() {
     let type_and_enter = |app: &mut App, text: &str| {
         app.handle_key(key(KeyCode::Char('p'), KeyModifiers::SUPER))
             .unwrap();
-        for c in text.chars() {
-            app.handle_key(key(KeyCode::Char(c), KeyModifiers::NONE))
-                .unwrap();
-        }
+        type_keys(app, text);
         app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE))
             .unwrap();
     };
@@ -1222,13 +1334,13 @@ fn the_palette_and_vim_recorders_are_one_recording_not_two() {
     app.macros_path = tmp.path().join("macros.json");
 
     // vim starts, palette stops.
-    vim_feed_str(&mut app, "qa");
+    type_keys(&mut app, "qa");
     assert!(app.macro_recording.is_some());
     app.run_command(crate::widgets::command_palette::Command::MacroStartStopRecording);
     assert!(app.macro_recording.is_none(), "the palette stopped it");
 
     // A following `q` must START a fresh recording, not stop a phantom one.
-    vim_feed_str(&mut app, "qb");
+    type_keys(&mut app, "qb");
     assert_eq!(
         app.macro_recording.as_ref().map(|r| r.register),
         Some(Some('b')),
@@ -1239,11 +1351,111 @@ fn the_palette_and_vim_recorders_are_one_recording_not_two() {
     app.run_command(crate::widgets::command_palette::Command::MacroStartStopRecording);
     app.run_command(crate::widgets::command_palette::Command::MacroStartStopRecording);
     assert!(app.macro_recording.is_some(), "palette started one");
-    vim_feed(&mut app, 'q');
+    type_char(&mut app, 'q');
     assert!(
         app.macro_recording.is_none(),
         "a bare q stops what the palette started"
     );
+}
+
+/// #952: a recording started and stopped from the Command Palette leaves
+/// the stopping palette session out of the macro, so Replay N Times repeats
+/// the edits and never types into a palette. A palette command run in the
+/// middle (here Transform to Uppercase) joins the macro whole and replays.
+#[test]
+fn a_macro_stopped_from_the_palette_replays_only_what_was_recorded() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut app = app_with_open_file(tmp.path(), "names.txt", "alice\nbob\ncarol\ndave\neve\n");
+    app.macros_path = tmp.path().join("macros.json");
+    let palette = key(
+        KeyCode::Char('p'),
+        KeyModifiers::SUPER | KeyModifiers::SHIFT,
+    );
+    let none = |code| key(code, KeyModifiers::NONE);
+    let run_palette_row_titled = |app: &mut App, query: &str| {
+        app.handle_key(palette).unwrap();
+        type_keys(app, query);
+        app.handle_key(none(KeyCode::Enter)).unwrap();
+    };
+    run_palette_row_titled(&mut app, "Macro: Start/Stop Recording");
+    assert!(app.macro_recording.is_some(), "the palette started it");
+    app.handle_key(none(KeyCode::Home)).unwrap();
+    type_keys(&mut app, "- ");
+    run_palette_row_titled(&mut app, "Transform to Uppercase");
+    app.handle_key(none(KeyCode::Down)).unwrap();
+    run_palette_row_titled(&mut app, "Macro: Start/Stop Recording");
+    assert!(app.macro_recording.is_none(), "the palette stopped it");
+    assert_eq!(app.editor.lines[0], "- ALICE");
+    app.replay_last_macro(4);
+    assert!(
+        app.command_palette.is_none(),
+        "replay ends with no palette open"
+    );
+    assert_eq!(
+        app.editor.lines[..5],
+        ["- ALICE", "- BOB", "- CAROL", "- DAVE", "- EVE"]
+    );
+}
+
+/// #952 review: a palette command that takes focus out of the editor is
+/// left out of the macro. The click that brings focus back is not recorded,
+/// so replaying the command would send the keys after it to the shell.
+#[test]
+fn a_palette_command_that_leaves_the_editor_is_not_recorded() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut app = app_with_open_file(tmp.path(), "names.txt", "alice\nbob\n");
+    app.macros_path = tmp.path().join("macros.json");
+    let palette = key(
+        KeyCode::Char('p'),
+        KeyModifiers::SUPER | KeyModifiers::SHIFT,
+    );
+    let run_palette_row_titled = |app: &mut App, query: &str| {
+        app.handle_key(palette).unwrap();
+        type_keys(app, query);
+        app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+    };
+    run_palette_row_titled(&mut app, "Macro: Start/Stop Recording");
+    type_keys(&mut app, "x");
+    run_palette_row_titled(&mut app, "Terminal: Focus Terminal");
+    assert!(app.focus != Pane::Editor, "the command left the editor");
+    app.focus_pane(Pane::Editor);
+    type_keys(&mut app, "y");
+    run_palette_row_titled(&mut app, "Macro: Start/Stop Recording");
+    app.replay_last_macro(1);
+    assert!(app.focus == Pane::Editor, "replay stays in the editor");
+    assert!(
+        app.editor.lines[0].starts_with("xyxy"),
+        "{:?}",
+        app.editor.lines
+    );
+}
+
+/// #952 review: a palette session closed by a click held keys that nothing
+/// replays; they are dropped, not picked up by the next palette session.
+#[test]
+fn a_palette_closed_by_a_click_leaves_nothing_for_the_macro() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut app = app_with_open_file(tmp.path(), "names.txt", "alice\n");
+    app.run_command(crate::widgets::command_palette::Command::MacroStartStopRecording);
+    app.handle_key(key(
+        KeyCode::Char('p'),
+        KeyModifiers::SUPER | KeyModifiers::SHIFT,
+    ))
+    .unwrap();
+    type_keys(&mut app, "delete line");
+    let held = |app: &App| app.macro_recording.as_ref().unwrap().palette_keys.len();
+    assert!(held(&app) > 0, "an open palette session is held");
+    // A click outside closes the palette; any mouse event then lets go.
+    app.command_palette = None;
+    app.handle_mouse(crossterm::event::MouseEvent {
+        kind: crossterm::event::MouseEventKind::Moved,
+        column: 0,
+        row: 0,
+        modifiers: KeyModifiers::NONE,
+    });
+    assert_eq!(held(&app), 0);
+    assert!(app.macro_recording.as_ref().unwrap().recorded.is_empty());
 }
 
 /// #1345: Go to File skips excluded files, as VS Code's file search does
@@ -1346,6 +1558,35 @@ fn the_palette_clear_bookmarks_command_leaves_a_preview_alone() {
     assert!(app.editor.bookmarked_lines().is_empty());
 }
 
+/// Typing in the bookmark picker narrows it to the matching rows.
+#[test]
+fn the_bookmark_picker_filters_as_you_type() {
+    use crate::widgets::command_palette::Command;
+    let tmp = tempfile::tempdir().unwrap();
+    let a = tmp.path().join("a.txt");
+    let b = tmp.path().join("b.txt");
+    std::fs::write(&a, "alpha\nbeta\ngamma\n").unwrap();
+    std::fs::write(&b, "one\ntwo\nthree\n").unwrap();
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    app.editor.open(&a).unwrap();
+    app.editor.cursor_row = 1;
+    app.toggle_bookmark();
+    app.editor.open_in_new_tab(&b).unwrap();
+    app.editor.cursor_row = 2;
+    app.toggle_bookmark();
+    app.run_command(Command::ViewBookmarks);
+    for c in "b.txt".chars() {
+        app.handle_key(key(KeyCode::Char(c), KeyModifiers::NONE))
+            .unwrap();
+    }
+    let picker = app.list_picker.as_ref().expect("the picker stays open");
+    assert_eq!(picker.visible_count(), 1);
+    assert_eq!(
+        picker.selected_row().map(|r| r.label.as_str()),
+        Some("b.txt:3  three")
+    );
+}
+
 #[test]
 fn palette_merge_accept_incoming_resolves_at_cursor() {
     let tmp = tempfile::tempdir().unwrap();
@@ -1384,7 +1625,7 @@ fn both_added_conflict(root: &std::path::Path) {
             &format!("fn {f}() {{\n    {f}();\n}}\n\nfn tail"),
         )
     };
-    git_ok(root, &["init", "-q", "-b", "main"]);
+    git_init(root);
     git_ok(root, &["config", "user.name", "t"]);
     git_ok(root, &["config", "user.email", "t@t"]);
     // Git's default style, whatever this machine's config says.
@@ -1398,13 +1639,10 @@ fn both_added_conflict(root: &std::path::Path) {
     git_ok(root, &["checkout", "-q", "main"]);
     std::fs::write(root.join("a.rs"), add("from_main")).unwrap();
     git_ok(root, &["commit", "-qam", "main"]);
-    let merge = std::process::Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(["merge", "-q", "feature"])
-        .output()
-        .unwrap();
-    assert!(!merge.status.success(), "the merge must conflict");
+    assert!(
+        !git_succeeds(root, &["merge", "-q", "feature"]),
+        "the merge must conflict"
+    );
 }
 
 /// The conflict's footer row in `app`'s editor, with the shared `}` git
@@ -1460,7 +1698,7 @@ fn accept_both_reads_the_stages_of_the_files_own_repo() {
     let other = tmp.path().join("other");
     std::fs::create_dir(&repo).unwrap();
     std::fs::create_dir(&other).unwrap();
-    git_ok(&other, &["init", "-q"]);
+    git_init(&other);
     both_added_conflict(&repo);
     let mut app = App::new(repo.clone()).unwrap();
     app.add_workspace_folder(other.clone());
@@ -1852,6 +2090,7 @@ fn esc_in_a_palette_the_user_opened_keeps_the_tour() {
     with_relay_home(home.path(), || {
         let tmp = tempfile::tempdir().unwrap();
         let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+        let _settings = own_settings(&mut app);
         app.start_demo();
         assert!(
             app.command_palette.is_none(),
@@ -1879,7 +2118,10 @@ fn the_palette_turns_the_startup_tab_into_untitled_1() {
     let tmp = tempfile::tempdir().unwrap();
     let mut app = App::new(tmp.path().to_path_buf()).unwrap();
     assert!(app.editor.is_blank_initial());
-    assert!(run_from_palette(&mut app, "File: New Untitled Text File"));
+    assert!(run_palette_row_titled(
+        &mut app,
+        "File: New Untitled Text File"
+    ));
     assert_eq!(app.editor.tab_count(), 1);
     assert_eq!(app.editor.tab_display_label(0), "Untitled-1");
     assert!(!app.editor.is_blank_initial(), "no welcome screen over it");
@@ -1926,7 +2168,7 @@ fn palette_query_layout_lists_the_customize_layout_commands() {
     let tmp = tempfile::tempdir().unwrap();
     let mut app = App::new(tmp.path().to_path_buf()).unwrap();
     open_palette_852(&mut app);
-    type_keys_852(&mut app, "layout");
+    type_keys(&mut app, "layout");
     let titles: Vec<String> = app
         .command_palette
         .as_ref()
@@ -1960,17 +2202,17 @@ fn palette_toggles_the_activity_bar_status_bar_and_side_bar_position() {
     app.status_bar_visible = true;
     app.side_bar_position = SideBarPosition::Left;
     open_palette_852(&mut app);
-    type_keys_852(&mut app, "toggle status bar visibility");
+    type_keys(&mut app, "toggle status bar visibility");
     app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE))
         .unwrap();
     assert!(!app.status_bar_visible, "the status bar hides");
     open_palette_852(&mut app);
-    type_keys_852(&mut app, "toggle activity bar visibility");
+    type_keys(&mut app, "toggle activity bar visibility");
     app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE))
         .unwrap();
     assert!(!app.activity_bar_visible, "the activity bar hides");
     open_palette_852(&mut app);
-    type_keys_852(&mut app, "toggle primary side bar position");
+    type_keys(&mut app, "toggle primary side bar position");
     app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE))
         .unwrap();
     assert_eq!(app.side_bar_position, SideBarPosition::Right);
@@ -1985,20 +2227,20 @@ fn palette_sets_panel_alignment_and_quick_input_position_by_key() {
     app.panel_alignment = PanelAlignment::Center;
     app.quick_input_position = QuickInputPosition::Top;
     open_palette_852(&mut app);
-    type_keys_852(&mut app, "set panel alignment");
+    type_keys(&mut app, "set panel alignment");
     app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE))
         .unwrap();
     assert!(app.list_picker.is_some(), "the alignment picker opens");
-    type_keys_852(&mut app, "justify");
+    type_keys(&mut app, "justify");
     app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE))
         .unwrap();
     assert_eq!(app.panel_alignment, PanelAlignment::Justify);
     open_palette_852(&mut app);
-    type_keys_852(&mut app, "set quick input position");
+    type_keys(&mut app, "set quick input position");
     app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE))
         .unwrap();
     assert!(app.list_picker.is_some(), "the position picker opens");
-    type_keys_852(&mut app, "center");
+    type_keys(&mut app, "center");
     app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE))
         .unwrap();
     assert_eq!(app.quick_input_position, QuickInputPosition::Center);
@@ -2041,7 +2283,7 @@ fn palette_layout_commands_leave_the_customize_layout_popup_closed() {
 /// The palette's rows for `query`, then Esc.
 fn palette_rows_852(app: &mut App, query: &str) -> Vec<String> {
     open_palette_852(app);
-    type_keys_852(app, query);
+    type_keys(app, query);
     let rows = app
         .command_palette
         .as_ref()
@@ -2059,7 +2301,7 @@ fn palette_rows_852(app: &mut App, query: &str) -> Vec<String> {
 fn palette_close_other_editors_keeps_only_the_active_tab() {
     let (mut app, _tmp) = tabs_app_852(&["a.rs", "b.rs", "c.rs", "d.rs"]);
     app.editor.select(1);
-    let ran = run_in_palette_852(&mut app, "View: Close Other Editors in Group");
+    let ran = run_palette_top_match(&mut app, "View: Close Other Editors in Group");
     assert_eq!(
         tab_names_852(&app.editor),
         ["b.rs"],
@@ -2074,7 +2316,7 @@ fn palette_close_other_editors_keeps_only_the_active_tab() {
 fn palette_close_editors_to_the_right_closes_only_the_tabs_right_of_the_active_one() {
     let (mut app, _tmp) = tabs_app_852(&["a.rs", "b.rs", "c.rs", "d.rs"]);
     app.editor.select(1);
-    let ran = run_in_palette_852(&mut app, "View: Close Editors to the Right in Group");
+    let ran = run_palette_top_match(&mut app, "View: Close Editors to the Right in Group");
     assert_eq!(
         tab_names_852(&app.editor),
         ["a.rs", "b.rs"],
@@ -2091,7 +2333,7 @@ fn palette_close_saved_editors_closes_the_saved_tabs_and_keeps_the_dirty_one() {
     let (mut app, tmp) = tabs_app_852(&["a.rs", "b.rs", "c.rs"]);
     app.editor.select(1);
     type_into_active_tab_852(&mut app);
-    let ran = run_in_palette_852(&mut app, "View: Close Saved Editors in Group");
+    let ran = run_palette_top_match(&mut app, "View: Close Saved Editors in Group");
     assert_eq!(
         tab_names_852(&app.editor),
         ["b.rs"],
@@ -2110,7 +2352,7 @@ fn palette_close_saved_editors_closes_the_saved_tabs_and_keeps_the_dirty_one() {
 #[test]
 fn palette_close_all_editors_closes_every_tab() {
     let (mut app, _tmp) = tabs_app_852(&["a.rs", "b.rs", "c.rs"]);
-    let ran = run_in_palette_852(&mut app, "View: Close All Editors");
+    let ran = run_palette_top_match(&mut app, "View: Close All Editors");
     assert!(
         app.editor.is_blank_initial(),
         "the palette ran {ran:?}; tabs left: {:?}",
@@ -2124,7 +2366,7 @@ fn palette_close_all_editors_closes_every_tab() {
 #[test]
 fn palette_pin_editor_and_unpin_editor_pin_and_unpin_the_active_tab() {
     let (mut app, _tmp) = tabs_app_852(&["a.rs", "b.rs", "c.rs"]);
-    let ran = run_in_palette_852(&mut app, "View: Pin Editor");
+    let ran = run_palette_top_match(&mut app, "View: Pin Editor");
     assert!(app.editor.pinned, "the palette ran {ran:?}");
     assert_eq!(
         tab_names_852(&app.editor),
@@ -2132,7 +2374,7 @@ fn palette_pin_editor_and_unpin_editor_pin_and_unpin_the_active_tab() {
         "a pinned tab moves leftmost"
     );
     assert_eq!(app.status, "Pinned tab");
-    let ran = run_in_palette_852(&mut app, "View: Unpin Editor");
+    let ran = run_palette_top_match(&mut app, "View: Unpin Editor");
     assert!(!app.editor.pinned, "the palette ran {ran:?}");
     assert_eq!(
         app.editor.path.as_deref().and_then(Path::file_name),
@@ -2173,7 +2415,7 @@ fn palette_keep_editor_keeps_the_preview_tab_open() {
     std::fs::write(&p, "x\n").unwrap();
     app.editor.open_preview(&p).unwrap();
     assert!(app.editor.preview, "fixture: p.rs is the preview tab");
-    let ran = run_in_palette_852(&mut app, "View: Keep Editor");
+    let ran = run_palette_top_match(&mut app, "View: Keep Editor");
     assert!(!app.editor.preview, "the palette ran {ran:?}");
     assert_eq!(app.status, "Kept tab open");
 }
@@ -2186,7 +2428,7 @@ fn palette_close_other_editors_keeps_the_active_and_the_pinned_tabs() {
     let (mut app, tmp) = tabs_app_852(&["a.rs", "b.rs", "c.rs", "d.rs"]);
     app.dispatch_menu_action(MenuAction::ToggleTabPin(0), tmp.path().to_path_buf());
     app.editor.select(2);
-    run_in_palette_852(&mut app, "View: Close Other Editors in Group");
+    run_palette_top_match(&mut app, "View: Close Other Editors in Group");
     assert_eq!(tab_names_852(&app.editor), ["a.rs", "c.rs"]);
     assert!(app.editor.editors[0].pinned, "the pinned a.rs survives");
     assert_eq!(app.editor.active_index(), 1, "c.rs stays active");
@@ -2204,7 +2446,7 @@ fn palette_close_other_editors_keeps_the_active_and_the_pinned_tabs() {
 #[test]
 fn palette_close_editors_to_the_right_on_the_last_tab_closes_nothing() {
     let (mut app, _tmp) = tabs_app_852(&["a.rs", "b.rs", "c.rs"]);
-    run_in_palette_852(&mut app, "View: Close Editors to the Right in Group");
+    run_palette_top_match(&mut app, "View: Close Editors to the Right in Group");
     assert_eq!(tab_names_852(&app.editor), ["a.rs", "b.rs", "c.rs"]);
     assert_eq!(app.editor.active_index(), 2);
     assert!(app.closed_tabs.is_empty(), "nothing to reopen");
@@ -2226,7 +2468,7 @@ fn palette_tab_commands_leave_the_other_split_alone() {
     ] {
         let (mut app, _tmp) = split_tabs_app_852(active);
         let before = tabs_snapshot_852(&app);
-        let ran = run_in_palette_852(&mut app, title);
+        let ran = run_palette_top_match(&mut app, title);
         assert_eq!(ran.as_deref(), Some(title));
         let after = tabs_snapshot_852(&app);
         assert!(after.2, "{title}: still split");
@@ -2279,8 +2521,307 @@ fn the_palette_offers_the_move_editor_commands() {
         );
     }
     assert_eq!(
-        run_in_palette_852(&mut app, "View: Move Editor Left").as_deref(),
+        run_palette_top_match(&mut app, "View: Move Editor Left").as_deref(),
         Some("View: Move Editor Left")
     );
     assert_eq!(tab_names_852(&app.editor), ["a.py", "c.py", "b.py"]);
+}
+
+/// Bookmarks: View Bookmarks lists the marks of every open tab, and picking
+/// a row opens that file at the marked line.
+#[test]
+fn the_bookmark_picker_lists_every_tabs_marks_and_jumps_to_one() {
+    use crate::widgets::command_palette::Command;
+    use crate::widgets::list_picker::ListPurpose;
+    let tmp = tempfile::tempdir().unwrap();
+    let a = tmp.path().join("a.txt");
+    let b = tmp.path().join("b.txt");
+    std::fs::write(&a, "alpha\nbeta\ngamma\n").unwrap();
+    std::fs::write(&b, "one\ntwo\nthree\n").unwrap();
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    app.run_command(Command::ViewBookmarks);
+    assert!(app.list_picker.is_none(), "no bookmarks, no picker");
+    assert!(app.status.contains("No bookmarks"), "was {:?}", app.status);
+
+    app.editor.open(&a).unwrap();
+    app.editor.cursor_row = 1;
+    app.editor.toggle_bookmark();
+    app.editor.open_in_new_tab(&b).unwrap();
+    app.editor.cursor_row = 2;
+    app.editor.toggle_bookmark();
+    app.run_command(Command::ViewBookmarks);
+    let picker = app.list_picker.as_ref().expect("the picker opens");
+    assert_eq!(picker.purpose, ListPurpose::Bookmark);
+    let labels: Vec<&str> = picker.rows.iter().map(|r| r.label.as_str()).collect();
+    assert_eq!(labels, ["a.txt:2  beta", "b.txt:3  three"]);
+
+    // Home and End jump to the first and last row, like PgUp and PgDn.
+    app.handle_key(key(KeyCode::End, KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(app.list_picker.as_ref().unwrap().selected, 1);
+    app.handle_key(key(KeyCode::Home, KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(app.list_picker.as_ref().unwrap().selected, 0);
+
+    // Enter on the first row goes to a.txt line 2.
+    app.list_picker.as_mut().unwrap().selected = 0;
+    app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(app.editor.path.as_deref(), Some(a.as_path()));
+    assert_eq!(app.editor.cursor_row, 1);
+}
+
+/// View Bookmarks lists open files only: a preview tab that moved on from a
+/// file still holds that file's marks, but the file is no longer open, so
+/// neither it nor its text on disk shows up.
+#[test]
+fn the_bookmark_picker_leaves_out_a_file_no_tab_shows() {
+    use crate::widgets::command_palette::Command;
+    let tmp = tempfile::tempdir().unwrap();
+    let a = tmp.path().join("a.txt");
+    let b = tmp.path().join("b.txt");
+    std::fs::write(&a, "alpha\nbeta\n").unwrap();
+    std::fs::write(&b, "one\ntwo\n").unwrap();
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    app.editor.open_preview(&a).unwrap();
+    app.editor.cursor_row = 1;
+    app.editor.toggle_bookmark();
+    app.editor.open_preview(&b).unwrap();
+    assert!(
+        !app.editor
+            .editors
+            .iter()
+            .any(|e| e.path.as_deref() == Some(a.as_path())),
+        "the preview slot moved on to b.txt"
+    );
+    assert!(
+        app.editor
+            .editors
+            .iter()
+            .any(|e| e.bookmarks.contains_key(&a)),
+        "a tab still holds a.txt's mark"
+    );
+    app.run_command(Command::ViewBookmarks);
+    assert!(app.list_picker.is_none(), "a.txt is not open");
+    assert!(app.status.contains("No bookmarks"), "was {:?}", app.status);
+}
+
+/// The marks of a tab in another editor group are listed too, and Enter on
+/// one moves focus to that group rather than opening the file again here.
+#[test]
+fn the_bookmark_picker_lists_another_groups_marks_and_jumps_into_it() {
+    use crate::widgets::command_palette::Command;
+    let tmp = tempfile::tempdir().unwrap();
+    let a = tmp.path().join("a.txt");
+    let b = tmp.path().join("b.txt");
+    std::fs::write(&a, "alpha\nbeta\ngamma\n").unwrap();
+    std::fs::write(&b, "one\ntwo\nthree\n").unwrap();
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    app.editor.open(&a).unwrap();
+    app.editor.cursor_row = 1;
+    app.editor.toggle_bookmark();
+    app.split_editor();
+    app.editor.open_preview(&b).unwrap();
+    app.editor.cursor_row = 2;
+    app.editor.toggle_bookmark();
+    let focused = app.editor_layout.active_dfs_index();
+    app.run_command(Command::ViewBookmarks);
+    let picker = app.list_picker.as_ref().expect("the picker opens");
+    let labels: Vec<&str> = picker.rows.iter().map(|r| r.label.as_str()).collect();
+    assert_eq!(labels, ["a.txt:2  beta", "b.txt:3  three"]);
+
+    app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    assert_ne!(
+        app.editor_layout.active_dfs_index(),
+        focused,
+        "focus moved to the group holding a.txt's mark"
+    );
+    assert_eq!(app.editor.path.as_deref(), Some(a.as_path()));
+    assert_eq!(app.editor.cursor_row, 1);
+    assert!(
+        app.editor.is_bookmarked(1),
+        "the tab with the mark is in front"
+    );
+    assert_eq!(app.status, "Bookmark at line 2");
+}
+
+/// A file open in two groups with the same line marked in both is one row.
+#[test]
+fn the_bookmark_picker_lists_a_mark_two_groups_share_once() {
+    use crate::widgets::command_palette::Command;
+    let tmp = tempfile::tempdir().unwrap();
+    let a = tmp.path().join("a.txt");
+    std::fs::write(&a, "alpha\nbeta\n").unwrap();
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    app.editor.open(&a).unwrap();
+    app.editor.cursor_row = 1;
+    app.editor.toggle_bookmark();
+    app.split_editor();
+    app.editor.cursor_row = 1;
+    app.editor.toggle_bookmark();
+    assert!(app.editor.is_bookmarked(1));
+    app.run_command(Command::ViewBookmarks);
+    let picker = app.list_picker.as_ref().expect("the picker opens");
+    let labels: Vec<&str> = picker.rows.iter().map(|r| r.label.as_str()).collect();
+    assert_eq!(labels, ["a.txt:2  beta"]);
+}
+
+/// Enter opens the row's own path: a file name that is not UTF-8 used to
+/// turn into replacement characters on the way and fail to open.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_bookmark_picker_opens_a_file_whose_name_is_not_utf8() {
+    use crate::widgets::command_palette::Command;
+    use std::os::unix::ffi::OsStrExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let odd = tmp.path().join(std::ffi::OsStr::from_bytes(b"caf\xe9.txt"));
+    let other = tmp.path().join("other.txt");
+    std::fs::write(&odd, "one\ntwo\n").unwrap();
+    std::fs::write(&other, "x\n").unwrap();
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    app.editor.open(&odd).unwrap();
+    app.editor.cursor_row = 1;
+    app.editor.toggle_bookmark();
+    app.editor.open_in_new_tab(&other).unwrap();
+    app.run_command(Command::ViewBookmarks);
+    assert!(app.list_picker.is_some(), "the picker opens");
+    app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(app.status, "Bookmark at line 2");
+    assert_eq!(app.editor.path.as_deref(), Some(odd.as_path()));
+    assert_eq!(app.editor.cursor_row, 1);
+}
+
+/// The tab the mark came from is the one Enter brings up: a symbol tab
+/// beside the file's own tab holds a mark the file's tab does not, and
+/// the jump lands in the symbol tab rather than the first tab on the file.
+#[test]
+fn the_bookmark_picker_jumps_into_the_tab_that_holds_the_mark() {
+    use crate::widgets::command_palette::Command;
+    let tmp = tempfile::tempdir().unwrap();
+    let a = tmp.path().join("a.py");
+    std::fs::write(&a, "def f():\n    return 1\n\ndef g():\n    return 2\n").unwrap();
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    app.editor.open(&a).unwrap();
+    app.open_symbol_tab_for("g".into(), 3, 4);
+    assert!(
+        app.editor.symbol_view.is_some(),
+        "the symbol tab is in front"
+    );
+    let symbol_tab = app.editor.active_index();
+    app.editor.cursor_row = 4;
+    app.editor.toggle_bookmark();
+    let file_tab = app
+        .editor
+        .editors
+        .iter()
+        .position(|e| e.symbol_view.is_none() && e.path.as_deref() == Some(a.as_path()))
+        .expect("the file's own tab");
+    app.editor.select(file_tab);
+    assert!(!app.editor.is_bookmarked(4), "the file's tab has no mark");
+
+    app.run_command(Command::ViewBookmarks);
+    let picker = app.list_picker.as_ref().expect("the picker opens");
+    let labels: Vec<&str> = picker.rows.iter().map(|r| r.label.as_str()).collect();
+    assert_eq!(labels, ["a.py:5  return 2"]);
+    app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(app.editor.active_index(), symbol_tab);
+    assert_eq!(app.editor.cursor_row, 4);
+    assert!(app.editor.is_bookmarked(4));
+}
+
+/// A selection in the destination tab is gone after the jump, so the next
+/// keystroke edits the bookmarked line instead of typing over the old
+/// selection.
+#[test]
+fn a_bookmark_jump_drops_the_destination_tabs_selection() {
+    use crate::widgets::command_palette::Command;
+    let tmp = tempfile::tempdir().unwrap();
+    let a = tmp.path().join("a.txt");
+    std::fs::write(&a, "alpha\nbeta\ngamma\n").unwrap();
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    app.editor.open(&a).unwrap();
+    app.editor.cursor_row = 1;
+    app.editor.toggle_bookmark();
+    app.editor.select_all();
+    assert!(app.editor.selection.is_some());
+    app.run_command(Command::ViewBookmarks);
+    app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(app.editor.cursor_row, 1);
+    assert!(
+        app.editor.selection.is_none(),
+        "no selection left to type over"
+    );
+}
+
+/// Secondary carets in the destination tab go too: typing after the jump
+/// must not also edit the lines those carets sat on.
+#[test]
+fn a_bookmark_jump_drops_the_destination_tabs_extra_carets() {
+    use crate::widgets::command_palette::Command;
+    let tmp = tempfile::tempdir().unwrap();
+    let a = tmp.path().join("a.txt");
+    std::fs::write(&a, "alpha\nbeta\ngamma\n").unwrap();
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    app.editor.open(&a).unwrap();
+    app.editor.cursor_row = 1;
+    app.editor.toggle_bookmark();
+    app.editor.cursor_row = 0;
+    app.editor.add_cursor_below();
+    assert!(!app.editor.carets.is_empty(), "a second caret is set");
+    app.run_command(Command::ViewBookmarks);
+    app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(app.editor.cursor_row, 1);
+    assert!(
+        app.editor.carets.is_empty(),
+        "no extra caret left to type at"
+    );
+}
+
+/// The editor's caret hides behind a list picker and comes back with it
+/// closed. On Croft Loch the caret the picker shows is its own query's.
+#[test]
+fn the_editor_caret_is_hidden_while_a_list_picker_is_open() {
+    use crate::widgets::command_palette::Command;
+    let tmp = tempfile::tempdir().unwrap();
+    let a = tmp.path().join("a.txt");
+    std::fs::write(&a, "alpha\nbeta\n").unwrap();
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    app.editor.open_in_new_tab(&a).unwrap();
+    app.focus_pane(Pane::Editor);
+    app.editor.toggle_bookmark();
+    let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+    term.draw(|f| app.render(f)).unwrap();
+    // The blink may be in its dark half; the steady (screen reader) phase
+    // keeps the test off the clock.
+    app.screen_reader = true;
+    assert!(
+        app.cursor_should_be_visible(),
+        "the caret shows in the editor"
+    );
+    let editor_caret = app.editor.cursor_screen_pos();
+    app.run_command(Command::ViewBookmarks);
+    assert!(app.list_picker.is_some());
+    assert!(
+        !app.cursor_should_be_visible(),
+        "the caret stays hidden behind View Bookmarks"
+    );
+    term.draw(|f| app.render(f)).unwrap();
+    let picker = app.list_picker.as_ref().unwrap();
+    let caret = app
+        .quick_input_caret()
+        .expect("Loch hands the query its caret");
+    assert_eq!(Some(caret), picker.last_caret);
+    assert_eq!(caret.1, picker.last_rect.y + 1, "on the picker's input row");
+    assert_ne!(Some(caret), editor_caret, "not the editor's");
+    assert!(app.cursor_should_be_visible());
+    app.dismiss_list_picker();
+    assert!(
+        app.cursor_should_be_visible(),
+        "and returns with the picker closed"
+    );
 }

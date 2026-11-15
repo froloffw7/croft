@@ -827,24 +827,14 @@ fn editor_cmd_shift_o_opens_go_to_symbol() {
     );
 }
 
+/// A top-level [`sym`].
 fn outline_sym(
     name: &str,
     kind: crate::lsp::manager::OutlineKind,
     start: u32,
     end: u32,
 ) -> crate::lsp::manager::OutlineSymbol {
-    crate::lsp::manager::OutlineSymbol {
-        name: name.to_string(),
-        detail: None,
-        kind,
-        depth: 0,
-        line: start,
-        character: 0,
-        range_start_line: start,
-        range_end_line: end,
-        range_start_character: 0,
-        range_end_character: u32::MAX,
-    }
+    sym(name, kind, 0, start, end)
 }
 
 #[test]
@@ -1514,7 +1504,7 @@ fn a_long_crumb_picker_keeps_its_highlight_on_screen() {
     click_crumb(&mut app, 1);
     // The row the highlight is drawn on, with its label there.
     let shown = |app: &mut App| {
-        let screen = screen_text_863(app, 100, 20);
+        let screen = draw_screen(app, 100, 20);
         let r = app.menu_rect().unwrap();
         let sel = app.context_menu.as_ref().unwrap().selected;
         let y = (r.y + 1..r.y + r.height - 1)
@@ -1660,6 +1650,258 @@ fn bookmark_status_counts_marks_and_names_the_line_separately() {
     assert_eq!(app.status, "Bookmark 1 of 2 (line 2)");
     app.handle_editor_key(next);
     assert_eq!(app.status, "Bookmark 2 of 2 (line 5)");
+}
+
+/// A file open in two splits keeps one set of bookmarks: a mark set in
+/// either shows in both, and clearing them in one clears them in the
+/// other, so the saved session cannot bring a cleared mark back.
+#[test]
+fn a_file_open_in_two_splits_keeps_one_set_of_bookmarks() {
+    let tmp = tempfile::tempdir().unwrap();
+    let a = tmp.path().join("a.txt");
+    std::fs::write(&a, "one\ntwo\nthree\nfour\n").unwrap();
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    app.editor.open(&a).unwrap();
+    app.toggle_bookmark();
+    app.split_editor();
+    app.editor.cursor_row = 2;
+    app.toggle_bookmark();
+    assert_eq!(
+        app.editor.bookmarked_lines(),
+        vec![1, 3],
+        "the new split starts from the file's marks"
+    );
+    let other = |app: &App| {
+        app.editor_layout.inactive_groups()[0]
+            .editors
+            .iter()
+            .find(|e| e.path.as_deref() == Some(a.as_path()))
+            .expect("the first split still shows a.txt")
+            .bookmarked_lines()
+    };
+    assert_eq!(other(&app), vec![1, 3], "the other split has the new mark");
+    assert_eq!(
+        app.all_bookmarks().get(&a).map(|s| s.len()),
+        Some(2),
+        "one set of two, from either split"
+    );
+
+    app.clear_bookmarks();
+    assert!(other(&app).is_empty(), "cleared in both splits");
+    let state = app.capture_session_state();
+    assert!(state.bookmarks.is_empty(), "nothing to bring back");
+}
+
+/// A tab opened on a file after its marks were set starts without them;
+/// a mark set there adds to the file's set rather than replacing it.
+#[test]
+fn a_mark_set_in_a_second_tab_of_a_file_keeps_the_first_tab_s() {
+    let tmp = tempfile::tempdir().unwrap();
+    let a = tmp.path().join("a.txt");
+    std::fs::write(&a, "one\ntwo\nthree\n").unwrap();
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    app.editor.open(&a).unwrap();
+    app.toggle_bookmark();
+    app.editor.open_in_new_tab(&a).unwrap();
+    app.editor.cursor_row = 2;
+    app.toggle_bookmark();
+    for ed in &app.editor.editors {
+        assert_eq!(ed.bookmarked_lines(), vec![1, 3]);
+    }
+}
+
+/// Two splits of one file each keep their own text, and unsaved edits in
+/// one move its marks only. A mark set there reaches the other on the line
+/// it is on in that split's text, not on the same number.
+#[test]
+fn a_mark_shared_between_two_splits_lands_on_its_line_in_each() {
+    let tmp = tempfile::tempdir().unwrap();
+    let a = tmp.path().join("a.txt");
+    std::fs::write(&a, "one\ntwo\nthree\nfour\n").unwrap();
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    app.editor.open(&a).unwrap();
+    app.toggle_bookmark();
+    app.split_editor();
+    // An unsaved line on top of the new split's copy only.
+    app.editor.cursor_row = 0;
+    app.editor.cursor_col = 0;
+    app.editor.insert_str("zero\n");
+    // "two" is line 3 here and line 2 in the first split.
+    app.editor.cursor_row = 2;
+    app.toggle_bookmark();
+    assert_eq!(app.editor.bookmarked_lines(), vec![2, 3]);
+    let first = app.editor_layout.inactive_groups()[0]
+        .editors
+        .iter()
+        .find(|e| e.path.as_deref() == Some(a.as_path()))
+        .expect("the first split still shows a.txt")
+        .bookmarked_lines();
+    assert_eq!(first, vec![1, 2], "\"one\" and \"two\" in its own text");
+}
+
+/// Closing the last tab that holds a file's bookmarks keeps them: the
+/// saved session carries them while the file is closed, and the file
+/// opened again shows them.
+#[test]
+fn a_files_bookmarks_outlive_its_last_tab() {
+    let tmp = tempfile::tempdir().unwrap();
+    let a = tmp.path().join("a.txt");
+    let b = tmp.path().join("b.txt");
+    std::fs::write(&a, "one\ntwo\nthree\n").unwrap();
+    std::fs::write(&b, "x\n").unwrap();
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    app.editor.open(&a).unwrap();
+    app.editor.cursor_row = 1;
+    app.toggle_bookmark();
+    app.editor.open_in_new_tab(&b).unwrap();
+    let a_tab = app
+        .editor
+        .editors
+        .iter()
+        .position(|e| e.path.as_deref() == Some(a.as_path()))
+        .unwrap();
+    assert!(app.editor.close_tab(a_tab));
+    app.settle_bookmarks();
+    let saved = app.capture_session_state().bookmarks;
+    assert_eq!(
+        saved.get(&a).map(|s| s.iter().copied().collect::<Vec<_>>()),
+        Some(vec![2]),
+        "the session keeps a.txt's mark"
+    );
+
+    app.editor.open_in_new_tab(&a).unwrap();
+    assert!(app.settle_bookmarks(), "the new tab takes the mark back");
+    assert_eq!(app.editor.bookmarked_lines(), vec![2]);
+}
+
+/// A tab closed on unsaved edits leaves its marks on their lines as saved,
+/// which is how the file opens next.
+#[test]
+fn a_tab_closed_on_unsaved_edits_leaves_its_marks_on_their_saved_lines() {
+    let tmp = tempfile::tempdir().unwrap();
+    let a = tmp.path().join("a.txt");
+    let b = tmp.path().join("b.txt");
+    std::fs::write(&a, "one\ntwo\nthree\n").unwrap();
+    std::fs::write(&b, "x\n").unwrap();
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    app.editor.open(&a).unwrap();
+    app.editor.cursor_row = 0;
+    app.editor.cursor_col = 0;
+    app.editor.insert_str("zero\n");
+    // "two" is line 3 in the buffer and line 2 on disk.
+    app.editor.cursor_row = 2;
+    app.toggle_bookmark();
+    assert_eq!(app.editor.bookmarked_lines(), vec![3]);
+    app.editor.open_in_new_tab(&b).unwrap();
+    let a_tab = app
+        .editor
+        .editors
+        .iter()
+        .position(|e| e.path.as_deref() == Some(a.as_path()))
+        .unwrap();
+    assert!(app.editor.editors[a_tab].dirty);
+    assert!(app.editor.close_tab(a_tab));
+    app.settle_bookmarks();
+    let saved = app.capture_session_state().bookmarks;
+    assert_eq!(
+        saved.get(&a).map(|s| s.iter().copied().collect::<Vec<_>>()),
+        Some(vec![2])
+    );
+}
+
+/// Marks cleared in a file opened again stay cleared: the ones its last
+/// tab left do not come back when it closes again.
+#[test]
+fn bookmarks_cleared_after_a_file_reopens_stay_cleared() {
+    let tmp = tempfile::tempdir().unwrap();
+    let a = tmp.path().join("a.txt");
+    let b = tmp.path().join("b.txt");
+    std::fs::write(&a, "one\ntwo\n").unwrap();
+    std::fs::write(&b, "x\n").unwrap();
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    app.editor.open(&a).unwrap();
+    app.toggle_bookmark();
+    app.editor.open_in_new_tab(&b).unwrap();
+    assert!(app.editor.close_tab(0));
+    app.settle_bookmarks();
+    app.editor.open_in_new_tab(&a).unwrap();
+    app.settle_bookmarks();
+    app.clear_bookmarks();
+    let a_tab = app.editor.active_index();
+    assert!(app.editor.close_tab(a_tab));
+    app.settle_bookmarks();
+    assert!(app.capture_session_state().bookmarks.is_empty());
+}
+
+/// Close Others, Close to the Right and Close Saved keep the marks of
+/// the tabs they close, as closing one tab does.
+#[test]
+fn closing_tabs_in_bulk_keeps_their_files_bookmarks() {
+    let tmp = tempfile::tempdir().unwrap();
+    let a = tmp.path().join("a.txt");
+    let b = tmp.path().join("b.txt");
+    std::fs::write(&a, "one\ntwo\nthree\n").unwrap();
+    std::fs::write(&b, "x\n").unwrap();
+    type Close = fn(&mut App);
+    let closes: [(&str, Close); 3] = [
+        ("Close Others", |app| {
+            app.editor.close_others(0);
+        }),
+        ("Close to the Right", |app| {
+            app.editor.close_to_right(0);
+        }),
+        ("Close Saved", |app| {
+            app.editor.close_saved();
+        }),
+    ];
+    for (name, close) in closes {
+        let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+        // b.txt first, so a.txt is the tab right of it.
+        app.editor.open(&b).unwrap();
+        app.editor.open_in_new_tab(&a).unwrap();
+        app.editor.cursor_row = 1;
+        app.toggle_bookmark();
+        close(&mut app);
+        assert!(
+            !app.editor
+                .editors
+                .iter()
+                .any(|e| e.path.as_deref() == Some(a.as_path())),
+            "{name} closed a.txt"
+        );
+        app.settle_bookmarks();
+        let saved = app.capture_session_state().bookmarks;
+        assert_eq!(
+            saved.get(&a).map(|s| s.iter().copied().collect::<Vec<_>>()),
+            Some(vec![2]),
+            "{name} kept a.txt's mark"
+        );
+    }
+}
+
+/// Closing the last tab of a split takes the split away, but not the
+/// marks that tab held.
+#[test]
+fn closing_a_splits_last_tab_keeps_its_files_bookmarks() {
+    use crate::widgets::command_palette::Command;
+    let tmp = tempfile::tempdir().unwrap();
+    let a = tmp.path().join("a.txt");
+    let b = tmp.path().join("b.txt");
+    std::fs::write(&a, "one\ntwo\nthree\n").unwrap();
+    std::fs::write(&b, "x\n").unwrap();
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    app.editor.open(&b).unwrap();
+    app.split_editor();
+    app.editor.open(&a).unwrap();
+    app.editor.cursor_row = 2;
+    app.toggle_bookmark();
+    app.run_command(Command::CloseEditor);
+    assert!(!app.editor_layout.is_split(), "the emptied split went");
+    let saved = app.capture_session_state().bookmarks;
+    assert_eq!(
+        saved.get(&a).map(|s| s.iter().copied().collect::<Vec<_>>()),
+        Some(vec![3])
+    );
 }
 
 #[test]
@@ -2157,7 +2399,7 @@ fn a_symbol_tab_opens_beside_its_file_showing_only_the_symbol() {
 
     // Scrolled to the top, the clip, not the scroll, keeps `fn a` out.
     app.editor.scroll = 0;
-    let screen = painted(&mut app);
+    let screen = draw_screen(&mut app, 100, 30);
     assert!(
         screen.contains("b \u{b7} two.rs"),
         "titled by its symbol:\n{screen}"
@@ -2444,7 +2686,7 @@ fn an_outline_row_right_click_opens_that_symbol_as_a_tab() {
     app.outline.collapsed = false;
     let symbols = app.compute_syntax_outline(&file);
     app.outline.set_symbols(file.clone(), symbols);
-    painted(&mut app);
+    draw_screen(&mut app, 100, 30);
     let area = app.outline.last_area;
     let row = (area.y..area.y + area.height)
         .find(|&y| {
@@ -2514,7 +2756,7 @@ fn a_symbol_tab_never_scrolls_its_tail_off_a_pane_it_fits() {
     app.editor.cursor_row = 5;
     app.editor.cursor_col = 0;
     app.editor.scroll = 5;
-    painted(&mut app);
+    draw_screen(&mut app, 100, 30);
     assert_eq!(
         app.editor.scroll, 3,
         "fn b's three lines fill the pane top down"
@@ -2957,20 +3199,8 @@ fn the_outline_and_breadcrumbs_follow_the_scrubbed_commit() {
     // symbol jump lands in the history, and leaving brings the live
     // outline back.
     let tmp = tempfile::tempdir().unwrap();
-    let git = |args: &[&str]| {
-        let ok = std::process::Command::new("git")
-            .arg("-C")
-            .arg(tmp.path())
-            .args(args)
-            .output()
-            .unwrap()
-            .status
-            .success();
-        assert!(ok, "git {args:?}");
-    };
-    git(&["init", "-q", "-b", "main"]);
-    git(&["config", "user.email", "a@b"]);
-    git(&["config", "user.name", "a"]);
+    let git = |args: &[&str]| git_ok(tmp.path(), args);
+    git_init_with_identity(tmp.path());
     let file = tmp.path().join("lib.rs");
     std::fs::write(&file, "fn alpha() {\n    let a = 1;\n}\n").unwrap();
     git(&["add", "."]);
@@ -3228,4 +3458,112 @@ fn a_stale_jump_reply_changes_nothing_and_a_found_target_still_jumps() {
     assert!(app.drain_lsp_definition());
     assert_eq!((app.editor.cursor_row, app.editor.cursor_col), (0, 0));
     assert_ne!(app.status, "No definition found");
+}
+
+fn crumb_picker_labels(app: &App) -> Vec<String> {
+    app.context_menu
+        .as_ref()
+        .map(|m| {
+            m.items
+                .iter()
+                .filter_map(|e| match e {
+                    MenuEntry::Item { label, .. } => Some(label.clone()),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[test]
+fn a_breadcrumb_picker_filters_as_you_type() {
+    let tmp = tempfile::tempdir().unwrap();
+    for f in ["alpha.rs", "beta.rs", "gamma.txt"] {
+        std::fs::write(tmp.path().join(f), "x\n").unwrap();
+    }
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    app.editor
+        .open_preview(&tmp.path().join("alpha.rs"))
+        .unwrap();
+    let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+    term.draw(|f| app.render(f)).unwrap();
+    app.open_breadcrumb_picker(0);
+    assert_eq!(crumb_picker_labels(&app).len(), 3, "all rows to begin with");
+
+    for c in "RS".chars() {
+        app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::SHIFT))
+            .unwrap();
+    }
+    assert_eq!(
+        crumb_picker_labels(&app),
+        vec!["alpha.rs", "beta.rs"],
+        "case-insensitive substring"
+    );
+    app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))
+        .unwrap();
+    assert!(crumb_picker_labels(&app).is_empty(), "nothing matches");
+    // Enter on an empty list does nothing and the picker stays.
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    assert!(app.context_menu.is_some());
+    app.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(crumb_picker_labels(&app).len(), 2);
+    // Esc clears the text first, and only the next Esc dismisses.
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(crumb_picker_labels(&app).len(), 3);
+    assert!(app.context_menu.is_some());
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+        .unwrap();
+    assert!(app.context_menu.is_none());
+}
+
+#[test]
+fn a_filtered_breadcrumb_picker_opens_the_row_you_land_on() {
+    let tmp = tempfile::tempdir().unwrap();
+    for f in ["alpha.rs", "beta.rs", "gamma.txt"] {
+        std::fs::write(tmp.path().join(f), "x\n").unwrap();
+    }
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    app.editor
+        .open_preview(&tmp.path().join("alpha.rs"))
+        .unwrap();
+    let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+    term.draw(|f| app.render(f)).unwrap();
+    app.open_breadcrumb_picker(0);
+    for c in "gam".chars() {
+        app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+            .unwrap();
+    }
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    assert!(app.context_menu.is_none());
+    assert!(
+        app.editor
+            .path
+            .as_ref()
+            .is_some_and(|p| p.ends_with("gamma.txt")),
+        "the filtered row opened, not the first of the unfiltered list"
+    );
+}
+
+#[test]
+fn a_new_breadcrumb_picker_starts_unfiltered() {
+    let tmp = tempfile::tempdir().unwrap();
+    for f in ["alpha.rs", "beta.rs"] {
+        std::fs::write(tmp.path().join(f), "x\n").unwrap();
+    }
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    app.editor
+        .open_preview(&tmp.path().join("alpha.rs"))
+        .unwrap();
+    let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+    term.draw(|f| app.render(f)).unwrap();
+    app.open_breadcrumb_picker(0);
+    app.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(crumb_picker_labels(&app).len(), 1);
+    app.open_breadcrumb_picker(0);
+    assert_eq!(crumb_picker_labels(&app).len(), 2, "the old text is gone");
 }
