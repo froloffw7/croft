@@ -407,6 +407,7 @@ pub(super) fn activity_last_view_bottom(bar: Rect, codeql_shown: bool) -> u16 {
 /// stacks Accounts above Manage. Empty when the gear is, or when the heart
 /// would overlap the last view icon, so a shrinking bar drops the heart a
 /// slot before it drops the gear.
+#[allow(dead_code)]
 pub(super) fn activity_sponsor_block(bar: Rect, codeql_shown: bool) -> Rect {
     let gear = activity_settings_block(bar, codeql_shown);
     let y = gear
@@ -1400,7 +1401,9 @@ impl App {
             Rect::default()
         };
         let settings_block = activity_settings_block(area, codeql_block.width > 0);
-        let sponsor_block = activity_sponsor_block(area, codeql_block.width > 0);
+        // Private build: no sponsor heart. An empty block is never drawn nor
+        // hit-tested, and the gear keeps its own slot.
+        let sponsor_block = Rect::default();
         // The baked icons cover their own rows in the chrome tone; Croft
         // Loch paints only the rows between them, so no icon cell is ever
         // rewritten under its image.

@@ -2695,7 +2695,7 @@ impl Widget for &mut SearchPanel {
         if inner.width > 16 {
             // Each icon owns two cells (the glyph and the one after it, as in
             // the other headers); a cell apart, flush with the panel's edge.
-            let clear_x = inner.x + inner.width - 2;
+            let clear_x = inner.x + inner.width - 4;
             let refresh_x = clear_x - 3;
             for (x, glyph) in [
                 (refresh_x, crate::icons::SEARCH_REFRESH),
