@@ -58,3 +58,5 @@ preview*.svg
 # ...and any local backup of it. A `git add -A` swept a `.bak-` copy into a
 # commit once; the pattern is here so the next one cannot.
 /CLAUDE.md.*
+
+/patches
