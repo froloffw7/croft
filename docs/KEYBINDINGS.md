@@ -559,7 +559,7 @@ Not supported yet: transforms such as `${TM_FILENAME/(.*)\\..+$/$1/}`, a picker 
 | `Ctrl`+`←` / `→` (`Opt`+`←` / `→` on Mac) | Move to the start of the previous word / the end of the next one; `Ctrl`+`Shift`+`←` / `→` selects by word |
 | `Ctrl`+`Backspace` / `Ctrl`+`Delete` (`Opt`+`Backspace` / `Opt`+`Delete` on Mac) | Delete the word left / right of the caret (a selection is deleted instead). At the line's start or end it joins the neighbouring line |
 | `Ctrl`+`Home` / `Ctrl`+`End` (`Cmd` on Mac) | Go to the start / end of the file; with `Shift`, select to there |
-| `Shift`+`Alt`+`→` / `Shift`+`Alt`+`←` | Expand / Shrink Selection: grow every cursor to the next meaningful range, and shrink back the same way. Works without a language server |
+| `Cmd`/`Ctrl`+`Shift`+`Alt`+`→` / `←` | Expand / Shrink Selection: grow every cursor to the next meaningful range, and shrink back the same way. Works without a language server |
 | `PageUp` / `PageDown` (`fn`+`↑` / `fn`+`↓` on Mac) | Scroll one viewport |
 | Two-finger horizontal swipe, or drag the bar | Pan long lines in code files; the cursor pans the view when it passes either edge |
 | Markdown soft-wrap | Markdown files wrap long lines onto the next visual row (no horizontal scrollbar); `↑`/`↓` move by visual row |
@@ -568,9 +568,9 @@ Not supported yet: transforms such as `${TM_FILENAME/(.*)\\..+$/$1/}`, a picker 
 | `Tab` | Indent: a multi-line selection indents every touched line; otherwise inserts to the next tab stop. The status bar's indent pill shows the detected width and tabs-vs-spaces; click it to override |
 | `Shift`+`Tab` | Outdent one level, tab-stop aligned, for the current line or every line a selection touches |
 | `Alt`+`↑` / `Alt`+`↓` | Move the current line (or selected block) up / down, carrying the cursor and selection |
-| `Shift`+`Alt`+`↑` / `↓` | Copy the current line (or selected block) up / down (palette: Copy Line Up / Down). Command ids: `copy_line_up` / `copy_line_down` |
+| `Cmd`/`Ctrl`+`Shift`+`↑` / `↓` | Copy the current line (or selected block) up / down (palette: Copy Line Up / Down). Command ids: `copy_line_up` / `copy_line_down` |
 | `Cmd`/`Ctrl`+`Opt`+`↑` / `↓` | Add a cursor above / below the current one (multi-cursor) |
-| `Cmd`/`Ctrl`+`Shift`+`Opt`+arrows / `PageUp` / `PageDown` | Column (box) selection, like `Shift`+`Opt`+drag: grow the box one row, one column or one screen, with one selection per row |
+| `Shift`+`Alt`+arrows / `PageUp` / `PageDown` (also `Cmd`/`Ctrl`+`Shift`+`Opt`+`↑` / `↓` / `PageUp` / `PageDown`) | Column (box) selection, like `Shift`+`Opt`+drag: grow the box one row, one column or one screen, with one selection per row |
 | View: Toggle Column Selection Mode (palette) | While on, plain `Shift`+arrows and `Shift`+`PageUp` / `PageDown` grow a column selection; the status bar shows "Column Selection" beside Ln/Col |
 | `Insert` | Switch between Insert and Overwrite typing for all tabs: in Overwrite a character replaces the one under the caret. The status bar shows ⎁ and the caret becomes a block |
 | `Cmd`+`/` / `Ctrl`+`/` | Toggle line comment for the current line or every line the selection touches |
