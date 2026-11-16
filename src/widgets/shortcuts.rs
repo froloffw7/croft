@@ -832,12 +832,12 @@ pub const SHORTCUT_GROUPS: &[ShortcutGroup] = &[
                 handler: "",
             },
             ShortcutEntry {
-                keys: "Shift+Opt+Cmd/Ctrl+Left / Right / Up / Down / PageUp / PageDown",
-                description: "Column Select with the keyboard (also PageUp / PageDown)",
+                keys: "Shift+Opt+Left / Right / Up / Down / PageUp / PageDown",
+                description: "Column Select with the keyboard (Cmd/Ctrl+Shift+Opt with Up / Down / PageUp / PageDown also works)",
                 handler: "",
             },
             ShortcutEntry {
-                keys: "Shift+Alt+Right / Left",
+                keys: "Cmd/Ctrl+Shift+Opt+Right / Left",
                 description: "Expand / Shrink Selection to the next syntactic range",
                 handler: "",
             },
