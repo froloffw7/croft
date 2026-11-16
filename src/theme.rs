@@ -18,6 +18,7 @@
 use std::sync::OnceLock;
 
 use ratatui::style::Color;
+use ratatui::widgets::BorderType;
 
 /// VS Code's default dark terminal ANSI palette (the `terminal.ansi*` colors
 /// of the Dark+ theme): black, red, green, yellow, blue, magenta, cyan,
@@ -173,8 +174,33 @@ pub struct Theme {
     high_contrast: bool,
     /// Layered surfaces instead of boxed panes: see [`Theme::surfaces`].
     surfaces: Option<Surfaces>,
-    /// A focused terminal pane's border is thick, not plain.
-    term_thick: bool,
+    /// The border a focused terminal pane draws; an unfocused one stays plain.
+    term_border: BorderType,
+}
+
+/// A ratatui [`BorderType`] by its variant name, ignoring case and any `_`,
+/// `-` or space (`Plain`, `Rounded`, `Double`, `Thick`, `LightDoubleDashed`,
+/// `QuadrantInside`, ...). An unknown name is `Thick`, the default.
+fn border_type_from_name(name: &str) -> BorderType {
+    let key: String = name
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    match key.as_str() {
+        "plain" => BorderType::Plain,
+        "rounded" => BorderType::Rounded,
+        "double" => BorderType::Double,
+        "lightdoubledashed" => BorderType::LightDoubleDashed,
+        "heavydoubledashed" => BorderType::HeavyDoubleDashed,
+        "lighttripledashed" => BorderType::LightTripleDashed,
+        "heavytripledashed" => BorderType::HeavyTripleDashed,
+        "lightquadrupledashed" => BorderType::LightQuadrupleDashed,
+        "heavyquadrupledashed" => BorderType::HeavyQuadrupleDashed,
+        "quadrantinside" => BorderType::QuadrantInside,
+        "quadrantoutside" => BorderType::QuadrantOutside,
+        _ => BorderType::Thick,
+    }
 }
 
 impl Theme {
@@ -204,7 +230,7 @@ impl Theme {
         tab_pill: (0x3c, 0x8a, 0x7e),
         high_contrast: false,
         surfaces: None,
-        term_thick: true,
+        term_border: BorderType::Thick,
     };
 
     /// Croft Loch — the default: Croft Black's canvas and teal drawn as
@@ -239,7 +265,7 @@ impl Theme {
             hairline: (0x23, 0x28, 0x2a),
             muted: (0x7d, 0x87, 0x86),
         }),
-        term_thick: false,
+        term_border: BorderType::Plain,
     };
 
     /// Croft Dark (Blue) — the historical look. Const mirror of the manifest,
@@ -266,7 +292,7 @@ impl Theme {
         tab_pill: (0x4e, 0x9a, 0xff),
         high_contrast: false,
         surfaces: None,
-        term_thick: true,
+        term_border: BorderType::Thick,
     };
 
     /// Every available theme in pick-list order, loaded once from the bundled +
@@ -347,7 +373,7 @@ impl Theme {
             high_contrast: d.high_contrast,
             surfaces: d.surfaces.then(|| surfaces_from_decl(d)),
             gradient: d.gradient,
-            term_thick: d.term_thick,
+            term_border: border_type_from_name(&d.term_border),
             osk_key: parse_hex(&d.osk_key),
             osk_special: parse_hex(&d.osk_special),
             osk_armed: parse_hex(&d.osk_armed),
@@ -439,9 +465,9 @@ impl Theme {
         self.high_contrast
     }
 
-    /// Whether a focused terminal pane draws a thick border.
-    pub fn term_thick(self) -> bool {
-        self.term_thick
+    /// The border type a focused terminal pane draws.
+    pub fn term_border(self) -> BorderType {
+        self.term_border
     }
 
     /// The layered surfaces this theme paints instead of boxed panes (Croft
@@ -1337,6 +1363,21 @@ mod tests {
         assert_eq!(parse_hex("#1e222e"), (0x1e, 0x22, 0x2e));
         assert_eq!(parse_hex("000000"), (0, 0, 0));
         assert_eq!(parse_hex("nonsense"), (0, 0, 0));
+    }
+
+    #[test]
+    fn term_border_names_map_to_ratatui_border_types() {
+        assert_eq!(border_type_from_name("Plain"), BorderType::Plain);
+        assert_eq!(border_type_from_name("rounded"), BorderType::Rounded);
+        assert_eq!(border_type_from_name("Double"), BorderType::Double);
+        assert_eq!(
+            border_type_from_name("quadrant-inside"),
+            BorderType::QuadrantInside
+        );
+        assert_eq!(border_type_from_name("Thick"), BorderType::Thick);
+        assert_eq!(border_type_from_name("nonsense"), BorderType::Thick);
+        assert_eq!(Theme::LOCH.term_border(), BorderType::Plain);
+        assert_eq!(Theme::BLACK.term_border(), BorderType::Thick);
     }
 
     #[test]
