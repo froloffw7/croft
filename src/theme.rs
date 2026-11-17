@@ -265,7 +265,7 @@ impl Theme {
             hairline: (0x23, 0x28, 0x2a),
             muted: (0x7d, 0x87, 0x86),
         }),
-        term_border: BorderType::Plain,
+        term_border: BorderType::Thick,
     };
 
     /// Croft Dark (Blue) — the historical look. Const mirror of the manifest,
@@ -1376,7 +1376,7 @@ mod tests {
         );
         assert_eq!(border_type_from_name("Thick"), BorderType::Thick);
         assert_eq!(border_type_from_name("nonsense"), BorderType::Thick);
-        assert_eq!(Theme::LOCH.term_border(), BorderType::Plain);
+        assert_eq!(Theme::LOCH.term_border(), BorderType::Thick);
         assert_eq!(Theme::BLACK.term_border(), BorderType::Thick);
     }
 
