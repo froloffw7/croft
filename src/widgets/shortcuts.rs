@@ -842,6 +842,11 @@ pub const SHORTCUT_GROUPS: &[ShortcutGroup] = &[
                 handler: "",
             },
             ShortcutEntry {
+                keys: "Cmd/Ctrl+K Shift+M",
+                description: "User Menu: your own commands from menu.json",
+                handler: "",
+            },
+            ShortcutEntry {
                 keys: "Cmd/Ctrl+K Shift+E",
                 description: "Run the CodeLens on the caret's line",
                 handler: "",
