@@ -1654,11 +1654,8 @@ impl App {
         let addr = entry
             .open_url()
             .unwrap_or_else(|| format!("localhost:{}", entry.port));
-        if copy_to_clipboard(&addr) {
-            self.status = format!("Copied {addr}");
-        } else {
-            self.status = String::from("Copy failed");
-        }
+        let landing = self.copy_where_pasted(&addr);
+        self.status = format!("Copied {addr}{}", landing.note());
     }
 
     pub(super) fn ports_stop_selected(&mut self) {
