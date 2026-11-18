@@ -22462,7 +22462,6 @@ fn text_hit_stops_at_the_horizontal_scrollbar() {
     assert!(!e.text_hit(bar.x + 1, bar.y));
 }
 
-
 /// A jump to the end of the longest line keeps the caret on screen: its
 /// cell after the last character needs one more column of scroll than the
 /// text's extent offers, which only the wheel and the bar are held to.
