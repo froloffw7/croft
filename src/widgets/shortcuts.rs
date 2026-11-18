@@ -752,6 +752,16 @@ pub const SHORTCUT_GROUPS: &[ShortcutGroup] = &[
                 handler: "",
             },
             ShortcutEntry {
+                keys: "Cmd/Ctrl+K Shift+M",
+                description: "User Menu: your own commands from menu.json",
+                handler: "",
+            },
+            ShortcutEntry {
+                keys: "Cmd/Ctrl+K Shift+B",
+                description: "View All Bookmarks, closed files included",
+                handler: "",
+            },
+            ShortcutEntry {
                 keys: "Cmd/Ctrl+K Shift+D / U",
                 description: "Show subtypes / supertypes of the symbol at the caret",
                 handler: "",
