@@ -22390,3 +22390,18 @@ fn the_toggle_disables_every_pair_behavior() {
     e.backspace();
     assert_eq!(e.lines[0], ")", "off means plain backspace");
 }
+
+#[test]
+fn text_hit_stops_at_the_horizontal_scrollbar() {
+    let mut e = editor_with("a".repeat(500).as_str());
+    render_at(&mut e, 30, 6);
+    let bar = e.last_hscrollbar;
+    assert!(bar.width > 0 && bar.height > 0, "a long line shows the bar");
+    let col = e.last_inner.x + e.last_gutter_width + 2;
+    assert!(
+        e.text_hit(col, e.last_inner.y),
+        "the first text row is text"
+    );
+    assert!(!e.text_hit(col, bar.y), "the bar row keeps the arrow");
+    assert!(!e.text_hit(bar.x + 1, bar.y));
+}

@@ -1477,6 +1477,11 @@ pub struct App {
     /// `None` everywhere else, so a keyboard invocation of the same command
     /// can never act on a stale click.
     last_mouse_pos: Option<(u16, u16)>,
+    /// Where the mouse pointer last was, for re-deciding its shape after a
+    /// redraw that moved things under it with no mouse event (`Ctrl+J`).
+    pointer_pos: Option<(u16, u16)>,
+    /// Where the mouse pointer last was, for re-deciding its shape after a
+    /// redraw that moved things under it with no mouse event (`Ctrl+J`).
     /// The tab a tab-strip mouse binding was clicked on (#1427), set only
     /// for that dispatch and taken by `run_command` as it starts, so only
     /// the directly bound command sees it: a command it runs in turn (an
@@ -2120,6 +2125,14 @@ pub struct App {
     /// is true, and preserves it across the theme-switch re-detect that would
     /// otherwise reset to `None` (sixel has no env signal to re-derive from).
     sixel_supported: bool,
+    /// The host terminal draws the pointer shapes croft asks for (OSC 22,
+    /// answered `1` to the launch probe). Off until it says so.
+    pointer_shapes: bool,
+    /// The `pointer_shape_names` setting: which names the shapes go by.
+    pointer_shape_names: crate::pointer_shape::PointerShapeNames,
+    /// The shape last requested of the terminal, so one is sent only when it
+    /// changes.
+    pointer_shape: crate::pointer_shape::PointerShape,
     /// One-shot: a WINCH arrived, so the next frame must wipe and repaint every
     /// cell on EVERY protocol. A dtach reattach fires WINCH (`-r winch`) against
     /// a blank physical screen while ratatui's buffer still says everything is
@@ -4107,6 +4120,32 @@ fn remote_host_label() -> String {
     .clone()
 }
 
+/// Where the single-line `Prompt` popup sits on a screen of `area`: centred,
+/// a row taller when it carries an error.
+fn prompt_rect(area: Rect, has_error: bool) -> Rect {
+    let width = area.width.saturating_sub(8).clamp(40, 80).min(area.width);
+    let height = if has_error { 6 } else { 5 };
+    let x = (area.width.saturating_sub(width)) / 2 + area.x;
+    let y = (area.height.saturating_sub(height)) / 2 + area.y;
+    Rect {
+        x,
+        y,
+        width,
+        height,
+    }
+    .intersection(area)
+}
+
+/// The resize pointer for an editor seam: a vertical line between side-by-side
+/// groups drags left and right.
+fn seam_shape(dir: editor_layout::SplitDir) -> crate::pointer_shape::PointerShape {
+    use crate::pointer_shape::PointerShape;
+    match dir {
+        editor_layout::SplitDir::Horizontal => PointerShape::ResizeCols,
+        editor_layout::SplitDir::Vertical => PointerShape::ResizeRows,
+    }
+}
+
 impl App {
     pub fn new(root: PathBuf) -> Result<Self> {
         // Reap any js-debug adapter tree a previous croft left orphaned (a
@@ -4316,6 +4355,7 @@ impl App {
             // reported once, in OUTPUT · Keybindings.
             keymap: loaded_keymap,
             last_mouse_pos: None,
+            pointer_pos: None,
             tab_click_target: None,
             macro_recording: None,
             macro_last: None,
@@ -4578,6 +4618,9 @@ impl App {
             problems_badge_cell: None,
             inline_protocol: crate::iterm2_inline::detect_inline_image_protocol(),
             sixel_supported: false,
+            pointer_shapes: false,
+            pointer_shape_names: loaded_prefs.pointer_shape_names,
+            pointer_shape: crate::pointer_shape::PointerShape::Arrow,
             resize_repaint_needed: false,
             minimap_visible: layout_prefs.minimap,
             minimap_side: MinimapSide::Right,
@@ -6262,6 +6305,7 @@ pub fn run(
                 .store(app.sixel_supported, std::sync::atomic::Ordering::Relaxed);
         }
         app.legacy_ctrl_punct = host.answered && !host.kitty_keyboard;
+        app.pointer_shapes = host.pointer_shapes;
     }
     crate::startup_trace::mark("host terminal answered");
     let mut out = stdout();
@@ -6353,6 +6397,13 @@ pub fn run(
         use std::io::Write;
         let mut out = stdout();
         out.write_all(&set_title_seq("")).ok();
+        // Hand the pointer back as the arrow it was before croft.
+        if app.pointer_shapes {
+            out.write_all(
+                &crate::pointer_shape::PointerShape::Arrow.set_sequence(app.pointer_shape_names),
+            )
+            .ok();
+        }
         // Revert the host terminal's default colors (OSC 110/111, plus the
         // iTerm2 sRGB override where present) so the user's shell after
         // croft exits doesn't keep our forced theme colours.
@@ -6948,6 +6999,7 @@ fn main_loop(app: &mut App, terminal: &mut CroftTerminal) -> Result<()> {
             crate::startup_trace::mark("loop work done");
             let draw_start = std::time::Instant::now();
             let drawn = terminal.draw(|f| app.render_for_terminal(f))?;
+            app.resync_pointer_shape();
             crate::startup_trace::mark("frame drawn");
             app.sync_caret_style();
             let mut underlays = app.image_underlays(drawn.buffer);
