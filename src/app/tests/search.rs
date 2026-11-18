@@ -3107,7 +3107,6 @@ fn a_longer_whole_query_puts_the_find_caret_at_its_end() {
     assert_eq!(st.caret(), 6);
 }
 
-
 #[test]
 fn the_pointer_is_an_i_beam_over_a_find_bar_input_row() {
     use crate::pointer_shape::PointerShape::{Arrow, Text};
