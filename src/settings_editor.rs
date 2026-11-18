@@ -54,6 +54,23 @@ pub fn choices(key: &str) -> Option<Vec<String>> {
         "build_column_unit" => &["display", "byte", "char"],
         "diff_ignore_whitespace" => &["off", "leading", "all"],
         "render_whitespace" => &["selection", "all", "none"],
+        "hover_icon" => &["accent", "color", "pill"],
+        "hover_heading" => &["soft", "color", "accent", "pill"],
+        "popup_border" => &["plain", "rounded", "double", "thick"],
+        "hover_icon_color"
+        | "hover_heading_color"
+        | "hover_icon_pill_color"
+        | "hover_heading_pill_color" => {
+            return Some(
+                std::iter::once(String::new())
+                    .chain(
+                        crate::widgets::hover::ANSI_NAMES
+                            .iter()
+                            .map(|n| n.to_string()),
+                    )
+                    .collect(),
+            );
+        }
         "line_numbers" => &["on", "relative", "interval", "off"],
         "word_based_suggestions" => &[
             "matchingDocuments",
@@ -481,6 +498,37 @@ mod tests {
         // An empty or unknown value is the first choice, so Enter moves on.
         assert_eq!(next_value(&row("p", json!(""), c)), Some(json!("on")));
         assert_eq!(next_value(&row("n", json!(3), Kind::Number)), None);
+    }
+
+    #[test]
+    fn the_hover_settings_are_choices_the_editor_steps_with_enter() {
+        assert_eq!(choices("hover_icon").unwrap(), ["accent", "color", "pill"]);
+        assert_eq!(
+            choices("hover_heading").unwrap(),
+            ["soft", "color", "accent", "pill"]
+        );
+        // The colours: the default (empty), then the 16 names, all parsed.
+        let colours = choices("hover_icon_color").unwrap();
+        assert_eq!(colours.len(), 17);
+        assert_eq!(colours[0], "");
+        for c in &colours[1..] {
+            assert!(crate::widgets::hover::HoverColor::parse(c).is_some(), "{c}");
+        }
+        assert_eq!(choices("hover_heading_color").unwrap(), colours);
+        assert_eq!(choices("hover_icon_pill_color").unwrap(), colours);
+        assert_eq!(choices("hover_heading_pill_color").unwrap(), colours);
+        assert_eq!(
+            choices("popup_border").unwrap(),
+            ["plain", "rounded", "double", "thick"]
+        );
+        // Each choice is what the setting parses, so none is ignored.
+        for c in choices("hover_icon").unwrap() {
+            let mode = crate::widgets::hover::IconHover::from_pref(&c);
+            assert_eq!(
+                c == "accent",
+                mode == crate::widgets::hover::IconHover::Accent
+            );
+        }
     }
 
     #[test]

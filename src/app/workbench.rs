@@ -1311,7 +1311,6 @@ impl App {
         // VS Code; colour brightens to the accent on hover. Glyphs sit centred
         // in the 4-wide slot.
         let base = self.theme.ui(Color::Rgb(0xcc, 0xcc, 0xcc));
-        let accent = self.theme.ui(Color::Rgb(0x4e, 0x9a, 0xff));
         let surfaces = self.theme.surfaces().is_some();
         let theme = self.theme;
         let mut paint = |x: u16, glyph: char| {
@@ -1322,12 +1321,16 @@ impl App {
             let style = if surfaces {
                 crate::widgets::header_pill::action_style(theme, hovered)
             } else {
-                Style::default().fg(if hovered { accent } else { base })
+                // The same highlight every interactive icon gets
+                // (`hover_icon`); a pill spans the whole slot, the click target.
+                crate::widgets::hover::icon_style(theme, Style::default().fg(base), hovered)
             };
             let buf = frame.buffer_mut();
             if surfaces && hovered {
                 let chip = Rect::new(x, y, w, 1).intersection(buf.area);
                 buf.set_style(chip, style);
+            } else if !surfaces {
+                crate::widgets::hover::icon_backdrop(buf, Rect::new(x, y, w, 1), theme, hovered);
             }
             buf.set_string(x + w / 2, y, glyph.to_string(), style);
         };
