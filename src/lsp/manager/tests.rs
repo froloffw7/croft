@@ -4411,6 +4411,8 @@ fn a_killed_language_server_is_restarted() {
     // every request re-probes. Those re-probes spend the restart budget,
     // so the servers stop being launched once it is gone.
     state.restarts.incomplete.remove(&key);
+    let (tx, status_rx) = std_mpsc::channel();
+    state.progress_tx = tx;
     let before = started(0).len();
     for _ in 0..MAX_RESTARTS + 2 {
         state.clients.insert(key.clone(), Vec::new());
@@ -4422,6 +4424,16 @@ fn a_killed_language_server_is_restarted() {
         "re-probes past the budget must not launch servers ({launched})"
     );
     assert!(state.restarts.gave_up.contains(&key));
+    // Giving up reaches the status bar as an error, not only OUTPUT.
+    let told: Vec<ServerUpdate> = status_rx.try_iter().collect();
+    assert_eq!(told.len(), 1, "told once, then left alone: {told:?}");
+    match &told[0].event {
+        ServerEvent::Message { level, text } => {
+            assert_eq!(*level, lsp_types::MessageType::ERROR);
+            assert!(text.contains("leaving them off"), "{text}");
+        }
+        other => panic!("expected a message, got {other:?}"),
+    }
     handle.block_on(state.shutdown_all());
 }
 

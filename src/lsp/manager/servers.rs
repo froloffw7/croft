@@ -186,6 +186,21 @@ impl ServerRestarts {
 }
 
 impl WorkerState {
+    /// Tell the user a language server was given up on: in OUTPUT, and as an
+    /// error on the status bar, where a server that quietly stays off
+    /// otherwise looks like one that has nothing to say.
+    fn report_gave_up(&self, msg: &str) {
+        log_file::log(&format!("lsp restart: {msg}"));
+        crate::output::push("Language Servers", crate::output::OutputLevel::Error, msg);
+        let _ = self.progress_tx.send(ServerUpdate {
+            server: "Language servers".into(),
+            event: ServerEvent::Message {
+                level: lsp_types::MessageType::ERROR,
+                text: msg.to_string(),
+            },
+        });
+    }
+
     /// Gracefully shut down every managed client concurrently. Each client's
     /// `shutdown` self-bounds its child-wait, so a single unresponsive server
     /// can't block the others. Clients are left in the map; their eventual Drop
@@ -252,8 +267,7 @@ impl WorkerState {
                     "{} stopped {MAX_RESTARTS} times in 10 minutes; leaving it off until croft restarts or the workspace reopens",
                     names.join(", ")
                 );
-                log_file::log(&format!("lsp restart: {msg}"));
-                crate::output::push("Language Servers", crate::output::OutputLevel::Error, &msg);
+                self.report_gave_up(&msg);
                 // Keep the survivors; `gave_up` stops both this pass and the
                 // empty-list re-probe from spawning the dead ones again.
                 let alive: Vec<ManagedClient> = clients
@@ -495,8 +509,7 @@ impl WorkerState {
                 "language servers for {} did not come back after {MAX_RESTARTS} restarts in 10 minutes; leaving them off until croft restarts or the workspace reopens",
                 key.1.display()
             );
-            log_file::log(&format!("lsp restart: {msg}"));
-            crate::output::push("Language Servers", crate::output::OutputLevel::Error, &msg);
+            self.report_gave_up(&msg);
             should_try = false;
         }
         if should_try {
