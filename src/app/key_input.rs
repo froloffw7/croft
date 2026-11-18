@@ -158,6 +158,23 @@ impl App {
                 self.open_participants_picker();
                 true
             }
+            // Cmd+K L on a remote session: Drop to Local (#2071), its own
+            // chord, so Cmd+Shift+L selects all occurrences there as it does
+            // locally. Not Cmd+K Cmd+L, which carries Cmd on the second key.
+            KeyCode::Char(c) if plain && !shifted && !cmd_held && c.eq_ignore_ascii_case(&'l') => {
+                self.drop_to_local_if_remote();
+                true
+            }
+            // Cmd+K Shift+X: close the other tabs of the focused group, as the
+            // tab menu's Close Others and View: Close Other Editors in Group
+            // do (#2072). The menu's old ⌥⌘T hint was iTerm2's New Tab and a
+            // Linux desktop's new terminal, a chord croft never received.
+            // Matched case-insensitively for the same CSI-u reason as Shift+W
+            // above, and before the plain X arm below.
+            KeyCode::Char(c) if shifted && plain && c.eq_ignore_ascii_case(&'x') => {
+                self.run_command(crate::widgets::command_palette::Command::CloseOtherEditors);
+                true
+            }
             // Cmd+K X: cancel the AI stream (croft pair) — the keyboard
             // form of the gutter stop button; the pilot reverts the
             // streamed text.
@@ -1371,10 +1388,6 @@ impl App {
             self.open_replace_in_files();
             return Ok(());
         }
-        if self.is_remote && is_drop_to_local_key(key) {
-            self.guard_unsaved(UnsavedExit::DropToLocal);
-            return Ok(());
-        }
         if self.sidebar_view == SidebarView::Search
             && self.focus == Pane::Tree
             && is_search_editing_shortcut(key)
@@ -1541,7 +1554,7 @@ impl App {
     /// discard. Recognition normally ends on its own when you stop talking;
     /// this is only for abandoning a session that is stuck or unwanted. The
     /// killed worker reports `Empty`, which `drain_voice` turns into a "canceled"
-    /// message via this flag.
+    /// message via this flag; a transcript the session already sent is dropped.
     pub(super) fn cancel_voice_input(&mut self) {
         if let Some(handle) = self.voice_handle.as_ref() {
             self.voice_canceling = true;
@@ -1551,17 +1564,39 @@ impl App {
 
     /// Per-tick: deliver a finished voice session's result. Returns whether the
     /// next frame should redraw (transcript injected or a status message set).
+    ///
+    /// A cancel tap can reach croft after the dialog has sent its transcript,
+    /// and killing a recognizer that has exited cannot take the result back,
+    /// so a transcript is typed only if no cancel is pending. The frame loop
+    /// drains before it reads the input queued meanwhile, so a tap that came
+    /// in before the transcript can still be unread here. The transcript
+    /// therefore waits in `voice_ready` for the next drain, after that input
+    /// has been read.
     pub(super) fn drain_voice(&mut self) -> bool {
         let mut changed = false;
-        while let Ok(msg) = self.voice_rx.try_recv() {
+        if let Some(text) = self.voice_ready.take() {
             changed = true;
             self.voice_handle = None;
+            if std::mem::take(&mut self.voice_canceling) {
+                self.status = String::from("Voice input canceled");
+            } else {
+                self.inject_voice_text(&text);
+            }
+        }
+        while let Ok(msg) = self.voice_rx.try_recv() {
             match msg {
-                crate::voice::VoiceMsg::Transcript(text) => {
+                crate::voice::VoiceMsg::Transcript(text) if !self.voice_canceling => {
+                    self.voice_ready = Some(text);
+                }
+                crate::voice::VoiceMsg::Transcript(_) => {
+                    changed = true;
+                    self.voice_handle = None;
                     self.voice_canceling = false;
-                    self.inject_voice_text(&text);
+                    self.status = String::from("Voice input canceled");
                 }
                 crate::voice::VoiceMsg::Empty => {
+                    changed = true;
+                    self.voice_handle = None;
                     self.status = if std::mem::take(&mut self.voice_canceling) {
                         String::from("Voice input canceled")
                     } else {
@@ -1569,6 +1604,8 @@ impl App {
                     };
                 }
                 crate::voice::VoiceMsg::Failed(e) => {
+                    changed = true;
+                    self.voice_handle = None;
                     self.voice_canceling = false;
                     self.status = e;
                 }
@@ -2139,10 +2176,6 @@ pub(super) fn is_save_all_key(key: KeyEvent) -> bool {
         return false;
     }
     key.modifiers.contains(KeyModifiers::CONTROL) || key.modifiers.contains(KeyModifiers::SUPER)
-}
-
-pub(super) fn is_drop_to_local_key(key: KeyEvent) -> bool {
-    is_cmd_shift_letter(key, 'l')
 }
 
 /// `Ctrl/Cmd+Shift+B`: run the project's auto-detected build task, VS
@@ -3010,8 +3043,8 @@ pub(super) fn is_rename_symbol_key(key: KeyEvent) -> bool {
 }
 
 /// `Cmd+Shift+L` (`Ctrl+Shift+L` off macOS): Select All Occurrences of Find
-/// Match (#1558), VS Code's chord. On a remote session Drop to Local takes
-/// it first.
+/// Match (#1558), VS Code's chord, the same on a remote session: Drop to
+/// Local, which took it there, is `Cmd+K L` (#2071).
 pub(super) fn is_select_all_occurrences_key(key: KeyEvent) -> bool {
     is_cmd_shift_letter(key, 'l')
 }
