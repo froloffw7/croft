@@ -1,0 +1,1 @@
+fix(lsp): when croft gives up restarting a language server that keeps stopping, the status bar says so (as an error), not only OUTPUT › Language Servers, so a server that stays off no longer looks like one that has nothing to report.
