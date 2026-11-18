@@ -515,6 +515,12 @@ pub struct Editor {
     /// render's clamp of `scroll_col` honours it; the wheel and the bar
     /// clear it, so manual scrolling stops at the content.
     pub(super) caret_scroll_col: Option<usize>,
+
+    /// The column Up/Down are carrying across lines too short to hold it
+    /// (Vim's `curswant`): `(row, col, goal)` as the last vertical move left
+    /// the caret. It counts only while the caret is still on that `(row,
+    /// col)`; anything that moved it since starts the goal afresh.
+    pub(super) vertical_goal: Option<(usize, usize, usize)>,
     /// Cursor column as a CHARACTER index (not bytes), for the current line.
     pub cursor_row: usize,
     pub cursor_col: usize,
@@ -1193,6 +1199,8 @@ impl Editor {
             wrap_total_cache: Vec::new(),
             scroll_col: 0,
             caret_scroll_col: None,
+
+            vertical_goal: None,
             cursor_row: 0,
             cursor_col: 0,
             focused: false,
