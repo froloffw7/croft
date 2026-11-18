@@ -1566,7 +1566,7 @@ impl App {
     /// the open tabs of every editor group (`file:line  text of the line`),
     /// Enter jumps to it. Only the file a tab shows counts: the marks a tab
     /// still holds for a file it showed earlier are not of an open file.
-    pub(super) fn open_bookmark_picker(&mut self) {
+    pub(super) fn open_bookmark_picker(&mut self, include_closed: bool) {
         use crate::widgets::list_picker::{ListPicker, ListPurpose, ListRow};
         let root = self.tree.root.clone();
         // The focused group first, so a mark it shares with another group
@@ -1601,6 +1601,40 @@ impl App {
                             text,
                         ));
                     }
+                }
+            }
+        }
+        // A file no tab shows any more keeps its marks (a closed tab hands
+        // them to the App): list them too, with the text now on disk, and
+        // let Enter open the file at the line.
+        if include_closed {
+            self.settle_bookmarks();
+        }
+        let shown: std::collections::HashSet<PathBuf> =
+            found.iter().map(|(t, _)| t.path.clone()).collect();
+        let mut closed: Vec<(PathBuf, std::collections::BTreeSet<usize>)> = self
+            .all_bookmarks()
+            .into_iter()
+            .filter(|(path, _)| include_closed && !shown.contains(path))
+            .collect();
+        closed.sort();
+        for (path, set) in closed {
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let lines: Vec<&str> = text.lines().collect();
+            for line in set {
+                // Marks are 1-based lines; one past the file's end is gone.
+                if let Some(l) = line.checked_sub(1).and_then(|i| lines.get(i)) {
+                    found.push((
+                        BookmarkTarget {
+                            group: active,
+                            tab: usize::MAX,
+                            path: path.clone(),
+                            line,
+                        },
+                        l.trim().chars().take(80).collect(),
+                    ));
                 }
             }
         }
