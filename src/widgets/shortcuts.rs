@@ -342,7 +342,7 @@ pub const SHORTCUT_GROUPS: &[ShortcutGroup] = &[
                 handler: "",
             },
             ShortcutEntry {
-                keys: "Cmd/Ctrl+Shift+Up / Down",
+                keys: "Shift+Alt+Up / Down",
                 description: "Copy the current line or selection up / down",
                 handler: "",
             },

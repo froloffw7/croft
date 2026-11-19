@@ -1250,7 +1250,7 @@ fn the_keyboard_shortcuts_view_spells_chords_for_linux() {
     assert_eq!(shown("toggle_vim_mode"), "Super+E");
     assert_eq!(shown("toggle_terminal"), "Ctrl+J");
     assert_eq!(shown("move_line_up"), "Alt+\u{2191}");
-    assert_eq!(shown("copy_line_down"), "Ctrl+Shift+\u{2193}");
+    assert_eq!(shown("copy_line_down"), "Shift+Alt+\u{2193}");
 }
 
 /// #1562 negative: on a bottom-panel tab other than Terminal there is no
@@ -1383,7 +1383,7 @@ fn an_unscoped_chord_still_fires_from_the_editor_and_the_tree() {
 
 /// #916: Copy Line Up/Down have command ids, so a `keybindings.json` chord
 /// (what `import-vscode` writes for VS Code's `copyLinesUpAction` /
-/// `copyLinesDownAction`) runs them, and Ctrl+Shift+Up/Down still copy.
+/// `copyLinesDownAction`) runs them, and Shift+Alt+Up/Down still copy.
 #[test]
 fn copy_line_up_and_down_run_from_a_user_chord_and_their_default_one() {
     let (mut app, _tmp) = tree_app_with_keymap(
@@ -1415,11 +1415,8 @@ fn copy_line_up_and_down_run_from_a_user_chord_and_their_default_one() {
         "the caret stays on the upper copy"
     );
 
-    app.handle_key(key(
-        KeyCode::Down,
-        KeyModifiers::SHIFT | KeyModifiers::CONTROL,
-    ))
-    .unwrap();
+    app.handle_key(key(KeyCode::Down, KeyModifiers::SHIFT | KeyModifiers::ALT))
+        .unwrap();
     assert_eq!(
         app.editor
             .lines
