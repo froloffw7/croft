@@ -215,6 +215,40 @@ clangd formats with the style in the project's `.clang-format`; for the files
 that have none, `--fallback-style=LLVM` (or `Google`, `Mozilla`, `WebKit`,
 `Microsoft`, `GNU`, or `file:<path>`) picks one.
 
+clangd has clang-format built in, so formatting needs no separate
+`clang-format` install. A `.clang-format` at the project root, found from the
+file upward, looks like this (every
+[option](https://clang.llvm.org/docs/ClangFormatStyleOptions.html) goes in it):
+
+```yaml
+---
+Language: Cpp
+BasedOnStyle: LLVM
+IndentWidth: 4
+UseTab: Never
+ColumnLimit: 100
+BreakBeforeBraces: Attach
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: Never
+PointerAlignment: Left
+AccessModifierOffset: -4
+IndentCaseLabels: true
+SortIncludes: CaseSensitive
+IncludeBlocks: Regroup
+IncludeCategories:
+  - Regex: '^<.*\.h>'
+    Priority: 1
+  - Regex: '^<.*>'
+    Priority: 2
+  - Regex: '.*'
+    Priority: 3
+...
+```
+
+`ColumnLimit: 0` turns line wrapping off, and `SortIncludes: Never` leaves
+`#include` lines alone. `clang-format --dump-config` (if installed) prints the
+style a project ends up with.
+
 ## Project exclusions
 
 `files_exclude` and `search_exclude` are lists of globs, matched against
