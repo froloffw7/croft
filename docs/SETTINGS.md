@@ -203,7 +203,7 @@ off. All three appear in **Preferences: Open Settings (UI)**.
 
 `lsp.<server>.args` adds command-line arguments to a language server, after
 the ones croft starts it with. They apply the next time the server starts
-(**Language Servers: Restart** does it at once) and only from your own
+(the Restart Language Server command does it at once) and only from your own
 `config.json`, `config.synced.json` or `config.local.json`: a repository's
 layers cannot choose what a server is run with.
 
