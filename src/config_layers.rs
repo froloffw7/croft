@@ -619,6 +619,7 @@ fn known_setting_keys() -> &'static std::collections::BTreeSet<String> {
         // Skipped from the serialized default while it is empty, but a
         // setting all the same (#1440).
         keys.insert(String::from("languages"));
+        keys.insert(String::from("lsp"));
         keys
     })
 }
@@ -895,6 +896,29 @@ mod tests {
         assert_eq!(m.prefs.rulers, vec![88]);
         assert_eq!(layer_of(&m.provenance, "rulers"), LayerKind::Workspace);
         assert!(m.warnings.is_empty(), "{:?}", m.warnings);
+    }
+
+    /// `lsp.<server>.args` decide what a server is run with: the user's layers
+    /// may set them, a checked-out repo may not.
+    #[test]
+    fn only_the_user_layers_set_language_server_args() {
+        let (_tmp, user, root) = setup();
+        write(
+            &user.join("config.json"),
+            r#"{"lsp":{"clangd":{"args":["--background-index"]}}}"#,
+        );
+        write(
+            &root.join(".croft/config.json"),
+            r#"{"lsp":{"clangd":{"args":["--query-driver=/tmp/evil"]},"gopls":{"args":["-rpc.trace"]}}}"#,
+        );
+        let m = load_merged_from(&user, Some(&root), "macos");
+        assert_eq!(
+            m.prefs.lsp.get("clangd").map(|p| p.args.clone()),
+            Some(vec!["--background-index".to_string()]),
+            "the repo's value is refused, the user's stays"
+        );
+        assert!(!m.prefs.lsp.contains_key("gopls"));
+        assert!(!m.warnings.is_empty(), "the refusal is visible");
     }
 
     #[test]
