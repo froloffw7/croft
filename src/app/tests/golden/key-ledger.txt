@@ -56,15 +56,13 @@ editor | alt+p | -
 editor | alt+r | -
 editor | alt+right | caret=4:13
 editor | alt+shift+a | tabs=*● main.rs text=15L#93375dfc caret=4:32
-editor | alt+shift+down | caret=5:8 carets=4:8
+editor | alt+shift+down | tabs=*● main.rs text=16L#321d831e caret=5:8
 editor | alt+shift+f12 | -
 editor | alt+shift+f9 | +prompt("Add Logpoint · line 5" "")
 editor | alt+shift+i | status="Select the lines to put cursors at the ends of"
-editor | alt+shift+left | sel=4:7-4:8
-editor | alt+shift+pagedown | caret=14:8 carets=4:8,5:8,6:8,7:5,8:1,9:0,10:8,11:8,12:8,13:1
-editor | alt+shift+pageup | caret=0:2 carets=1:8,2:3,3:8,4:8
-editor | alt+shift+right | caret=4:9 sel=4:8-4:9
-editor | alt+shift+up | caret=3:8 carets=4:8
+editor | alt+shift+left | -
+editor | alt+shift+right | caret=4:13 sel=4:8-4:13
+editor | alt+shift+up | tabs=*● main.rs text=16L#321d831e
 editor | alt+up | tabs=*● main.rs text=15L#614ba9a0 caret=3:8
 editor | alt+w | -
 editor | alt+z | +wrap
@@ -108,18 +106,22 @@ editor | ctrl+alt+shift+a | tabs=*● main.rs text=15L#4c3e40da
 editor | ctrl+alt+shift+b | status="No bookmarks in this file"
 editor | ctrl+alt+shift+c | status="Copied relative path: main.rs" clip="main.rs"
 editor | ctrl+alt+shift+d | tabs=*● main.rs text=14L#80f7c600
+editor | ctrl+alt+shift+down | caret=5:8 carets=4:8
 editor | ctrl+alt+shift+e | status="Emmet: not available in Rust files"
 editor | ctrl+alt+shift+f | focus=side side=Search search="" @Query:0 hits=0@0
 editor | ctrl+alt+shift+g | caret=14:0 status="Bottom of file"
 editor | ctrl+alt+shift+j | tabs=*● main.rs text=14L#53b114fc caret=4:26
 editor | ctrl+alt+shift+k | marks=-/5 status="Bookmark set on line 5"
 editor | ctrl+alt+shift+l | tabs=*● main.rs
-editor | ctrl+alt+shift+left | -
+editor | ctrl+alt+shift+left | sel=4:7-4:8
 editor | ctrl+alt+shift+n | -
-editor | ctrl+alt+shift+right | caret=4:13 sel=4:8-4:13
+editor | ctrl+alt+shift+pagedown | caret=14:8 carets=4:8,5:8,6:8,7:5,8:1,9:0,10:8,11:8,12:8,13:1
+editor | ctrl+alt+shift+pageup | caret=0:2 carets=1:8,2:3,3:8,4:8
+editor | ctrl+alt+shift+right | caret=4:9 sel=4:8-4:9
 editor | ctrl+alt+shift+s | status="Converted indentation to spaces"
 editor | ctrl+alt+shift+t | focus=panel status="Split terminal: 2 active" terms=2@1
 editor | ctrl+alt+shift+u | tabs=*● main.rs text=15L#d70f871e
+editor | ctrl+alt+shift+up | caret=3:8 carets=4:8
 editor | ctrl+alt+shift+w | -
 editor | ctrl+alt+up | carets=3:8
 editor | ctrl+b | side=hidden
@@ -225,7 +227,6 @@ editor | ctrl+shift+/ | -
 editor | ctrl+shift+b | status="No build task detected; pick one"
 editor | ctrl+shift+c | -
 editor | ctrl+shift+d | focus=side side=RunDebug
-editor | ctrl+shift+down | tabs=*● main.rs text=16L#321d831e caret=5:8
 editor | ctrl+shift+e | focus=side
 editor | ctrl+shift+enter | tabs=*● main.rs text=16L#2fdf5584 caret=4:4 status="Opened line above"
 editor | ctrl+shift+f | focus=side side=Search search="" @Query:0 hits=0@0
@@ -247,7 +248,6 @@ editor | ctrl+shift+s | status="Saved <root>/main.rs"
 editor | ctrl+shift+space | +completion("" > "add")
 editor | ctrl+shift+t | focus=panel status="Split terminal: 2 active" terms=2@1
 editor | ctrl+shift+u | focus=panel panel=Output
-editor | ctrl+shift+up | tabs=*● main.rs text=16L#321d831e
 editor | ctrl+shift+v | status="Markdown Preview needs a Markdown file"
 editor | ctrl+shift+w | tabs=*untitled text=0L#811c9dc5 caret=0:0 status="Closed tab"
 editor | ctrl+shift+x | focus=side side=Extensions
@@ -328,15 +328,13 @@ selection | alt+p | -
 selection | alt+r | -
 selection | alt+right | caret=4:19 sel=-
 selection | alt+shift+a | tabs=*● main.rs text=15L#97d61866 caret=4:19 sel=-
-selection | alt+shift+down | caret=5:13 sel=5:8-5:13 carets=4:8-4:13
+selection | alt+shift+down | tabs=*● main.rs text=16L#321d831e caret=5:13 sel=5:8-5:13
 selection | alt+shift+f12 | -
 selection | alt+shift+f9 | +prompt("Add Logpoint · line 5" "")
 selection | alt+shift+i | caret=4:26 sel=- status="1 cursors at line ends"
-selection | alt+shift+left | caret=4:12 sel=4:8-4:12
-selection | alt+shift+pagedown | caret=14:13 sel=14:8-14:13 carets=4:8-4:13,5:8-5:13,6:8-6:13,7:5,8:1,9:0,10:8-10:13,11:8-11:13,12:8-12:9,13:1
-selection | alt+shift+pageup | caret=0:2 sel=- carets=1:8-1:13,2:3,3:8-3:11,4:8-4:13
-selection | alt+shift+right | caret=4:14 sel=4:8-4:14
-selection | alt+shift+up | caret=3:11 sel=3:8-3:11 carets=4:8-4:13
+selection | alt+shift+left | -
+selection | alt+shift+right | caret=4:26 sel=4:4-4:26
+selection | alt+shift+up | tabs=*● main.rs text=16L#321d831e
 selection | alt+up | tabs=*● main.rs text=15L#614ba9a0 caret=3:13 sel=3:8-3:13
 selection | alt+w | -
 selection | alt+z | +wrap
@@ -380,18 +378,22 @@ selection | ctrl+alt+shift+a | -
 selection | ctrl+alt+shift+b | status="No bookmarks in this file"
 selection | ctrl+alt+shift+c | status="Copied relative path: main.rs" clip="main.rs"
 selection | ctrl+alt+shift+d | -
+selection | ctrl+alt+shift+down | caret=5:13 sel=5:8-5:13 carets=4:8-4:13
 selection | ctrl+alt+shift+e | status="Emmet: not available in Rust files"
 selection | ctrl+alt+shift+f | focus=side side=Search search="" @Query:0 hits=0@0
 selection | ctrl+alt+shift+g | caret=14:0 sel=- status="Bottom of file"
 selection | ctrl+alt+shift+j | tabs=*● main.rs text=14L#53b114fc caret=4:26 sel=-
 selection | ctrl+alt+shift+k | marks=-/5 status="Bookmark set on line 5"
 selection | ctrl+alt+shift+l | tabs=*● main.rs
-selection | ctrl+alt+shift+left | -
+selection | ctrl+alt+shift+left | caret=4:12 sel=4:8-4:12
 selection | ctrl+alt+shift+n | -
-selection | ctrl+alt+shift+right | caret=4:26 sel=4:4-4:26
+selection | ctrl+alt+shift+pagedown | caret=14:13 sel=14:8-14:13 carets=4:8-4:13,5:8-5:13,6:8-6:13,7:5,8:1,9:0,10:8-10:13,11:8-11:13,12:8-12:9,13:1
+selection | ctrl+alt+shift+pageup | caret=0:2 sel=- carets=1:8-1:13,2:3,3:8-3:11,4:8-4:13
+selection | ctrl+alt+shift+right | caret=4:14 sel=4:8-4:14
 selection | ctrl+alt+shift+s | status="Converted indentation to spaces"
 selection | ctrl+alt+shift+t | focus=panel status="Split terminal: 2 active" terms=2@1
 selection | ctrl+alt+shift+u | tabs=*● main.rs text=15L#d70f871e
+selection | ctrl+alt+shift+up | caret=3:11 sel=3:8-3:11 carets=4:8-4:13
 selection | ctrl+alt+shift+w | -
 selection | ctrl+alt+up | carets=3:11
 selection | ctrl+b | side=hidden
@@ -497,7 +499,6 @@ selection | ctrl+shift+/ | -
 selection | ctrl+shift+b | status="No build task detected; pick one"
 selection | ctrl+shift+c | status="Copied 5 chars to clipboard" clip="total"
 selection | ctrl+shift+d | focus=side side=RunDebug
-selection | ctrl+shift+down | tabs=*● main.rs text=16L#321d831e caret=5:13 sel=5:8-5:13
 selection | ctrl+shift+e | focus=side
 selection | ctrl+shift+enter | tabs=*● main.rs text=16L#2fdf5584 caret=4:4 sel=- status="Opened line above"
 selection | ctrl+shift+f | focus=side side=Search search="" @Query:0 hits=0@0
@@ -519,7 +520,6 @@ selection | ctrl+shift+s | status="Saved <root>/main.rs"
 selection | ctrl+shift+space | status="No suggestions"
 selection | ctrl+shift+t | focus=panel status="Split terminal: 2 active" terms=2@1
 selection | ctrl+shift+u | focus=panel panel=Output
-selection | ctrl+shift+up | tabs=*● main.rs text=16L#321d831e
 selection | ctrl+shift+v | status="Markdown Preview needs a Markdown file"
 selection | ctrl+shift+w | tabs=*untitled text=0L#811c9dc5 caret=0:0 sel=- status="Closed tab"
 selection | ctrl+shift+x | focus=side side=Extensions
@@ -605,8 +605,6 @@ explorer | alt+shift+f12 | -
 explorer | alt+shift+f9 | +prompt("Add Logpoint · line 5" "")
 explorer | alt+shift+i | -
 explorer | alt+shift+left | -
-explorer | alt+shift+pagedown | tree=./+,.vscode/,docs/,main.rs > main.rs marked=.,.vscode,docs,main.rs
-explorer | alt+shift+pageup | tree=./+,.vscode/,docs/,main.rs > . marked=.
 explorer | alt+shift+right | status="Opened <root>/main.rs"
 explorer | alt+shift+up | tree=./+,.vscode/,docs/,main.rs > docs marked=.,.vscode,docs
 explorer | alt+up | tree=./+,.vscode/,docs/,main.rs > docs
@@ -652,6 +650,7 @@ explorer | ctrl+alt+shift+a | tree=./+,.vscode/,docs/,main.rs > main.rs marked=.
 explorer | ctrl+alt+shift+b | -
 explorer | ctrl+alt+shift+c | status="Copied 1 item"
 explorer | ctrl+alt+shift+d | -
+explorer | ctrl+alt+shift+down | -
 explorer | ctrl+alt+shift+e | -
 explorer | ctrl+alt+shift+f | side=Search search="" @Query:0 hits=0@0
 explorer | ctrl+alt+shift+g | -
@@ -660,10 +659,13 @@ explorer | ctrl+alt+shift+k | -
 explorer | ctrl+alt+shift+l | -
 explorer | ctrl+alt+shift+left | -
 explorer | ctrl+alt+shift+n | -
+explorer | ctrl+alt+shift+pagedown | tree=./+,.vscode/,docs/,main.rs > main.rs marked=.,.vscode,docs,main.rs
+explorer | ctrl+alt+shift+pageup | tree=./+,.vscode/,docs/,main.rs > . marked=.
 explorer | ctrl+alt+shift+right | status="Opened <root>/main.rs"
 explorer | ctrl+alt+shift+s | -
 explorer | ctrl+alt+shift+t | focus=panel status="Split terminal: 2 active" terms=2@1
 explorer | ctrl+alt+shift+u | -
+explorer | ctrl+alt+shift+up | tree=./+,.vscode/,docs/,main.rs > docs marked=.,.vscode,docs
 explorer | ctrl+alt+shift+w | -
 explorer | ctrl+alt+up | tree=./+,.vscode/,docs/,main.rs > docs
 explorer | ctrl+b | side=hidden
@@ -769,7 +771,6 @@ explorer | ctrl+shift+/ | status="Workspace root: <root>" typed=0:"\u{5}x\u{15}c
 explorer | ctrl+shift+b | status="No build task detected; pick one"
 explorer | ctrl+shift+c | status="Copied 1 item"
 explorer | ctrl+shift+d | side=RunDebug
-explorer | ctrl+shift+down | -
 explorer | ctrl+shift+e | -
 explorer | ctrl+shift+enter | focus=editor status="Opened <root>/main.rs"
 explorer | ctrl+shift+f | side=Search search="" @Query:0 hits=0@0
@@ -791,7 +792,6 @@ explorer | ctrl+shift+s | status="Saved <root>/main.rs"
 explorer | ctrl+shift+space | -
 explorer | ctrl+shift+t | focus=panel status="Split terminal: 2 active" terms=2@1
 explorer | ctrl+shift+u | focus=panel panel=Output
-explorer | ctrl+shift+up | tree=./+,.vscode/,docs/,main.rs > docs marked=.,.vscode,docs
 explorer | ctrl+shift+v | status="Explorer clipboard is empty"
 explorer | ctrl+shift+w | -
 explorer | ctrl+shift+x | side=Extensions
@@ -876,8 +876,6 @@ terminal | alt+shift+f12 | typed=0:"\u{1b}[24;4~"
 terminal | alt+shift+f9 | +prompt("Add Logpoint · line 5" "")
 terminal | alt+shift+i | typed=0:"\u{1b}I"
 terminal | alt+shift+left | typed=0:"\u{1b}[1;4D"
-terminal | alt+shift+pagedown | -
-terminal | alt+shift+pageup | -
 terminal | alt+shift+right | typed=0:"\u{1b}[1;4C"
 terminal | alt+shift+up | typed=0:"\u{1b}[1;4A"
 terminal | alt+up | typed=0:"\u{1b}[1;3A"
@@ -923,6 +921,7 @@ terminal | ctrl+alt+shift+a | typed=0:"\u{1b}\u{1}"
 terminal | ctrl+alt+shift+b | typed=0:"\u{1b}\u{2}"
 terminal | ctrl+alt+shift+c | status="Nothing selected: drag to select first"
 terminal | ctrl+alt+shift+d | typed=0:"\u{1b}\u{4}"
+terminal | ctrl+alt+shift+down | status="No command marks yet (shell integration needs a zsh prompt)"
 terminal | ctrl+alt+shift+e | typed=0:"\u{1b}\u{5}"
 terminal | ctrl+alt+shift+f | focus=side side=Search search="" @Query:0 hits=0@0
 terminal | ctrl+alt+shift+g | typed=0:"\u{1b}\u{7}"
@@ -931,10 +930,13 @@ terminal | ctrl+alt+shift+k | typed=0:"\u{1b}\u{b}"
 terminal | ctrl+alt+shift+l | typed=0:"\u{1b}\u{c}"
 terminal | ctrl+alt+shift+left | typed=0:"\u{1b}[1;8D"
 terminal | ctrl+alt+shift+n | typed=0:"\u{1b}\u{e}"
+terminal | ctrl+alt+shift+pagedown | -
+terminal | ctrl+alt+shift+pageup | -
 terminal | ctrl+alt+shift+right | typed=0:"\u{1b}[1;8C"
 terminal | ctrl+alt+shift+s | typed=0:"\u{1b}\u{13}"
 terminal | ctrl+alt+shift+t | status="Split terminal: 2 active" terms=2@1
 terminal | ctrl+alt+shift+u | typed=0:"\u{1b}\u{15}"
+terminal | ctrl+alt+shift+up | status="No command marks yet (shell integration needs a zsh prompt)"
 terminal | ctrl+alt+shift+w | status="Cannot close the last terminal; press Ctrl+J to hide"
 terminal | ctrl+alt+up | status="No command marks yet (shell integration needs a zsh prompt)"
 terminal | ctrl+b | typed=0:"\u{2}"
@@ -1040,7 +1042,6 @@ terminal | ctrl+shift+/ | typed=0:"\u{1f}"
 terminal | ctrl+shift+b | status="No build task detected; pick one"
 terminal | ctrl+shift+c | status="Nothing selected: drag to select first"
 terminal | ctrl+shift+d | focus=side side=RunDebug
-terminal | ctrl+shift+down | typed=0:"\u{1b}[1;6B"
 terminal | ctrl+shift+e | focus=side
 terminal | ctrl+shift+enter | typed=0:"\r"
 terminal | ctrl+shift+f | focus=side side=Search search="" @Query:0 hits=0@0
@@ -1062,7 +1063,6 @@ terminal | ctrl+shift+s | status="Saved <root>/main.rs"
 terminal | ctrl+shift+space | status="Quick select: type a label to copy, UPPERCASE pastes, Esc cancels"
 terminal | ctrl+shift+t | status="Split terminal: 2 active" terms=2@1
 terminal | ctrl+shift+u | panel=Output
-terminal | ctrl+shift+up | typed=0:"\u{1b}[1;6A"
 terminal | ctrl+shift+v | typed=0:"CLIP"
 terminal | ctrl+shift+w | status="Cannot close the last terminal; press Ctrl+J to hide"
 terminal | ctrl+shift+x | focus=side side=Extensions
@@ -1148,8 +1148,6 @@ search | alt+shift+f12 | -
 search | alt+shift+f9 | +prompt("Add Logpoint · line 5" "")
 search | alt+shift+i | -
 search | alt+shift+left | search="total" @Query:0 hits=4@0
-search | alt+shift+pagedown | -
-search | alt+shift+pageup | -
 search | alt+shift+right | -
 search | alt+shift+up | -
 search | alt+up | -
@@ -1195,6 +1193,7 @@ search | ctrl+alt+shift+a | search="total" @Query:5 sel=0-5 hits=4@0
 search | ctrl+alt+shift+b | status="Search: unhandled Ctrl+B"
 search | ctrl+alt+shift+c | -
 search | ctrl+alt+shift+d | status="Search: unhandled Ctrl+D"
+search | ctrl+alt+shift+down | search="total" @Query:5 hits=4@1
 search | ctrl+alt+shift+e | status="Search: unhandled Ctrl+E"
 search | ctrl+alt+shift+f | search="total" @Query:5 sel=0-5 hits=4@0
 search | ctrl+alt+shift+g | status="Search: unhandled Ctrl+G"
@@ -1203,10 +1202,13 @@ search | ctrl+alt+shift+k | status="Search: unhandled Ctrl+K"
 search | ctrl+alt+shift+l | status="Search: unhandled Ctrl+L"
 search | ctrl+alt+shift+left | search="total" @Query:0 hits=4@0
 search | ctrl+alt+shift+n | status="Search: unhandled Ctrl+N"
+search | ctrl+alt+shift+pagedown | -
+search | ctrl+alt+shift+pageup | -
 search | ctrl+alt+shift+right | -
 search | ctrl+alt+shift+s | status="Search: unhandled Ctrl+S"
 search | ctrl+alt+shift+t | focus=panel status="Split terminal: 2 active" terms=2@1 search="total" hits=4@0
 search | ctrl+alt+shift+u | status="Search: unhandled Ctrl+U"
+search | ctrl+alt+shift+up | -
 search | ctrl+alt+shift+w | status="Search: unhandled Ctrl+W"
 search | ctrl+alt+up | -
 search | ctrl+b | side=hidden
@@ -1312,7 +1314,6 @@ search | ctrl+shift+/ | status="Search: unhandled Ctrl+/"
 search | ctrl+shift+b | status="No build task detected; pick one"
 search | ctrl+shift+c | -
 search | ctrl+shift+d | side=RunDebug search="total" hits=4@0
-search | ctrl+shift+down | search="total" @Query:5 hits=4@1
 search | ctrl+shift+e | side=Explorer search="total" hits=4@0
 search | ctrl+shift+enter | focus=editor caret=1:35 status="Opened main.rs at line 2" search="total" hits=4@0
 search | ctrl+shift+f | search="total" @Query:5 sel=0-5 hits=4@0
@@ -1334,7 +1335,6 @@ search | ctrl+shift+s | status="Saved <root>/main.rs"
 search | ctrl+shift+space | status="Search: unhandled Ctrl+ "
 search | ctrl+shift+t | focus=panel status="Split terminal: 2 active" terms=2@1 search="total" hits=4@0
 search | ctrl+shift+u | focus=panel panel=Output search="total" hits=4@0
-search | ctrl+shift+up | -
 search | ctrl+shift+v | status="Cmd+V: pasted into search field" search="totalCLIP" @Query:9 hits=0@0
 search | ctrl+shift+w | status="Search: unhandled Ctrl+W"
 search | ctrl+shift+x | side=Extensions search="total" hits=4@0
@@ -1420,8 +1420,6 @@ scm | alt+shift+f12 | -
 scm | alt+shift+f9 | +prompt("Add Logpoint · line 5" "")
 scm | alt+shift+i | -
 scm | alt+shift+left | scm="Ship it"@6 +focus StagedModified:docs/notes.md Untracked:todo.txt
-scm | alt+shift+pagedown | -
-scm | alt+shift+pageup | -
 scm | alt+shift+right | -
 scm | alt+shift+up | -
 scm | alt+up | -
@@ -1467,6 +1465,7 @@ scm | ctrl+alt+shift+a | status="Selected 2 change(s)" scm="Ship it"@7 +focus se
 scm | ctrl+alt+shift+b | -
 scm | ctrl+alt+shift+c | -
 scm | ctrl+alt+shift+d | -
+scm | ctrl+alt+shift+down | scm="Ship it"@7 +focus +list sel=0 multi=0 StagedModified:docs/notes.md Untracked:todo.txt
 scm | ctrl+alt+shift+e | -
 scm | ctrl+alt+shift+f | side=Search search="" @Query:0 hits=0@0 scm="Ship it"@7 StagedModified:docs/notes.md Untracked:todo.txt
 scm | ctrl+alt+shift+g | -
@@ -1475,10 +1474,13 @@ scm | ctrl+alt+shift+k | -
 scm | ctrl+alt+shift+l | -
 scm | ctrl+alt+shift+left | scm="Ship it"@6 +focus StagedModified:docs/notes.md Untracked:todo.txt
 scm | ctrl+alt+shift+n | -
+scm | ctrl+alt+shift+pagedown | -
+scm | ctrl+alt+shift+pageup | -
 scm | ctrl+alt+shift+right | -
 scm | ctrl+alt+shift+s | status="No change selected to stage"
 scm | ctrl+alt+shift+t | focus=panel status="Split terminal: 2 active" terms=2@1 scm="Ship it"@7 StagedModified:docs/notes.md Untracked:todo.txt
 scm | ctrl+alt+shift+u | -
+scm | ctrl+alt+shift+up | -
 scm | ctrl+alt+shift+w | -
 scm | ctrl+alt+up | -
 scm | ctrl+b | side=hidden
@@ -1584,7 +1586,6 @@ scm | ctrl+shift+/ | -
 scm | ctrl+shift+b | status="No build task detected; pick one"
 scm | ctrl+shift+c | -
 scm | ctrl+shift+d | side=RunDebug scm="Ship it"@7 StagedModified:docs/notes.md Untracked:todo.txt
-scm | ctrl+shift+down | scm="Ship it"@7 +focus +list sel=0 multi=0 StagedModified:docs/notes.md Untracked:todo.txt
 scm | ctrl+shift+e | side=Explorer scm="Ship it"@7 StagedModified:docs/notes.md Untracked:todo.txt
 scm | ctrl+shift+enter | status="Commit ok; push failed: no remote to publish this branch to" scm=""@0 +focus Untracked:todo.txt git=main,??:todo.txt +commit_feedback("commit ok; push failed: no remote to publish this branch to")
 scm | ctrl+shift+f | side=Search search="" @Query:0 hits=0@0 scm="Ship it"@7 StagedModified:docs/notes.md Untracked:todo.txt
@@ -1606,7 +1607,6 @@ scm | ctrl+shift+s | -
 scm | ctrl+shift+space | -
 scm | ctrl+shift+t | focus=panel status="Split terminal: 2 active" terms=2@1 scm="Ship it"@7 StagedModified:docs/notes.md Untracked:todo.txt
 scm | ctrl+shift+u | focus=panel panel=Output scm="Ship it"@7 StagedModified:docs/notes.md Untracked:todo.txt
-scm | ctrl+shift+up | -
 scm | ctrl+shift+v | scm="Ship itCLIP"@11 +focus StagedModified:docs/notes.md Untracked:todo.txt
 scm | ctrl+shift+w | -
 scm | ctrl+shift+x | side=Extensions scm="Ship it"@7 StagedModified:docs/notes.md Untracked:todo.txt
@@ -1692,8 +1692,6 @@ palette | alt+shift+f12 | -
 palette | alt+shift+f9 | -
 palette | alt+shift+i | ~palette("I" @1 > "Replace in File")
 palette | alt+shift+left | -
-palette | alt+shift+pagedown | ~palette("" @0 > "Kill to End of Line")
-palette | alt+shift+pageup | -
 palette | alt+shift+right | -
 palette | alt+shift+up | -
 palette | alt+up | -
@@ -1739,6 +1737,7 @@ palette | ctrl+alt+shift+a | -
 palette | ctrl+alt+shift+b | -
 palette | ctrl+alt+shift+c | -
 palette | ctrl+alt+shift+d | -
+palette | ctrl+alt+shift+down | ~palette("" @0 > "Move Line Down")
 palette | ctrl+alt+shift+e | -
 palette | ctrl+alt+shift+f | -
 palette | ctrl+alt+shift+g | -
@@ -1747,10 +1746,13 @@ palette | ctrl+alt+shift+k | -
 palette | ctrl+alt+shift+l | -
 palette | ctrl+alt+shift+left | -
 palette | ctrl+alt+shift+n | -
+palette | ctrl+alt+shift+pagedown | ~palette("" @0 > "Kill to End of Line")
+palette | ctrl+alt+shift+pageup | -
 palette | ctrl+alt+shift+right | -
 palette | ctrl+alt+shift+s | -
 palette | ctrl+alt+shift+t | -
 palette | ctrl+alt+shift+u | -
+palette | ctrl+alt+shift+up | -
 palette | ctrl+alt+shift+w | -
 palette | ctrl+alt+up | -
 palette | ctrl+b | -
@@ -1858,7 +1860,6 @@ palette | ctrl+shift+/ | -
 palette | ctrl+shift+b | -
 palette | ctrl+shift+c | -
 palette | ctrl+shift+d | -
-palette | ctrl+shift+down | ~palette("" @0 > "Move Line Down")
 palette | ctrl+shift+e | -
 palette | ctrl+shift+enter | tabs=*● main.rs text=15L#614ba9a0 caret=3:8 status="" -palette
 palette | ctrl+shift+f | -
@@ -1881,7 +1882,6 @@ palette | ctrl+shift+s | -
 palette | ctrl+shift+space | -
 palette | ctrl+shift+t | -
 palette | ctrl+shift+u | -
-palette | ctrl+shift+up | -
 palette | ctrl+shift+v | -
 palette | ctrl+shift+w | -
 palette | ctrl+shift+x | -
@@ -1967,8 +1967,6 @@ confirm | alt+shift+f12 | -
 confirm | alt+shift+f9 | -
 confirm | alt+shift+i | -
 confirm | alt+shift+left | -
-confirm | alt+shift+pagedown | -
-confirm | alt+shift+pageup | -
 confirm | alt+shift+right | -
 confirm | alt+shift+up | -
 confirm | alt+up | -
@@ -2014,6 +2012,7 @@ confirm | ctrl+alt+shift+a | -
 confirm | ctrl+alt+shift+b | -
 confirm | ctrl+alt+shift+c | -
 confirm | ctrl+alt+shift+d | -
+confirm | ctrl+alt+shift+down | -
 confirm | ctrl+alt+shift+e | -
 confirm | ctrl+alt+shift+f | -
 confirm | ctrl+alt+shift+g | -
@@ -2022,10 +2021,13 @@ confirm | ctrl+alt+shift+k | -
 confirm | ctrl+alt+shift+l | -
 confirm | ctrl+alt+shift+left | -
 confirm | ctrl+alt+shift+n | -
+confirm | ctrl+alt+shift+pagedown | -
+confirm | ctrl+alt+shift+pageup | -
 confirm | ctrl+alt+shift+right | -
 confirm | ctrl+alt+shift+s | -
 confirm | ctrl+alt+shift+t | -
 confirm | ctrl+alt+shift+u | -
+confirm | ctrl+alt+shift+up | -
 confirm | ctrl+alt+shift+w | -
 confirm | ctrl+alt+up | -
 confirm | ctrl+b | -
@@ -2133,7 +2135,6 @@ confirm | ctrl+shift+/ | -
 confirm | ctrl+shift+b | -
 confirm | ctrl+shift+c | -
 confirm | ctrl+shift+d | -
-confirm | ctrl+shift+down | -
 confirm | ctrl+shift+e | -
 confirm | ctrl+shift+enter | tabs=*main.rs files=27L#afbd942b +quit -unsaved
 confirm | ctrl+shift+f | -
@@ -2156,7 +2157,6 @@ confirm | ctrl+shift+s | -
 confirm | ctrl+shift+space | -
 confirm | ctrl+shift+t | -
 confirm | ctrl+shift+u | -
-confirm | ctrl+shift+up | -
 confirm | ctrl+shift+v | -
 confirm | ctrl+shift+w | -
 confirm | ctrl+shift+x | -
