@@ -1,0 +1,1 @@
+feat(lsp): `lsp.<server>.args` in `config.json` adds command-line arguments to a language server, e.g. `{ "lsp": { "clangd": { "args": ["--background-index"] } } }`. They follow croft's own arguments, apply the next time the server starts, and are read from your own config only, never from a repository's.
