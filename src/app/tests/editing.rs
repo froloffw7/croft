@@ -458,18 +458,15 @@ fn kill_to_end_of_line_at_the_end_of_a_line_changes_nothing() {
 }
 
 #[test]
-fn editor_ctrl_shift_down_duplicates_the_current_line_via_handle_key() {
+fn editor_shift_alt_down_duplicates_the_current_line_via_handle_key() {
     let tmp = tempfile::tempdir().unwrap();
     let mut app = App::new(tmp.path().to_path_buf()).unwrap();
     app.focus_pane(Pane::Editor);
     app.editor.lines = vec![String::from("alpha"), String::from("beta")];
     app.editor.cursor_row = 0;
     app.editor.cursor_col = 3;
-    app.handle_key(key(
-        KeyCode::Down,
-        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
-    ))
-    .unwrap();
+    app.handle_key(key(KeyCode::Down, KeyModifiers::ALT | KeyModifiers::SHIFT))
+        .unwrap();
     assert_eq!(app.editor.lines, vec!["alpha", "alpha", "beta"]);
     assert_eq!(
         (app.editor.cursor_row, app.editor.cursor_col),
@@ -479,18 +476,15 @@ fn editor_ctrl_shift_down_duplicates_the_current_line_via_handle_key() {
 }
 
 #[test]
-fn editor_ctrl_shift_up_duplicates_the_current_line_via_handle_key() {
+fn editor_shift_alt_up_duplicates_the_current_line_via_handle_key() {
     let tmp = tempfile::tempdir().unwrap();
     let mut app = App::new(tmp.path().to_path_buf()).unwrap();
     app.focus_pane(Pane::Editor);
     app.editor.lines = vec![String::from("alpha"), String::from("beta")];
     app.editor.cursor_row = 1;
     app.editor.cursor_col = 2;
-    app.handle_key(key(
-        KeyCode::Up,
-        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
-    ))
-    .unwrap();
+    app.handle_key(key(KeyCode::Up, KeyModifiers::ALT | KeyModifiers::SHIFT))
+        .unwrap();
     assert_eq!(app.editor.lines, vec!["alpha", "beta", "beta"]);
     assert_eq!((app.editor.cursor_row, app.editor.cursor_col), (1, 2));
 }
@@ -932,8 +926,8 @@ fn editor_ctrl_home_and_end_go_to_the_ends_of_the_document() {
 }
 
 #[test]
-fn editor_ctrl_shift_alt_right_runs_expand_selection_not_word_extension() {
-    // #254 reassigned Ctrl+Shift+Alt+Right from word-wise extension to VS
+fn editor_shift_alt_right_runs_expand_selection_not_word_extension() {
+    // #254 reassigned Shift+Alt+Right from word-wise extension to VS
     // Code's Expand Selection (the same collision VS Code resolves the
     // same way). With no path/language, the textual fallback grows to
     // the line span immediately — no LSP round trip.
@@ -943,22 +937,16 @@ fn editor_ctrl_shift_alt_right_runs_expand_selection_not_word_extension() {
     app.editor.lines = vec![String::from("hello world")];
     app.editor.cursor_row = 0;
     app.editor.cursor_col = 0;
-    app.handle_key(key(
-        KeyCode::Right,
-        KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SHIFT,
-    ))
-    .unwrap();
+    app.handle_key(key(KeyCode::Right, KeyModifiers::ALT | KeyModifiers::SHIFT))
+        .unwrap();
     assert_eq!(
         app.editor.selection_text(),
         "hello world",
-        "Ctrl+Shift+Alt+Right expands to the enclosing range (the line here)"
+        "Shift+Option+Right expands to the enclosing range (the line here)"
     );
-    // Ctrl+Shift+Alt+Left retraces to the gesture's start.
-    app.handle_key(key(
-        KeyCode::Left,
-        KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SHIFT,
-    ))
-    .unwrap();
+    // Shift+Alt+Left retraces to the gesture's start.
+    app.handle_key(key(KeyCode::Left, KeyModifiers::ALT | KeyModifiers::SHIFT))
+        .unwrap();
     assert!(
         app.editor.selection.is_none(),
         "shrink retraced to the caret"
@@ -1447,7 +1435,7 @@ fn column_chord(code: KeyCode, cmd: KeyModifiers) -> KeyEvent {
     key(code, cmd | KeyModifiers::SHIFT | KeyModifiers::ALT)
 }
 
-/// #1560: Shift+Alt+Down twice then Right twice makes a three-row,
+/// #1560: Ctrl+Shift+Alt+Down twice then Right twice makes a three-row,
 /// two-column box, and typing replaces those columns on every row.
 #[test]
 fn column_select_keys_make_a_box_that_typing_fills() {
@@ -1456,7 +1444,7 @@ fn column_select_keys_make_a_box_that_typing_fills() {
     app.editor.cursor_row = 0;
     app.editor.cursor_col = 0;
     for code in [KeyCode::Down, KeyCode::Down, KeyCode::Right, KeyCode::Right] {
-        app.handle_key(column_chord(code, KeyModifiers::NONE))
+        app.handle_key(column_chord(code, KeyModifiers::CONTROL))
             .unwrap();
     }
     assert_eq!(app.editor.carets.len(), 2, "one selection per row");
@@ -1464,18 +1452,78 @@ fn column_select_keys_make_a_box_that_typing_fills() {
     assert_eq!(&app.editor.lines[..3], ["Ypha = 1", "Yta  = 2", "Ymma = 3"]);
 }
 
-/// #1560: Cmd+Shift+Opt Up/Down keep working, but Left/Right on that chord
-/// are Shrink / Expand Selection, so the box's columns come from Shift+Opt.
+/// `column_select_mode: "shift_alt"` (#1560) gives Shift+Alt+arrows to Column
+/// Select, and moves Expand / Shrink Selection to Ctrl+Shift+Alt+Right/Left
+/// and Copy Line to Ctrl+Shift+Up/Down, the keys it traded them for.
 #[test]
-fn cmd_shift_opt_vertical_keys_make_the_same_box() {
+fn shift_alt_mode_selects_columns_on_shift_alt_and_moves_the_other_chords() {
+    use crate::prefs::ColumnSelectMode;
+    let tmp = tempfile::tempdir().unwrap();
+    let mut app = app_with_open_file(tmp.path(), "s.py", COLUMN_PY);
+    app.column_select_mode = ColumnSelectMode::ShiftAlt;
+    app.editor.cursor_row = 0;
+    app.editor.cursor_col = 0;
+    for code in [KeyCode::Down, KeyCode::Down, KeyCode::Right, KeyCode::Right] {
+        app.handle_key(column_chord(code, KeyModifiers::NONE))
+            .unwrap();
+    }
+    assert_eq!(app.editor.carets.len(), 2, "Shift+Alt makes the box");
+    type_keys(&mut app, "Y");
+    assert_eq!(&app.editor.lines[..3], ["Ypha = 1", "Yta  = 2", "Ymma = 3"]);
+
+    // Ctrl+Shift+Alt Up/Down still make a box; Left/Right expand instead.
+    let mut app = app_with_open_file(tmp.path(), "s.py", COLUMN_PY);
+    app.column_select_mode = ColumnSelectMode::ShiftAlt;
+    app.editor.cursor_row = 0;
+    app.editor.cursor_col = 1;
+    app.handle_key(column_chord(KeyCode::Down, KeyModifiers::CONTROL))
+        .unwrap();
+    assert_eq!(app.editor.cursor_row, 1, "Down moved the box head a row");
+    app.handle_key(column_chord(KeyCode::Right, KeyModifiers::CONTROL))
+        .unwrap();
+    assert!(
+        app.editor.carets.len() < 2,
+        "Right expands the selection here, it does not grow a box"
+    );
+
+    // Copy Line: Ctrl+Shift+Down copies, Shift+Alt+Down no longer does.
+    let mut app = app_with_open_file(tmp.path(), "c.py", "a\nb\n");
+    app.column_select_mode = ColumnSelectMode::ShiftAlt;
+    app.editor.cursor_row = 0;
+    app.handle_key(key(
+        KeyCode::Down,
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    ))
+    .unwrap();
+    assert_eq!(&app.editor.lines[..3], ["a", "a", "b"]);
+}
+
+/// The default `vscode` mode keeps Shift+Alt+Down copying the line, so the
+/// column keys are Ctrl+Shift+Alt only.
+#[test]
+fn the_default_mode_leaves_shift_alt_arrows_to_copy_line_and_expand() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut app = app_with_open_file(tmp.path(), "c.py", "a\nb\n");
+    assert_eq!(
+        app.column_select_mode,
+        crate::prefs::ColumnSelectMode::VsCode
+    );
+    app.editor.cursor_row = 0;
+    app.handle_key(column_chord(KeyCode::Down, KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(&app.editor.lines[..3], ["a", "a", "b"]);
+    assert!(app.editor.carets.is_empty(), "not a column move");
+}
+
+/// #1560: macOS's Cmd+Shift+Opt arrows do the same.
+#[test]
+fn cmd_shift_opt_arrows_make_the_same_box() {
     let tmp = tempfile::tempdir().unwrap();
     let mut app = app_with_open_file(tmp.path(), "s.py", COLUMN_PY);
     app.editor.cursor_row = 0;
     app.editor.cursor_col = 1;
-    app.handle_key(column_chord(KeyCode::Down, KeyModifiers::SUPER))
-        .unwrap();
-    for _ in 0..2 {
-        app.handle_key(column_chord(KeyCode::Right, KeyModifiers::NONE))
+    for code in [KeyCode::Down, KeyCode::Right, KeyCode::Right] {
+        app.handle_key(column_chord(code, KeyModifiers::SUPER))
             .unwrap();
     }
     assert_eq!(app.editor.selection.unwrap().normalised(), ((1, 1), (1, 3)));
@@ -1510,7 +1558,7 @@ fn column_select_up_from_the_first_row_keeps_one_row() {
     let mut app = app_with_open_file(tmp.path(), "s.py", COLUMN_PY);
     app.editor.cursor_row = 0;
     app.editor.cursor_col = 0;
-    app.handle_key(column_chord(KeyCode::Right, KeyModifiers::NONE))
+    app.handle_key(column_chord(KeyCode::Right, KeyModifiers::CONTROL))
         .unwrap();
     app.handle_key(column_chord(KeyCode::Up, KeyModifiers::CONTROL))
         .unwrap();

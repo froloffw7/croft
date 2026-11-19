@@ -199,6 +199,20 @@ A `.editorconfig` `insert_final_newline` or `trim_trailing_whitespace`
 wins over the setting for its files, whether it turns the clean-up on or
 off. All three appear in **Preferences: Open Settings (UI)**.
 
+## Column Select chords
+
+`column_select_mode` picks which keys select a column, expand the selection
+and copy a line. The two schemes trade the same chords:
+
+| `column_select_mode` | Column Select | Expand / Shrink Selection | Copy Line Up / Down |
+|---|---|---|---|
+| `"vscode"` (default) | `Cmd/Ctrl+Shift+Alt` + arrows, `PageUp`, `PageDown` | `Shift+Alt+Right` / `Left` | `Shift+Alt+Up` / `Down` |
+| `"shift_alt"` (Visual Studio) | `Shift+Alt` + arrows, `PageUp`, `PageDown` | `Cmd/Ctrl+Shift+Alt+Right` / `Left` | `Cmd/Ctrl+Shift+Up` / `Down` |
+
+The Command Palette hints and the F1 shortcuts list show the default
+scheme; in `shift_alt` mode, rebind or check the table above. Column
+Selection Mode (plain `Shift`+arrows) works in both.
+
 ## Project exclusions
 
 `files_exclude` and `search_exclude` are lists of globs, matched against
