@@ -103,6 +103,36 @@ pub struct ServerConfig {
     pub provision: Option<crate::lsp::install::Provision>,
 }
 
+/// Extra arguments the user set per server (`lsp.<server>.args`), by server
+/// name; read as each server starts.
+static USER_ARGS: std::sync::RwLock<std::collections::BTreeMap<String, Vec<String>>> =
+    std::sync::RwLock::new(std::collections::BTreeMap::new());
+
+/// Replace the user's per-server arguments with what the settings now say.
+/// Running servers keep the arguments they started with.
+pub fn set_user_args(lsp: &std::collections::BTreeMap<String, crate::prefs::LspServerPrefs>) {
+    let args = lsp
+        .iter()
+        .filter(|(_, p)| !p.args.is_empty())
+        .map(|(name, p)| (name.clone(), p.args.clone()))
+        .collect();
+    if let Ok(mut user) = USER_ARGS.write() {
+        *user = args;
+    }
+}
+
+impl ServerConfig {
+    /// This server's config with the user's `lsp.<name>.args` after its own.
+    pub fn with_user_args(mut self) -> Self {
+        if let Ok(user) = USER_ARGS.read()
+            && let Some(extra) = user.get(self.name)
+        {
+            self.args.extend(extra.iter().cloned());
+        }
+        self
+    }
+}
+
 /// rust-analyzer release `.gz` assets (tag `2026-06-22`) keyed by Rust's
 /// `target_os`-`target_arch`. Listed in `BTreeMap` key order so this slice
 /// compares equal, by value, to the one the bundled `lsp-rust` manifest interns
@@ -278,6 +308,30 @@ impl ServerConfig {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn user_args_follow_a_servers_own() {
+        use crate::prefs::LspServerPrefs;
+        let mut cfg = ServerConfig::ty();
+        cfg.name = "zz-user-args-test";
+        let plain = cfg.clone();
+        let mut lsp = std::collections::BTreeMap::new();
+        lsp.insert(
+            "zz-user-args-test".to_string(),
+            LspServerPrefs {
+                args: vec!["--one".into(), "--two=2".into()],
+            },
+        );
+        set_user_args(&lsp);
+        let with = cfg.clone().with_user_args();
+        assert_eq!(with.args, ["server", "--one", "--two=2"]);
+        // Another server is untouched, and clearing the setting clears it.
+        let mut other = plain.clone();
+        other.name = "zz-other";
+        assert_eq!(other.with_user_args().args, ["server"]);
+        set_user_args(&Default::default());
+        assert_eq!(cfg.with_user_args().args, ["server"]);
+    }
+
     use super::*;
 
     #[test]

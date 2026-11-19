@@ -1308,6 +1308,7 @@ impl App {
             // into the user's config.
             self.apply_theme_visuals(theme);
         }
+        crate::lsp::config::set_user_args(&p.lsp);
         self.format_on_save = p.format_on_save;
         self.default_formatter = p.default_formatter.clone();
         self.language_formatters = p.language_formatters.clone();

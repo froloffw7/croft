@@ -199,6 +199,22 @@ A `.editorconfig` `insert_final_newline` or `trim_trailing_whitespace`
 wins over the setting for its files, whether it turns the clean-up on or
 off. All three appear in **Preferences: Open Settings (UI)**.
 
+## Language server arguments
+
+`lsp.<server>.args` adds command-line arguments to a language server, after
+the ones croft starts it with. They apply the next time the server starts
+(the Restart Language Server command does it at once) and only from your own
+`config.json`, `config.synced.json` or `config.local.json`: a repository's
+layers cannot choose what a server is run with.
+
+```json
+{ "lsp": { "clangd": { "args": ["--background-index", "--query-driver=/usr/bin/*-g++"] } } }
+```
+
+clangd formats with the style in the project's `.clang-format`; for the files
+that have none, `--fallback-style=LLVM` (or `Google`, `Mozilla`, `WebKit`,
+`Microsoft`, `GNU`, or `file:<path>`) picks one.
+
 ## Project exclusions
 
 `files_exclude` and `search_exclude` are lists of globs, matched against
