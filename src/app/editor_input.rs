@@ -719,10 +719,9 @@ impl App {
             }
             return;
         }
-        // Column (box) selection from the keyboard (#1560): Shift+Alt arrows
-        // and PageUp/PageDown, Cmd+Shift+Opt (Ctrl+Shift+Alt) Up/Down and
-        // PageUp/PageDown, and plain Shift+arrows while Column Selection Mode
-        // is on. Ahead of the
+        // Column (box) selection from the keyboard (#1560): VS Code's
+        // Cmd+Shift+Opt (Ctrl+Shift+Alt) arrows and PageUp/PageDown, and
+        // plain Shift+arrows while Column Selection Mode is on. Ahead of the
         // multi-cursor collapse below, since the box is carets it keeps
         // growing, and of Add Cursor, which used to take the Up/Down chords
         // and leave one caret.
@@ -957,9 +956,14 @@ impl App {
             }
             return;
         }
-        // Copy Line Up/Down: Cmd/Ctrl+Shift+Up/Down. (Shift+Alt+arrows are
-        // Column Select, which VS Code's Linux default also gives them.)
-        if shift && cmd && !alt && matches!(key.code, KeyCode::Up | KeyCode::Down) {
+        // Copy Line Up/Down: Shift+Alt+Up/Down (VS Code's), or
+        // Cmd/Ctrl+Shift+Up/Down when `column_select_mode` is `shift_alt`,
+        // which gives Shift+Alt+arrows to Column Select.
+        let copy_line = match self.column_select_mode {
+            crate::prefs::ColumnSelectMode::VsCode => shift && alt,
+            crate::prefs::ColumnSelectMode::ShiftAlt => shift && cmd && !alt,
+        };
+        if copy_line && matches!(key.code, KeyCode::Up | KeyCode::Down) {
             match key.code {
                 KeyCode::Up => self.editor.duplicate_lines_up(),
                 KeyCode::Down => self.editor.duplicate_lines_down(),
@@ -967,10 +971,16 @@ impl App {
             }
             return;
         }
-        // Expand / Shrink Selection (#254): Cmd/Ctrl+Shift+Alt+Right/Left
-        // (VS Code's smart-select chords are Shift+Alt+Right/Left, which
-        // croft gives to Column Select).
-        if shift && alt && cmd && matches!(key.code, KeyCode::Left | KeyCode::Right) {
+        // Expand / Shrink Selection (#254): Shift+Alt+Right/Left, VS Code's
+        // smart-select chords. This deliberately claims what used to be
+        // word-wise selection extension — the same collision VS Code
+        // resolves the same way. With `column_select_mode` `shift_alt` the
+        // chord is Cmd/Ctrl+Shift+Alt+Right/Left instead.
+        let expand_chord = match self.column_select_mode {
+            crate::prefs::ColumnSelectMode::VsCode => shift && alt && !cmd,
+            crate::prefs::ColumnSelectMode::ShiftAlt => shift && alt && cmd,
+        };
+        if expand_chord && matches!(key.code, KeyCode::Left | KeyCode::Right) {
             if key.code == KeyCode::Right {
                 self.expand_selection();
             } else {
@@ -2739,24 +2749,26 @@ impl App {
         }
     }
 
-    /// The `(rows, cols)` a column-select key moves the box head (#1560):
-    /// Shift+Alt with an arrow moves one row or column and with
-    /// PageUp/PageDown one screen. Cmd/Ctrl+Shift+Alt keeps the vertical and
-    /// page keys (VS Code's Windows chord), but its Left/Right are Shrink /
-    /// Expand Selection. While Column Selection Mode is on, plain Shift does
-    /// the same as Shift+Alt. `None` for every other key.
+    /// The `(rows, cols)` a column-select key moves the box head (#1560): an
+    /// arrow moves one row or column and PageUp/PageDown one screen, on
+    /// Cmd/Ctrl+Shift+Alt (`column_select_mode` `vscode`, the default) or on
+    /// Shift+Alt (`shift_alt`), whose Cmd/Ctrl+Shift+Alt Up/Down and
+    /// PageUp/PageDown keep working while its Left/Right are Expand / Shrink
+    /// Selection. While Column Selection Mode is on, plain Shift does the
+    /// same. `None` for every other key.
     pub(super) fn column_select_key(&self, key: KeyEvent) -> Option<(isize, isize)> {
         let m = key.modifiers;
         let shift = m.contains(KeyModifiers::SHIFT);
         let alt = m.contains(KeyModifiers::ALT);
         let cmd = m.contains(KeyModifiers::SUPER) || m.contains(KeyModifiers::CONTROL);
-        let plain = shift && alt && !cmd;
+        let shift_alt = self.column_select_mode == crate::prefs::ColumnSelectMode::ShiftAlt;
+        let plain = shift_alt && shift && alt && !cmd;
         let chord = cmd && shift && alt;
         let mode = self.editor.column_selection_mode && shift && !cmd && !alt;
         if !plain && !chord && !mode {
             return None;
         }
-        if chord && matches!(key.code, KeyCode::Left | KeyCode::Right) {
+        if shift_alt && chord && matches!(key.code, KeyCode::Left | KeyCode::Right) {
             return None;
         }
         let page = self.editor.column_select_page();

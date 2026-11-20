@@ -87,6 +87,24 @@ pub enum MultilinePasteWarning {
     Never,
 }
 
+/// Which chords grow a column (box) selection and which run Expand / Shrink
+/// Selection and Copy Line (`column_select_mode`, #1560). The two schemes
+/// trade the same keys, so one setting switches them together.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ColumnSelectMode {
+    /// VS Code's: Cmd/Ctrl+Shift+Alt with the arrows and PageUp/PageDown
+    /// select a column; Shift+Alt+Right/Left expand and shrink the selection
+    /// and Shift+Alt+Up/Down copy the line.
+    #[default]
+    #[serde(rename = "vscode")]
+    VsCode,
+    /// Visual Studio's: Shift+Alt with the arrows and PageUp/PageDown select
+    /// a column; Expand / Shrink Selection move to Cmd/Ctrl+Shift+Alt
+    /// +Right/Left and Copy Line to Cmd/Ctrl+Shift+Up/Down.
+    #[serde(rename = "shift_alt")]
+    ShiftAlt,
+}
+
 /// Which of the Explorer's stacked sub-views are shown, toggled from the
 /// "Views and More Actions" (⋯) menu on the EXPLORER header. Mirrors VS Code's
 /// defaults: Open Editors hidden, every other view shown. Each field carries
@@ -466,6 +484,10 @@ pub struct Prefs {
     /// matching VS Code.
     #[serde(default)]
     pub copy_on_select: bool,
+    /// Which chords select a column, expand the selection and copy a line:
+    /// `"vscode"` (the default) or `"shift_alt"`; see [`ColumnSelectMode`].
+    #[serde(default)]
+    pub column_select_mode: ColumnSelectMode,
     /// Globs hidden from the Explorer, Go to File and Search (VS Code's
     /// `files.exclude`, #1345). Matched against workspace-relative paths;
     /// a folder's match hides everything inside it.
@@ -2218,6 +2240,25 @@ mod tests {
         assert!(
             Prefs::load_for_update(&path).unwrap().format_on_save,
             "JSONC reads"
+        );
+    }
+}
+
+#[cfg(test)]
+mod column_select_mode_tests {
+    use super::*;
+
+    #[test]
+    fn column_select_mode_reads_both_spellings_and_defaults_to_vscode() {
+        let parse = |s: &str| serde_json::from_str::<Prefs>(s).unwrap().column_select_mode;
+        assert_eq!(parse("{}"), ColumnSelectMode::VsCode);
+        assert_eq!(
+            parse(r#"{"column_select_mode":"vscode"}"#),
+            ColumnSelectMode::VsCode
+        );
+        assert_eq!(
+            parse(r#"{"column_select_mode":"shift_alt"}"#),
+            ColumnSelectMode::ShiftAlt
         );
     }
 }
