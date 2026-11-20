@@ -1,0 +1,1 @@
+perf(editor): The caret now blinks in the terminal (a blinking bar) instead of croft redrawing the whole screen twice a second, so an idle editor does no work at all. A terminal with its own cursor blink turned off shows a steady caret; `"software_cursor_blink": true` in `config.json` brings back croft's own blink.
