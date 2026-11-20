@@ -6636,6 +6636,15 @@ fn main_loop(app: &mut App, terminal: &mut CroftTerminal) -> Result<()> {
         .checked_sub(pty_min_interval)
         .unwrap_or_else(std::time::Instant::now);
 
+    // The poll below wakes the loop this often while something is going on
+    // (a key, a terminal, a background result); once the editor has been
+    // quiet for `IDLE_AFTER` it backs off to `IDLE_POLL`, because every wake
+    // runs the whole drain pass and an idle editor was burning ~6% of a core.
+    const ACTIVE_POLL: Duration = Duration::from_millis(8);
+    const IDLE_POLL: Duration = Duration::from_millis(40);
+    const IDLE_AFTER: Duration = Duration::from_millis(1500);
+    let mut last_activity = std::time::Instant::now();
+
     while !app.quit {
         iters_in_window += 1;
         if fps_window_start.elapsed() >= Duration::from_secs(1) {
@@ -6959,6 +6968,11 @@ fn main_loop(app: &mut App, terminal: &mut CroftTerminal) -> Result<()> {
             || dap_changed
             || markdown_lint_changed
             || sarif_diagnostics_changed;
+        // The cursor blink and a spinner tick alone are not activity: they
+        // fire while the editor idles and must not hold the fast poll.
+        if pty_pending || (non_pty_dirty && !blink_changed && !spinner_changed) {
+            last_activity = std::time::Instant::now();
+        }
         let pty_eligible = pty_pending
             && (app.peek_terminals_pending_bytes() <= PTY_SMALL_UPDATE_BYTES
                 || last_pty_redraw.elapsed() >= pty_min_interval);
@@ -7249,7 +7263,12 @@ fn main_loop(app: &mut App, terminal: &mut CroftTerminal) -> Result<()> {
         // this poll just decides how often we wake up to *check*.
         work_max_us = work_max_us.max(iter_start.elapsed().as_micros());
         let poll_start = std::time::Instant::now();
-        if event::poll(Duration::from_millis(8))? {
+        let poll_for = if last_activity.elapsed() < IDLE_AFTER {
+            ACTIVE_POLL
+        } else {
+            IDLE_POLL
+        };
+        if event::poll(poll_for)? {
             // Drain every event already queued so a click burst (Down + zero-
             // movement Drag + Up, all delivered in <50ms by the terminal)
             // coalesces into a single redraw. Otherwise each event triggers
