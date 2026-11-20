@@ -640,6 +640,13 @@ pub struct Prefs {
     /// default.
     #[serde(default)]
     pub screen_reader: bool,
+    /// Draw the caret blink inside croft (a full redraw twice a second)
+    /// instead of leaving it to the terminal's own blinking caret. Off by
+    /// default: the terminal blinks the caret, croft redraws nothing while
+    /// idle. Turn it on for a terminal whose "blinking cursor" setting is off
+    /// but where you still want a blink. User layers only.
+    #[serde(default)]
+    pub software_cursor_blink: bool,
     /// A speech program croft runs with each screen reader line as its last
     /// argument (`spd-say`, `say`). User layers only: it names a command.
     #[serde(default)]

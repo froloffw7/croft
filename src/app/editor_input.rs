@@ -2822,18 +2822,22 @@ impl App {
     }
 
     /// Make the terminal's caret match the typing mode: a block while the
-    /// editor has focus in overwrite mode, the steady bar croft runs with
-    /// otherwise. Emitted only when the wanted shape changes.
+    /// editor has focus in overwrite mode, a bar otherwise, and blinking
+    /// unless croft blinks it itself (`software_cursor_blink`) or a screen
+    /// reader wants it steady. Emitted only when the wanted style changes.
     pub(super) fn sync_caret_style(&mut self) {
-        let want_block = self.overwrite_mode && self.focus == Pane::Editor;
-        if want_block == self.caret_block_sent {
+        let block = self.overwrite_mode && self.focus == Pane::Editor;
+        let blinking = !self.software_cursor_blink && !self.screen_reader;
+        if (block, blinking) == self.caret_style_sent {
             return;
         }
-        self.caret_block_sent = want_block;
-        let style = if want_block {
-            crossterm::cursor::SetCursorStyle::SteadyBlock
-        } else {
-            crossterm::cursor::SetCursorStyle::SteadyBar
+        self.caret_style_sent = (block, blinking);
+        use crossterm::cursor::SetCursorStyle as S;
+        let style = match (block, blinking) {
+            (true, true) => S::BlinkingBlock,
+            (true, false) => S::SteadyBlock,
+            (false, true) => S::BlinkingBar,
+            (false, false) => S::SteadyBar,
         };
         let mut out = stdout();
         let _ = crossterm::execute!(out, style);
