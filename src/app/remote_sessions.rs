@@ -1395,7 +1395,7 @@ pub(super) fn run_pending_scp_uploads(app: &mut App, terminal: &mut CroftTermina
     }
     // The takeover block set the steady bar; the next draw puts the
     // overwrite block back if it is wanted.
-    app.caret_block_sent = false;
+    app.caret_style_sent = (false, false);
     terminal.clear().ok();
     app.overlays.activity.mark_dirty();
     app.overlays.welcome.mark_dirty();

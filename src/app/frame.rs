@@ -318,7 +318,9 @@ impl App {
     pub(super) fn cursor_visible_phase(&self) -> bool {
         // A screen reader follows the cursor; one that vanishes half the
         // time is lost half the time.
-        self.screen_reader || self.cursor_blink.visible_phase()
+        // Without `software_cursor_blink` the terminal blinks its own caret
+        // (see `sync_caret_style`), so the frame never changes to blink.
+        self.screen_reader || !self.software_cursor_blink || self.cursor_blink.visible_phase()
     }
 
     /// Croft Loch's seams: a hairline on each boundary between two surfaces,
