@@ -18,27 +18,27 @@ caret: row 3 col 43
 09|   ▏       │   code scanning                  off                                        default          │            |
 10|    ▏       │   codeql cli path                (default)                                  default          │            |
 11|   ▏       │   color depth                    (default)                                  default          │            |
-12|    ▏       │   config sync excluded files     []                                         default          │            |
-13|   ▏       │   config sync excluded hosts     []                                         default          │            |
-14|    ▏       │   copy on select                 false                                      default          │            |
-15|    ▏       │   default formatter              (default)                                  default          │            |
-16|    ▏       │   diff ignore whitespace         (default)                                  default          │            |
-17|    ▏       │   disable auto close pairs       false                                      default          │            |
-18|    ▏       │   disable bracket colors         false                                      default          │            |
-19|    ▏       │   disable compact folders        false                                      default          │            |
-20|    ▏       │   disable indent guides          false                                      default          │            |
-21|    ▏       │   disable inlay hints            false                                      default          │            |
-22|    ▏       │   disable inline blame           false                                      default          │    ━       |
-23|    ▏       │   disable inline values          false                                      default          │            |
-24|    ▏       │   disable log highlight          false                                      default          │▁▁▁▁▁▁▁▁▁▁▁▁|
-25|    ▏       │   disable paste reindent         false                                      default          │           |
-26|    ▏       │   disable proactive navigator    false                                      default          │▔▔▔Grouped▔▔|
-27|    ▏       │   disable quick suggestions      false                                      default          │            |
-28|    ▏       │   disable remote offer           false                                      default          │            |
-29|    ▏       │   disable save before debug      false                                      default          │            |
-30|    ▏       │   disable secret redaction       false                                      default          │            |
-31|    ▏       │   disabled extensions            []                                         default          │            |
-32|    ▏       │   explorer views                 {"agent_lane":true,"dependencies":true,"f… default          │            |
+12|    ▏       │   column select mode             vscode                                     default          │            |
+13|   ▏       │   config sync excluded files     []                                         default          │            |
+14|    ▏       │   config sync excluded hosts     []                                         default          │            |
+15|    ▏       │   copy on select                 false                                      default          │            |
+16|    ▏       │   default formatter              (default)                                  default          │            |
+17|    ▏       │   diff ignore whitespace         (default)                                  default          │            |
+18|    ▏       │   disable auto close pairs       false                                      default          │            |
+19|    ▏       │   disable bracket colors         false                                      default          │            |
+20|    ▏       │   disable compact folders        false                                      default          │            |
+21|    ▏       │   disable indent guides          false                                      default          │            |
+22|    ▏       │   disable inlay hints            false                                      default          │    ━       |
+23|    ▏       │   disable inline blame           false                                      default          │            |
+24|    ▏       │   disable inline values          false                                      default          │▁▁▁▁▁▁▁▁▁▁▁▁|
+25|    ▏       │   disable log highlight          false                                      default          │           |
+26|    ▏       │   disable paste reindent         false                                      default          │▔▔▔Grouped▔▔|
+27|    ▏       │   disable proactive navigator    false                                      default          │            |
+28|    ▏       │   disable quick suggestions      false                                      default          │            |
+29|    ▏       │   disable remote offer           false                                      default          │            |
+30|    ▏       │   disable save before debug      false                                      default          │            |
+31|    ▏       │   disable secret redaction       false                                      default          │            |
+32|    ▏       │   disabled extensions            []                                         default          │            |
 33|    ▏       └──────────────────────────────────────────────────────────────────────────────────────────────┘            |
 34|   ▏▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▕                                                                                    |
 35|    ▏ OUTLINE                     ▕                                                                                    |
