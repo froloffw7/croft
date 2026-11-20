@@ -1525,6 +1525,32 @@ fn sticky_scroll_pins_the_name_line_of_a_decorated_definition() {
     assert!(app.build_sticky_lines().is_empty());
 }
 
+/// `namespace wf::switcher {` is two nested symbols (`wf` holding `switcher`)
+/// on one line; sticky scroll pins that line once, not twice.
+#[test]
+fn sticky_scroll_pins_a_nested_namespace_header_once() {
+    use crate::lsp::manager::OutlineKind;
+    let tmp = tempfile::tempdir().unwrap();
+    let f = tmp.path().join("switcher.cpp");
+    std::fs::write(&f, "x\n").unwrap();
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    app.editor.open(&f).unwrap();
+    // `namespace wf::switcher {` on line 10 gives `wf` and `switcher` on it;
+    // `class word_switcher` on 30 sits inside, and a method inside that.
+    let mut wf = sym("wf", OutlineKind::Namespace, 0, 10, 200);
+    wf.line = 10;
+    let mut switcher = sym("switcher", OutlineKind::Namespace, 1, 10, 200);
+    switcher.line = 10;
+    let mut class = sym("word_switcher", OutlineKind::Class, 2, 30, 190);
+    class.line = 30;
+    let mut method = sym("on_key", OutlineKind::Method, 3, 161, 180);
+    method.line = 161;
+    app.outline
+        .set_symbols(f.clone(), vec![wf, switcher, class, method]);
+    app.editor.scroll = 170;
+    assert_eq!(app.build_sticky_lines(), vec![10, 30, 161]);
+}
+
 #[test]
 fn minimap_edit_rebakes_in_place_but_a_moved_strip_arms_the_clear() {
     // Issue: every keystroke bumped `edit_seq`, the minimap layout signature

@@ -1354,12 +1354,17 @@ impl App {
         }
         let top = self.editor.scroll as u32;
         let symbols = self.outline.symbols();
-        breadcrumb_symbol_chain(symbols, top, 0)
+        // One row per header line: `namespace a::b {` comes from a server as
+        // two nested symbols (`a` holding `b`) that name the same line, which
+        // would pin it twice.
+        let mut lines: Vec<u32> = breadcrumb_symbol_chain(symbols, top, 0)
             .into_iter()
             .map(|i| symbols[i].line)
             .filter(|&l| l < top)
-            .take(STICKY_SCROLL_MAX)
-            .collect()
+            .collect();
+        lines.dedup();
+        lines.truncate(STICKY_SCROLL_MAX);
+        lines
     }
 
     /// Keep the OUTLINE in sync with the active editor: request fresh symbols
