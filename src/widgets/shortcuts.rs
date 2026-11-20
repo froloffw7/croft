@@ -847,13 +847,13 @@ pub const SHORTCUT_GROUPS: &[ShortcutGroup] = &[
                 handler: "",
             },
             ShortcutEntry {
-                keys: "Shift+Opt+Left / Right / Up / Down / PageUp / PageDown",
-                description: "Column Select with the keyboard (Cmd/Ctrl+Shift+Opt with Up / Down / PageUp / PageDown also works)",
+                keys: "Shift+Opt+Cmd/Ctrl+Left / Right / Up / Down / PageUp / PageDown",
+                description: "Column Select with the keyboard (column_select_mode: shift_alt moves it to Shift+Opt+arrows)",
                 handler: "",
             },
             ShortcutEntry {
-                keys: "Cmd/Ctrl+Shift+Opt+Right / Left",
-                description: "Expand / Shrink Selection to the next syntactic range",
+                keys: "Shift+Alt+Right / Left",
+                description: "Expand / Shrink Selection to the next syntactic range (Cmd/Ctrl+Shift+Alt with shift_alt)",
                 handler: "",
             },
             ShortcutEntry {
