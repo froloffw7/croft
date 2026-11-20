@@ -1,0 +1,1 @@
+fix(editor): sticky scroll pins `namespace a::b {` once instead of twice: a language server reports it as two nested symbols on the same line, and the pinned header rows now skip a line that is already pinned.
