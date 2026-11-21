@@ -496,6 +496,12 @@ pub struct Editor {
     /// through a paragraph that wraps to more rows than the pane is tall.
     /// Always 0 outside wrap mode.
     scroll_sub: usize,
+    /// The wheel / scrollbar moved the view since the app last measured the
+    /// sticky band, dragging the caret to the old band's floor. The band can
+    /// grow as the new top enters another scope, so the caret is nudged down
+    /// to the new floor rather than the view back up (see
+    /// `App::keep_caret_below_sticky`).
+    pub view_scrolled: bool,
     /// Cached total visual-row counts for soft-wrap, one `(width, total)` entry
     /// per width probed this frame (the renderer tests both the wide and the
     /// vbar-narrowed width, so a single slot would thrash). Cleared when the
@@ -1169,6 +1175,7 @@ impl Editor {
             provenance_overlay: false,
             scroll: 0,
             scroll_sub: 0,
+            view_scrolled: false,
             wrap_total_cache: Vec::new(),
             scroll_col: 0,
             cursor_row: 0,

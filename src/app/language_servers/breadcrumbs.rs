@@ -336,6 +336,20 @@ impl App {
         if self.editor.wrap_enabled() || self.editor.has_non_text_view() {
             return;
         }
+        let wheel = std::mem::take(&mut self.editor.view_scrolled);
+        // The wheel moved the view and dragged the caret to the floor of the
+        // band as it was a frame ago. If the new top entered another scope
+        // the band is now taller; push the caret down to the new floor
+        // instead of scrolling the view back up, which undid every wheel tick
+        // at that boundary and stuck the scroll.
+        if wheel {
+            let band = self.build_sticky_lines().len();
+            let top = self.editor.scroll;
+            if band > 0 && self.editor.cursor_row < top + band {
+                self.editor.drag_caret_to_row(top + band);
+            }
+            return;
+        }
         let caret = self.editor.cursor_row;
         for _ in 0..4 {
             let band = self.build_sticky_lines().len();
