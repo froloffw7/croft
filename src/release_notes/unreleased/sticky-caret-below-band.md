@@ -1,0 +1,1 @@
+fix(editor): moving the caret up no longer eats the sticky scroll band: the view scrolls to keep the caret just below the pinned headers, so Up, PageUp and jumps leave the band whole instead of shrinking it row by row until it vanishes.
