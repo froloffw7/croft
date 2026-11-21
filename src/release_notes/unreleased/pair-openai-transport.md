@@ -1,0 +1,1 @@
+feat(pair): the local navigator also speaks the OpenAI wire: an endpoint with no `/v1/messages` route (FastFlowLM and others) is retried on `/v1/chat/completions` and remembered for the session; `CROFT_PAIR_API=openai` or `anthropic` pins the choice.

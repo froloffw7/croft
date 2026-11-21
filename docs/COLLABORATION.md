@@ -192,6 +192,12 @@ croft pair --provider ollama --model qwen3-coder:30b          # Ollama on localh
 croft pair --base-url http://box:8080 --model qwen3-coder:30b # any compatible server (implies ollama)
 ```
 
+A server that only speaks the OpenAI wire (FastFlowLM, which runs models on AMD NPUs, and others)
+needs nothing extra: when `/v1/messages` answers a plain 404 ("Not Found", no model named in the
+body), croft retries the turn on `/v1/chat/completions` and remembers that for the session.
+`CROFT_PAIR_API=openai` (or `anthropic`) pins the wire and skips the probe. Reasoning models'
+`reasoning_content` is ignored; only the answer is fenced.
+
 Local turns go straight to `/v1/messages` with a minimal payload (the claude CLI's ~213 KB
 tool-schema prefill is exactly what local servers choke on), and the badge names who is typing:
 `◆ claude (qwen3-coder:30b) seated`.
