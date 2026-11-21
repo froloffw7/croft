@@ -583,7 +583,7 @@ croft pair --base-url http://box:8080 --model qwen3-coder:30b   # implies ollama
   response drains and applies nothing.
 - **Dead endpoint**: that turn fails (the status names the URL) and the seat
   stays; the next ask retries.
-- **Badge**: `◆ claude (qwen3-coder:30b) seated`.
+- **Badge**: `◆ local (qwen3-coder:30b) seated`.
 - **Auth**: keyed gateways read `ANTHROPIC_AUTH_TOKEN` from croft's
   environment. It is sent as `Authorization: Bearer` (Anthropic's convention
   for that variable) and mirrored into `x-api-key` for gateways of the other
