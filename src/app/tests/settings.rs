@@ -2497,3 +2497,31 @@ fn vscode_line_numbers_setting_applies() {
         assert_eq!(app.line_numbers, want, "{value}");
     }
 }
+
+/// `column_select_mode` is a choice: Enter in the Settings editor flips it
+/// and it is saved, also when `config.json` has no such key yet.
+#[test]
+fn enter_flips_column_select_mode_and_saves_it_when_config_json_lacks_the_key() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = tempfile::tempdir().unwrap();
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    app.config_dir = cfg.path().to_path_buf();
+    app.open_settings_editor();
+    let ed = app.settings_editor.as_mut().unwrap();
+    ed.set_query(String::from("column_select_mode"));
+    app.handle_settings_editor_key(crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Enter,
+        crossterm::event::KeyModifiers::NONE,
+    ));
+    assert_eq!(
+        app.column_select_mode,
+        crate::prefs::ColumnSelectMode::ShiftAlt,
+        "{}",
+        app.status
+    );
+    let text = std::fs::read_to_string(app.user_settings_dir().join("config.json")).unwrap();
+    assert!(
+        text.contains("\"column_select_mode\": \"shift_alt\""),
+        "{text}"
+    );
+}
