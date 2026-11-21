@@ -291,6 +291,77 @@ fn serve_http_once(resp: String) -> (String, std::thread::JoinHandle<()>) {
     (base_url, server)
 }
 
+/// A multi-request HTTP stub for a server that speaks only the OpenAI wire:
+/// `/v1/messages` is a route-level 404, `/v1/chat/completions` streams
+/// `deltas` in OpenAI SSE and ends with `[DONE]`. Serves `connections`
+/// requests, recording each request line's path.
+fn serve_openai_only(
+    deltas: Vec<&'static str>,
+    connections: usize,
+) -> (
+    String,
+    std::sync::Arc<Mutex<Vec<String>>>,
+    std::thread::JoinHandle<()>,
+) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let paths = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let seen = paths.clone();
+    let mut sse = String::new();
+    for d in deltas {
+        let ev = json!({ "choices": [{ "index": 0, "delta": { "content": d } }] });
+        sse.push_str(&format!("data: {ev}\n\n"));
+    }
+    let fin = json!({ "choices": [{ "index": 0, "delta": {}, "finish_reason": "stop" }] });
+    sse.push_str(&format!("data: {fin}\n\ndata: [DONE]\n\n"));
+    let server = std::thread::spawn(move || {
+        for _ in 0..connections {
+            let (mut sock, _) = listener.accept().unwrap();
+            let mut req = Vec::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                let n = sock.read(&mut buf).unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                req.extend_from_slice(&buf[..n]);
+                let text = String::from_utf8_lossy(&req).to_ascii_lowercase();
+                if let Some(head_end) = text.find("\r\n\r\n") {
+                    let len = text[..head_end]
+                        .lines()
+                        .find_map(|l| l.strip_prefix("content-length:"))
+                        .and_then(|v| v.trim().parse::<usize>().ok())
+                        .unwrap_or(0);
+                    if req.len() >= head_end + 4 + len {
+                        break;
+                    }
+                }
+            }
+            let text = String::from_utf8_lossy(&req).into_owned();
+            let path = text
+                .lines()
+                .next()
+                .and_then(|l| l.split_whitespace().nth(1))
+                .unwrap_or("")
+                .to_string();
+            seen.lock().unwrap().push(path.clone());
+            let resp = if path == "/v1/chat/completions" {
+                format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\
+                     connection: close\r\n\r\n{sse}"
+                )
+            } else {
+                String::from(
+                    "HTTP/1.1 404 Not Found\r\ncontent-type: application/json\r\n\
+                     connection: close\r\n\r\n{\"error\":\"Not Found\"}",
+                )
+            };
+            let _ = sock.write_all(resp.as_bytes());
+        }
+    });
+    (base_url, paths, server)
+}
+
 /// A guest PairState over the harness relay plus the same pump thread
 /// the seated pilot runs (bootstraps only land when someone polls).
 fn pumped_state(
@@ -2882,4 +2953,59 @@ fn compose_turn_always_names_target_file() {
     let noted = with_pending_note(Some("stream was cancelled".into()), "task".into());
     assert!(noted.starts_with("stream was cancelled"));
     assert!(noted.contains("task"));
+}
+
+/// An endpoint with no `/v1/messages` route (FastFlowLM) is switched to the
+/// OpenAI wire on the spot: the 404 is probed once, the fenced edit streams
+/// through `/v1/chat/completions`, and the next turn skips the probe.
+#[test]
+fn an_openai_only_endpoint_is_reached_through_chat_completions() {
+    let harness = OwnerHarness::start("hello world");
+    let (state, stop, pump) = pumped_state(&harness);
+    let (base_url, paths, server) = serve_openai_only(
+        vec![
+            "<<<EDIT demo.txt:0:6-0:11>",
+            ">>\n",
+            "openai",
+            "\n<<<END>>>\n",
+        ],
+        3,
+    );
+    let (turn_tx, turn_rx) = std::sync::mpsc::channel();
+    let mut messages = vec![json!({ "role": "user", "content": "fix demo.txt" })];
+    local::stream_turn(
+        &base_url,
+        "test-model",
+        PAIR_SYSTEM_PROMPT,
+        &mut messages,
+        &state,
+        &turn_tx,
+    );
+    harness.wait_until("the OpenAI-wire edit to converge", |h| {
+        h.doc().as_deref() == Some("hello openai")
+    });
+    let end = turn_rx.try_recv().expect("turn ended");
+    assert!(!end.is_error, "{}", end.text);
+    assert_eq!(messages.len(), 2, "assistant reply appended");
+    // A second turn goes straight to the OpenAI route.
+    messages.push(json!({ "role": "user", "content": "again" }));
+    local::stream_turn(
+        &base_url,
+        "test-model",
+        PAIR_SYSTEM_PROMPT,
+        &mut messages,
+        &state,
+        &turn_tx,
+    );
+    server.join().unwrap();
+    assert_eq!(
+        *paths.lock().unwrap(),
+        vec![
+            "/v1/messages",
+            "/v1/chat/completions",
+            "/v1/chat/completions"
+        ]
+    );
+    stop.store(true, Ordering::Relaxed);
+    pump.join().unwrap();
 }

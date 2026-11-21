@@ -6,6 +6,12 @@
 //! text delta — the fence machine, the apply path, notes, cancel — is the
 //! shared pair machinery; only the transport differs. The endpoint is
 //! stateless, so the caller owns the conversation as a message list.
+//!
+//! Servers that only speak the OpenAI wire (FastFlowLM, which runs models on
+//! AMD NPUs, and others) are reached through `/v1/chat/completions`: an
+//! endpoint whose `/v1/messages` answers a route-level 404 is switched over
+//! on the spot and remembered for the session, and `CROFT_PAIR_API=openai`
+//! (or `anthropic`) pins the choice.
 
 use std::sync::Mutex;
 use std::sync::mpsc::Sender;
@@ -18,6 +24,40 @@ use super::{FenceMachine, PairState, TurnEnd, apply_fence_event};
 /// Ceiling for one turn's reply; fenced edits are short, and local servers
 /// reject nothing under their context limit.
 const MAX_TOKENS: u64 = 8192;
+
+/// Which wire a local endpoint speaks.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Api {
+    /// `POST /v1/messages` (Anthropic), `message_stop`-terminated SSE.
+    Anthropic,
+    /// `POST /v1/chat/completions` (OpenAI), `[DONE]`-terminated SSE.
+    OpenAi,
+}
+
+/// Endpoints whose `/v1/messages` was a route-level 404 this session; their
+/// turns go straight to `/v1/chat/completions`.
+static OPENAI_ENDPOINTS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// `CROFT_PAIR_API`: `openai` or `anthropic` pins the wire; anything else
+/// (or unset) leaves it to the 404 probe.
+fn pinned_api() -> Option<Api> {
+    match std::env::var("CROFT_PAIR_API")
+        .ok()?
+        .to_lowercase()
+        .as_str()
+    {
+        "openai" => Some(Api::OpenAi),
+        "anthropic" => Some(Api::Anthropic),
+        _ => None,
+    }
+}
+
+/// Whether a 404 means "this server has no such route" rather than "the
+/// route exists and the model does not" (Ollama's `model 'x' not found`,
+/// whose body names the fix and must reach the user).
+fn is_missing_route(status: u16, body: &str) -> bool {
+    status == 404 && !body.to_lowercase().contains("model")
+}
 
 /// The auth headers for `base_url`: `(x-api-key value, Authorization
 /// value)`. Keyed Anthropic-compatible gateways read the environment token
@@ -94,13 +134,6 @@ pub(crate) fn stream_turn_until(
     turn_tx: &Sender<TurnEnd>,
     deadline: std::time::Instant,
 ) {
-    let req = json!({
-        "model": model,
-        "max_tokens": MAX_TOKENS,
-        "stream": true,
-        "system": system,
-        "messages": messages,
-    });
     // ureq 3 here, not the tree-wide ureq 2: version 3's phased timeouts
     // check the remaining budget before EVERY socket operation, so the
     // per-request global timeout below enforces the turn deadline at the
@@ -124,22 +157,91 @@ pub(crate) fn stream_turn_until(
         .new_agent();
     let token = std::env::var("ANTHROPIC_AUTH_TOKEN").ok();
     let (api_key, bearer) = auth_for(base_url, token.as_deref());
-    let mut post = agent
-        .post(format!("{base_url}/v1/messages"))
-        .config()
-        // The whole exchange (headers, cold-model wait, every body read)
-        // shares the turn's remaining wall-clock budget.
-        .timeout_global(Some(
-            deadline.saturating_duration_since(std::time::Instant::now()),
-        ))
-        .build()
-        .header("content-type", "application/json")
-        .header("anthropic-version", "2023-06-01")
-        .header("x-api-key", &api_key);
-    if let Some(bearer) = &bearer {
-        post = post.header("authorization", bearer);
+    let send = |api: Api| {
+        let (path, req) = match api {
+            Api::Anthropic => (
+                "/v1/messages",
+                json!({
+                    "model": model,
+                    "max_tokens": MAX_TOKENS,
+                    "stream": true,
+                    "system": system,
+                    "messages": messages,
+                }),
+            ),
+            Api::OpenAi => {
+                let mut all = vec![json!({ "role": "system", "content": system })];
+                all.extend(messages.iter().cloned());
+                (
+                    "/v1/chat/completions",
+                    json!({
+                        "model": model,
+                        "max_tokens": MAX_TOKENS,
+                        "stream": true,
+                        "messages": all,
+                    }),
+                )
+            }
+        };
+        let mut post = agent
+            .post(format!("{base_url}{path}"))
+            .config()
+            // The whole exchange (headers, cold-model wait, every body read)
+            // shares the turn's remaining wall-clock budget.
+            .timeout_global(Some(
+                deadline.saturating_duration_since(std::time::Instant::now()),
+            ))
+            .build()
+            .header("content-type", "application/json");
+        if api == Api::Anthropic {
+            post = post
+                .header("anthropic-version", "2023-06-01")
+                .header("x-api-key", &api_key);
+        }
+        if let Some(bearer) = &bearer {
+            post = post.header("authorization", bearer);
+        }
+        post.send(req.to_string())
+    };
+    let pinned = pinned_api();
+    let mut api = pinned.unwrap_or_else(|| {
+        if OPENAI_ENDPOINTS
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|u| u == base_url)
+        {
+            Api::OpenAi
+        } else {
+            Api::Anthropic
+        }
+    });
+    let mut result = send(api);
+    // An endpoint with no `/v1/messages` route: try the OpenAI wire once and
+    // remember the answer, unless the wire was pinned.
+    if pinned.is_none() && api == Api::Anthropic {
+        result = match result {
+            Ok(mut r) if r.status().as_u16() == 404 => {
+                let body = r.body_mut().read_to_string().unwrap_or_default();
+                if is_missing_route(404, &body) {
+                    OPENAI_ENDPOINTS.lock().unwrap().push(base_url.to_string());
+                    api = Api::OpenAi;
+                    send(api)
+                } else {
+                    messages.pop();
+                    end_turn(
+                        state,
+                        turn_tx,
+                        true,
+                        format!("local endpoint {base_url}: {}", status_detail(404, &body)),
+                    );
+                    return;
+                }
+            }
+            other => other,
+        };
     }
-    let resp = match post.send(req.to_string()) {
+    let resp = match result {
         Ok(r) => r,
         Err(e) => {
             // The endpoint never answered the turn: pop the user message so
@@ -245,6 +347,39 @@ pub(crate) fn stream_turn_until(
                 stream_error = Some(String::from("endpoint sent malformed SSE data"));
                 break 'stream;
             };
+            if api == Api::OpenAi {
+                if let Some(err) = v["error"].as_object() {
+                    let msg = err.get("message").and_then(Value::as_str);
+                    stream_error = Some(msg.unwrap_or("stream error").to_string());
+                    break 'stream;
+                }
+                let choice = &v["choices"][0];
+                // Reasoning models stream `reasoning_content` apart from the
+                // answer; only the answer reaches the fence machine.
+                if let Some(text) = choice["delta"]["content"].as_str()
+                    && !text.is_empty()
+                {
+                    assistant.push_str(text);
+                    for event in fence.push(text) {
+                        apply_fence_event(state, event);
+                    }
+                }
+                match choice["finish_reason"].as_str() {
+                    Some("length") => {
+                        truncated = true;
+                        clean_end = true;
+                        break 'stream;
+                    }
+                    // Some servers close without `[DONE]`: a finish reason
+                    // is the end of the reply.
+                    Some(_) => {
+                        clean_end = true;
+                        break 'stream;
+                    }
+                    None => {}
+                }
+                continue;
+            }
             match v["type"].as_str().unwrap_or("") {
                 "content_block_delta" => {
                     if v["delta"]["type"] == "text_delta"
@@ -280,7 +415,10 @@ pub(crate) fn stream_turn_until(
     } else if truncated {
         Some(format!("reply truncated at the {MAX_TOKENS}-token limit"))
     } else if !clean_end {
-        Some(String::from("stream ended before message_stop"))
+        Some(String::from(match api {
+            Api::Anthropic => "stream ended before message_stop",
+            Api::OpenAi => "stream ended before [DONE]",
+        }))
     } else if assistant.is_empty() {
         // An empty assistant message is itself a 400 on the next turn.
         Some(String::from("endpoint streamed no text"))
