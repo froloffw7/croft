@@ -1,0 +1,1 @@
+feat(pair): a navigator seated on a local endpoint wears the caret name `local` by default instead of `claude`, so `◆ local (qwen3-coder:30b)` no longer reads as the cloud CLI; a name chosen with `--name` is kept, and switching back to the claude CLI restores `claude`.

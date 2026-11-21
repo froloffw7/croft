@@ -194,4 +194,4 @@ croft pair --base-url http://box:8080 --model qwen3-coder:30b # any compatible s
 
 Local turns go straight to `/v1/messages` with a minimal payload (the claude CLI's ~213 KB
 tool-schema prefill is exactly what local servers choke on), and the badge names who is typing:
-`◆ claude (qwen3-coder:30b) seated`.
+`◆ local (qwen3-coder:30b) seated`.
