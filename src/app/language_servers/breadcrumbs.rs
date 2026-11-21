@@ -324,6 +324,28 @@ impl App {
             .take(STICKY_SCROLL_MAX)
             .collect()
     }
+
+    /// Keep the caret out from under the sticky band. The band is made of the
+    /// headers above the top line, so a caret that reaches the top rows
+    /// (Up/PgUp, a jump) would otherwise be painted over, and the band would
+    /// have to shrink row by row, then vanish, to leave it visible. Scroll
+    /// further up instead, until the caret sits just below the band; the band
+    /// is re-measured at each new top, since scrolling up can change which
+    /// headers are above it.
+    pub(in crate::app) fn keep_caret_below_sticky(&mut self) {
+        if self.editor.wrap_enabled() || self.editor.has_non_text_view() {
+            return;
+        }
+        let caret = self.editor.cursor_row;
+        for _ in 0..4 {
+            let band = self.build_sticky_lines().len();
+            let top = self.editor.scroll;
+            if band == 0 || (caret >= top + band && caret >= top) {
+                return;
+            }
+            self.editor.scroll = caret.saturating_sub(band);
+        }
+    }
 }
 
 /// The breadcrumb scope chain for the caret at (`line`, `col`): the indices
