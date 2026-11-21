@@ -2816,3 +2816,39 @@ fn a_crowded_tab_strip_offers_a_list_of_all_open_tabs() {
         "the picked tab is on screen"
     );
 }
+
+/// Moving the caret up into the rows the sticky band would cover scrolls the
+/// view up to keep it below the band, instead of shrinking the band row by
+/// row until it is gone (Up, PgUp).
+#[test]
+fn the_caret_stays_below_the_sticky_band_when_it_moves_up_into_it() {
+    use crate::lsp::manager::OutlineKind;
+    let tmp = tempfile::tempdir().unwrap();
+    let f = tmp.path().join("switcher.cpp");
+    let text: String = (0..300).map(|i| format!("l{i}\n")).collect();
+    std::fs::write(&f, text).unwrap();
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    app.editor.open(&f).unwrap();
+    let mut wf = sym("wf", OutlineKind::Namespace, 0, 10, 290);
+    wf.line = 10;
+    let mut class = sym("word_switcher", OutlineKind::Class, 1, 30, 280);
+    class.line = 30;
+    let mut method = sym("on_key", OutlineKind::Method, 2, 161, 270);
+    method.line = 161;
+    app.outline.set_symbols(f.clone(), vec![wf, class, method]);
+    app.editor.scroll = 170;
+    app.editor.cursor_row = 171;
+    app.keep_caret_below_sticky();
+    assert_eq!(app.build_sticky_lines().len(), 3, "the band stays whole");
+    assert!(
+        app.editor.cursor_row >= app.editor.scroll + 3,
+        "caret {} must sit below the band at scroll {}",
+        app.editor.cursor_row,
+        app.editor.scroll
+    );
+    // Already clear of the band: nothing moves.
+    app.editor.scroll = 170;
+    app.editor.cursor_row = 200;
+    app.keep_caret_below_sticky();
+    assert_eq!(app.editor.scroll, 170);
+}
