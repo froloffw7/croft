@@ -735,6 +735,7 @@ impl Editor {
         }
         self.cursor_col = self.cursor_col.min(self.line_char_len(self.cursor_row));
         self.end_caret_action();
+        self.view_scrolled = true;
     }
 
     pub(super) fn scroll_view_to(&mut self, top: usize) {
@@ -766,6 +767,15 @@ impl Editor {
         } else if self.cursor_row > last_visible {
             self.cursor_row = last_visible;
         }
+        self.cursor_col = self.cursor_col.min(self.line_char_len(self.cursor_row));
+        self.end_caret_action();
+        self.view_scrolled = true;
+    }
+
+    /// Move the caret onto `row` (the last line when it is past the end),
+    /// keeping its column as far along as that line goes.
+    pub fn drag_caret_to_row(&mut self, row: usize) {
+        self.cursor_row = row.min(self.lines.len().saturating_sub(1));
         self.cursor_col = self.cursor_col.min(self.line_char_len(self.cursor_row));
         self.end_caret_action();
     }
