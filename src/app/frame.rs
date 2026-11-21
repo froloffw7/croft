@@ -809,6 +809,7 @@ impl App {
             self.editor.breadcrumbs = self.build_breadcrumbs();
             // Sticky scroll: recompute the pinned scope headers from the top
             // visible line each frame so they track scrolling.
+            self.keep_caret_below_sticky();
             self.editor.sticky_lines = self.build_sticky_lines();
             // Multiplayer ghost carets: other participants' parked carets in
             // the active file, in their colors. The current typist's caret is
