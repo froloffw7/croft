@@ -3001,6 +3001,19 @@ fn the_caret_stays_below_the_sticky_band_when_it_moves_up_into_it() {
         app.editor.cursor_row,
         app.editor.scroll
     );
+    // A wheel scroll dragged the caret to the floor of the band as it was a
+    // frame ago; the new top has a taller band. The caret goes down to the
+    // new floor and the view stays where the wheel put it.
+    app.editor.scroll = 170;
+    app.editor.cursor_row = 172;
+    app.editor.view_scrolled = true;
+    app.keep_caret_below_sticky();
+    assert_eq!(app.editor.scroll, 170, "the wheel's position is kept");
+    assert_eq!(
+        app.editor.cursor_row, 173,
+        "caret nudged below the 3-row band"
+    );
+    assert!(!app.editor.view_scrolled);
     // Already clear of the band: nothing moves.
     app.editor.scroll = 170;
     app.editor.cursor_row = 200;
