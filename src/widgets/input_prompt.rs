@@ -605,6 +605,7 @@ pub fn render_input_prompt(
                 .fg(theme.ui(Color::Rgb(0x6c, 0x7d, 0x9c)))
                 .add_modifier(Modifier::ITALIC),
         );
+        prompt.last_caret = Some((inner.x, value_y));
     } else {
         let shown = if prompt.masked {
             "•".repeat(prompt.value.chars().count())
@@ -619,20 +620,21 @@ pub fn render_input_prompt(
         let before: String = shown.chars().skip(skip).take(cursor - skip).collect();
         let at: String = shown.chars().skip(cursor).take(1).collect();
         let after: String = shown.chars().skip(cursor + 1).collect();
-        let caret = if at.is_empty() { " ".to_string() } else { at };
         let mut value_style = Style::default().fg(theme.ui(Color::Rgb(0xec, 0xef, 0xf4)));
         if prompt.selected {
             value_style = value_style.bg(theme.ui(Color::Rgb(0x26, 0x4f, 0x78)));
         }
-        let caret_style = Style::default()
-            .fg(theme.ui(Color::Rgb(0x16, 0x18, 0x1f)))
-            .bg(theme.ui(Color::Rgb(0xec, 0xef, 0xf4)))
-            .add_modifier(Modifier::SLOW_BLINK);
+        // The terminal's own caret marks the position (`last_caret`): a
+        // painted block on top of it, and the editor's caret still blinking
+        // behind the box, were three carets for one field.
+        let lead_cells = u16::from(lead);
+        let caret_x = inner.x + lead_cells + u16::try_from(before.width()).unwrap_or(u16::MAX);
+        prompt.last_caret = Some((caret_x.min(inner.right().saturating_sub(1)), value_y));
         let dim = Style::default().fg(theme.ui(Color::Rgb(0x6c, 0x7d, 0x9c)));
         let line = Line::from(vec![
             Span::styled(if lead { "\u{2026}" } else { "" }, dim),
             Span::styled(before, value_style),
-            Span::styled(caret, caret_style),
+            Span::styled(at, value_style),
             Span::styled(after, value_style),
         ]);
         Widget::render(
@@ -935,10 +937,9 @@ mod tests {
             "field is {}",
             right - left
         );
-        let caret = (left..right)
-            .find(|&x| buf[(x, r.y + 1)].modifier.contains(Modifier::SLOW_BLINK))
-            .expect("caret drawn inside the field");
-        assert!(caret < right);
+        let (caret, cy) = p.last_caret.expect("terminal caret inside the field");
+        assert_eq!(cy, r.y + 1);
+        assert!((left..right).contains(&caret));
         assert_eq!(buf[(left, r.y + 1)].symbol(), "\u{2026}");
         p.move_cursor_home();
         assert!(value_row(&mut p, 50).starts_with('\u{4e2d}'));

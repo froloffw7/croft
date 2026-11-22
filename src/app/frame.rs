@@ -295,11 +295,16 @@ impl App {
     /// own caret block in the query; no pane's caret shows there either
     /// (#2669).
     pub(super) fn quick_input_owns_caret(&self) -> bool {
-        self.theme.surfaces().is_some()
-            && (self.command_palette.is_some()
-                || self.file_finder.is_some()
-                || self.list_picker.is_some()
-                || self.input_prompt.is_some())
+        // The one-line input prompt hands the terminal's caret to its field
+        // on every theme; the other quick inputs only on a `surfaces` one.
+        self.input_prompt
+            .as_ref()
+            .is_some_and(|p| p.last_caret.is_some())
+            || (self.theme.surfaces().is_some()
+                && (self.command_palette.is_some()
+                    || self.file_finder.is_some()
+                    || self.list_picker.is_some()
+                    || self.input_prompt.is_some()))
     }
 
     /// Where the terminal's caret goes while a quick input is open: the

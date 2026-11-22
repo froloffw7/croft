@@ -308,23 +308,9 @@ impl Editor {
                 Span::styled("\u{2570} ", accent),
                 Span::styled("\u{276f} ", accent),
             ];
-            match focus {
-                Some(f) if field_w > 0 && f.cursor - win < field_w => {
-                    // Split the draft around the caret cell so it shows.
-                    let cursor = f.cursor - win;
-                    let chars: Vec<char> = draft.chars().collect();
-                    let before: String = chars[..cursor].iter().collect();
-                    let at: String = chars[cursor..=cursor].iter().collect();
-                    let after: String = chars[cursor + 1..].iter().collect();
-                    spans.push(Span::styled(before, style));
-                    spans.push(Span::styled(
-                        at,
-                        style.add_modifier(ratatui::style::Modifier::REVERSED),
-                    ));
-                    spans.push(Span::styled(after, style));
-                }
-                _ => spans.push(Span::styled(draft, style)),
-            }
+            // The terminal's own caret marks the position (see
+            // `comment_caret`); painting a block as well drew two.
+            spans.push(Span::styled(draft, style));
             spans.push(Span::styled(" \u{2715} Ignore ", accent));
             spans.push(Span::styled("\u{256f}", accent));
             Line::from(spans)
