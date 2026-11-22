@@ -974,6 +974,7 @@ impl App {
                     }
                 }
             }
+            self.editor.comment_waiting = self.reply_waiting;
             // Drafts of boxes that no longer exist go with them.
             {
                 let ids: Vec<u64> = self.editor.comment_boxes.iter().map(|b| b.id).collect();
