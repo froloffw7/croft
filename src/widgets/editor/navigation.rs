@@ -688,6 +688,43 @@ impl Editor {
             line += 1;
         }
         last
+}
+
+    /// Scroll the non-wrap view down just enough that comment box `id` is in
+    /// view (its anchor line stays visible, so the caret keeps its row). A
+    /// box that is already fully visible, or an unknown id, changes nothing.
+    /// Used when the navigator's answer lands below the viewport, which
+    /// otherwise stays unseen until the caret happens to move.
+    pub fn reveal_comment_box(&mut self, id: u64) {
+        if self.wrap_enabled() || self.lines.is_empty() {
+            return;
+        }
+        let Some(idx) = self.comment_boxes.iter().position(|b| b.id == id) else {
+            return;
+        };
+        let bw = self.visible_text_width();
+        let viewport = self.text_rows().saturating_sub(
+            self.sticky_lines
+                .len()
+                .min(self.text_rows().saturating_sub(1)),
+        );
+        if viewport == 0 {
+            return;
+        }
+        let line = self.comment_boxes[idx]
+            .line
+            .min(self.lines.len().saturating_sub(1));
+        let line_row = line + self.box_rows_between(0, line, bw);
+        let before: usize = (0..idx)
+            .filter(|&i| self.comment_boxes[i].line == self.comment_boxes[idx].line)
+            .map(|i| self.comment_box_height(i, bw))
+            .sum();
+        let end = line_row + 1 + before + self.comment_box_height(idx, bw);
+        let top = self.nonwrap_top_content_row();
+        if line_row >= top && end <= top + viewport {
+            return;
+        }
+        self.nonwrap_set_top(end.saturating_sub(viewport).min(line_row));
     }
 
     pub(super) fn scroll_view_to(&mut self, top: usize) {

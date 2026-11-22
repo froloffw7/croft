@@ -1,0 +1,1 @@
+Navigator comment boxes: pasting (bracketed or Cmd/Ctrl+V) into the Reply field now goes into the reply instead of the buffer, Ignore is red, the `you:` label of an echoed reply is coloured, and the navigator's answer to a reply continues the same box and is scrolled into view instead of staying hidden until the caret moves.

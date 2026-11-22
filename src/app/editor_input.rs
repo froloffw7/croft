@@ -2396,6 +2396,13 @@ impl App {
         if self.paste_into_popup(s) {
             return false;
         }
+        // A focused comment-box reply field owns the paste while the editor
+        // is focused: it is an input line, and the text must not reach the
+        // buffer behind it.
+        if self.focus == Pane::Editor && self.editor.comment_focus.is_some() {
+            self.comment_reply_insert(s);
+            return false;
+        }
         // The in-file find bar is a pane-scoped widget, not a modal: it only
         // owns the paste while the editor itself is focused. Without the focus
         // guard, an open find bar would swallow a paste meant for the terminal
