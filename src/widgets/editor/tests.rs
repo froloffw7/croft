@@ -5367,6 +5367,8 @@ fn a_long_reply_windows_so_the_caret_and_tail_stay_visible() {
         footer.contains("_TAIL"),
         "the field must window to keep the tail under the caret visible: {footer:?}"
     );
+    // No painted caret block: the terminal's own caret marks the position,
+    // inside the field, and a second painted one would double it.
     let caret_cells = (0..area.width)
         .filter(|&x| {
             buf[(x, 4)]
@@ -5375,7 +5377,10 @@ fn a_long_reply_windows_so_the_caret_and_tail_stay_visible() {
                 .contains(ratatui::style::Modifier::REVERSED)
         })
         .count();
-    assert_eq!(caret_cells, 1, "exactly one caret cell renders: {footer:?}");
+    assert_eq!(caret_cells, 0, "no painted caret cell: {footer:?}");
+    let (cx, cy) = e.cursor_screen_pos().expect("terminal caret in the field");
+    assert_eq!(cy, 4);
+    assert!(cx < area.width, "caret stays inside the box");
 }
 
 /// The focused box renders the typed reply in its footer field.
