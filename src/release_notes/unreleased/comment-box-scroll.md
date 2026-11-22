@@ -1,0 +1,1 @@
+fix(editor): wheeling past a navigator reply box no longer leaves the keyboard stuck in its reply field, and a tall box can be wheeled back into view from below; Up/Down/PageUp/PageDown now leave a focused reply field instead of being swallowed by it.
