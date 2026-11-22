@@ -4203,3 +4203,24 @@ fn completing_an_approval_merge_approves_it_and_stages_nothing() {
         assert_eq!(input["content"], "one\ntheirs\nthree\n");
     });
 }
+
+/// A paste (bracketed or the clipboard chord) into a focused comment-box
+/// reply lands in the reply at the caret, never in the buffer behind it.
+#[test]
+fn paste_goes_into_the_focused_comment_reply() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "line\n").unwrap();
+    let mut app = App::new(dir.path().to_path_buf()).unwrap();
+    app.focus = Pane::Editor;
+    app.editor.comment_focus = Some(crate::widgets::editor::CommentFocus {
+        id: 1,
+        reply: String::from("ab"),
+        cursor: 1,
+    });
+    let before = app.editor.lines.clone();
+    app.handle_paste("X\nY");
+    let f = app.editor.comment_focus.as_ref().unwrap();
+    assert_eq!(f.reply, "aX Yb");
+    assert_eq!(f.cursor, 4);
+    assert_eq!(app.editor.lines, before, "the buffer is untouched");
+}

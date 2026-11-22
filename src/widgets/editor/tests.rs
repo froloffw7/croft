@@ -22713,3 +22713,63 @@ fn a_viewer_forgets_the_new_file_it_replaced() {
         assert!(!e.disk_expect_absent, "{view} must forget the new file");
     }
 }
+
+/// Ignore is red, and the `you:` label of an echoed reply gets its own colour.
+#[test]
+fn comment_box_colours_ignore_and_you_label() {
+    use ratatui::style::Color;
+    let mut e = editor_with("first\nsecond");
+    e.comment_boxes = vec![CommentBox {
+        id: 7,
+        line: 0,
+        author: "navigator".into(),
+        body: "answer\nyou: thanks".into(),
+    }];
+    let area = Rect {
+        x: 0,
+        y: 0,
+        width: 60,
+        height: 10,
+    };
+    let mut buf = ratatui::buffer::Buffer::empty(area);
+    (&mut e as &mut Editor).render(area, &mut buf);
+    let find = |needle: char, y: u16| {
+        (0..area.width).find(|&x| buf[(x, y)].symbol() == needle.to_string())
+    };
+    // Rows: 2 title, 3 "answer", 4 "you: thanks", 5 footer.
+    let x = find('y', 4).expect("you: label");
+    assert_eq!(buf[(x, 4)].style().fg, Some(Color::Cyan));
+    let x = find('I', 5).expect("Ignore");
+    assert_eq!(buf[(x, 5)].style().fg, Some(Color::Red));
+}
+
+/// An answer that lands below the viewport is scrolled into view without
+/// moving the caret off its line.
+#[test]
+fn reveal_comment_box_scrolls_a_hidden_box_into_view() {
+    let text: String = (0..40).map(|i| format!("l{i}\n")).collect();
+    let mut e = editor_with(&text);
+    let area = Rect {
+        x: 0,
+        y: 0,
+        width: 60,
+        height: 10,
+    };
+    let mut buf = ratatui::buffer::Buffer::empty(area);
+    e.comment_boxes = vec![CommentBox {
+        id: 9,
+        line: 6,
+        author: "navigator".into(),
+        body: "one\ntwo\nthree".into(),
+    }];
+    (&mut e as &mut Editor).render(area, &mut buf);
+    e.cursor_row = 0;
+    e.reveal_comment_box(9);
+    (&mut e as &mut Editor).render(area, &mut buf);
+    let screen: String = (0..area.height)
+        .flat_map(|y| (0..area.width).map(move |x| (x, y)))
+        .map(|(x, y)| buf[(x, y)].symbol().to_string())
+        .collect();
+    assert!(screen.contains("three"), "the box body is on screen");
+    assert!(e.scroll > 0);
+}
