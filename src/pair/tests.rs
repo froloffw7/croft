@@ -2894,3 +2894,15 @@ fn compose_turn_always_names_target_file() {
     assert!(noted.starts_with("stream was cancelled"));
     assert!(noted.contains("task"));
 }
+
+/// An ask about a file outside the workspace is read-only prose over the
+/// selected rows only.
+#[test]
+fn external_selection_turn_is_read_only_and_scoped() {
+    let t =
+        compose_external_selection_turn("/usr/include/x.h", (1, 2), "what is this", "a\nb\nc\nd");
+    assert!(t.contains("OUTSIDE the workspace"));
+    assert!(t.contains("1|b") && t.contains("2|c"));
+    assert!(!t.contains("0|a") && !t.contains("3|d"));
+    assert!(t.contains("Do NOT emit EDIT or NOTE"));
+}

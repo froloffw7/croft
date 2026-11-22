@@ -57,12 +57,14 @@ pub(crate) use seat::seat_pilot;
 use seat::*;
 pub(crate) use state::StagedTurn;
 pub(crate) use state::lock_briefly;
-pub(crate) use turns::{compose_ask_turn, compose_ask_turn_selection};
 pub(crate) use turns::compose_reply_turn;
 pub(crate) use turns::compose_yield_turn;
 pub(crate) use turns::send_turn;
 pub(crate) use turns::write_user_turn;
 use turns::*;
+pub(crate) use turns::{
+    compose_ask_turn, compose_ask_turn_selection, compose_external_selection_turn,
+};
 use voice::*;
 
 use std::io::{BufRead, Read as _, Write as _};

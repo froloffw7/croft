@@ -793,6 +793,19 @@ impl App {
                 };
                 let content = self.editor.lines.join("\n");
                 let name = host.name().to_string();
+                if std::path::Path::new(&file).is_absolute() {
+                    // Outside the workspace: read-only selection ask, the
+                    // answer lands in OUTPUT.
+                    match host.send_external_selection_turn(&file, range, &value, &content) {
+                        Ok(()) => {
+                            self.close_input_prompt();
+                            self.status = format!("Asked {name} about {file}:{}", range.0 + 1);
+                            self.pair_turn_origin = None;
+                        }
+                        Err(e) => self.status = format!("Ask Navigator failed: {e}"),
+                    }
+                    return;
+                }
                 // A real selection scopes the turn to those lines (cheap for
                 // local models and big files); CROFT_PAIR_CONTEXT=buffer
                 // restores the whole-file context.
