@@ -2590,6 +2590,17 @@ fn compose_ask_turn_numbers_content_and_includes_selection() {
     assert!(one.contains("2|c"));
 }
 
+/// A selection-scoped ask carries only the selected rows, numbered by their
+/// real file row, and never the rest of the file.
+#[test]
+fn selection_ask_turn_omits_rest_of_file() {
+    let t = compose_ask_turn_selection("a.rs", (2, 3), "explain", "l0\nl1\nl2\nl3\nl4");
+    assert!(t.contains("2|l2") && t.contains("3|l3"));
+    assert!(!t.contains("l0") && !t.contains("l4"));
+    assert!(t.contains("lines 3-4 in your partner's gutter"));
+    assert!(t.contains("explain"));
+}
+
 /// #1966: the gutter numbers lines from 1, so every line a turn names
 /// carries that number beside its 0-based row, and the bare 0-based row
 /// never stands alone where the model would quote it to its partner.
