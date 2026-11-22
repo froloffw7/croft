@@ -914,7 +914,8 @@ impl App {
             provider: crate::pair::Provider::from_record(
                 record.provider.as_deref(),
                 record.base_url.as_deref(),
-            ),
+            )
+            .with_context(record.context),
         };
         #[cfg(test)]
         let spawned = match &self.pair_spawn_override {
@@ -1260,6 +1261,7 @@ impl App {
             // CLI - with a model name claude does not even have.
             provider: current.as_ref().and_then(|r| r.provider.clone()),
             base_url: current.as_ref().and_then(|r| r.base_url.clone()),
+            context: None,
         };
         if let Some(dir) = self.pair_record_path.parent() {
             let _ = std::fs::create_dir_all(dir);

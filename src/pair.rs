@@ -23,6 +23,7 @@
 mod apply;
 mod caret;
 mod claude_cli;
+mod context;
 mod fence;
 mod history;
 pub(crate) mod local;

@@ -1653,6 +1653,7 @@ fn local_test_spawn(cfg: &crate::pair::PairConfig) -> anyhow::Result<crate::pair
         task: None,
         provider: crate::pair::Provider::Local {
             base_url: String::from("http://127.0.0.1:9"),
+            context: None,
         },
     })
 }
