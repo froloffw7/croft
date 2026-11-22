@@ -66,7 +66,7 @@ impl App {
         }
         match key.code {
             KeyCode::Esc => {
-                self.editor.comment_focus = None;
+                self.editor.release_comment_focus();
                 return;
             }
             KeyCode::Enter => {
@@ -794,11 +794,8 @@ impl App {
         let path = self.editor.path.clone().expect("comments imply a file");
         match self.open_at(&path, row, 0) {
             Ok(()) => {
-                self.editor.comment_focus = Some(crate::widgets::editor::CommentFocus {
-                    id,
-                    reply: String::new(),
-                    cursor: 0,
-                });
+                self.editor.release_comment_focus();
+                self.editor.comment_focus = Some(self.editor.focus_for_comment(id));
             }
             Err(e) => self.status = format!("Comment jump failed: {e}"),
         }

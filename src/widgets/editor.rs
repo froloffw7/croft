@@ -633,6 +633,11 @@ pub struct Editor {
     /// The reply draft riding the focused box's footer field. While set,
     /// the App routes typing here instead of the buffer.
     pub comment_focus: Option<CommentFocus>,
+    /// Unsent reply drafts of boxes whose field lost focus (arrow keys, a
+    /// click elsewhere, Esc), by box id: leaving the field must not destroy
+    /// what was typed. Restored when the box is focused again, shown dimmed
+    /// in its footer meanwhile, dropped on send or when the box goes.
+    pub reply_drafts: std::collections::HashMap<u64, String>,
     /// Enclosing scope header lines to pin at the top of the viewport (VS Code
     /// "Sticky Scroll"), outermost first, set by `App` from the outline scope
     /// chain of the top visible line. Empty disables the feature (e.g. wrap
@@ -1204,6 +1209,7 @@ impl Editor {
             stream_stop_line: None,
             comment_boxes: Vec::new(),
             comment_focus: None,
+            reply_drafts: std::collections::HashMap::new(),
             sticky_lines: Vec::new(),
             sticky_click_rows: Vec::new(),
             box_anchor: None,

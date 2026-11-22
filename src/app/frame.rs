@@ -959,6 +959,11 @@ impl App {
             if let Some(id) = self.reveal_box.take() {
                 self.editor.reveal_comment_box(id);
             }
+            // Drafts of boxes that no longer exist go with them.
+            {
+                let ids: Vec<u64> = self.editor.comment_boxes.iter().map(|b| b.id).collect();
+                self.editor.reply_drafts.retain(|id, _| ids.contains(id));
+            }
             // A focused box that vanished (ignored elsewhere, cleared, or
             // re-anchored away) releases the keyboard back to the buffer.
             if let Some(focus) = &self.editor.comment_focus
