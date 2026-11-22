@@ -2301,7 +2301,15 @@ impl App {
         // query, which makes the "open + paste a filename" path that the
         // VS Code Quick Open is meant to support unusable.
         if let Some(prompt) = self.input_prompt.as_mut() {
-            for c in s.chars() {
+            // Line breaks become spaces: dropping them glued the last word
+            // of one line to the first of the next.
+            for c in s.chars().map(|c| {
+                if c == '\n' || c == '\r' || c == '\t' {
+                    ' '
+                } else {
+                    c
+                }
+            }) {
                 if !c.is_control() {
                     prompt.push_char(c);
                 }

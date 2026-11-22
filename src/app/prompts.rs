@@ -1347,6 +1347,29 @@ impl App {
             }
             return;
         }
+        // Cmd+V / Ctrl+V arriving as a key (no bracketed paste from the
+        // terminal): read the clipboard ourselves, as the finder does.
+        if super::key_input::is_clipboard_paste_key(key) {
+            if let Some(text) = self.clipboard_text()
+                && let Some(prompt) = self.input_prompt.as_mut()
+            {
+                for c in text.chars().map(|c| {
+                    if c == '\n' || c == '\r' || c == '\t' {
+                        ' '
+                    } else {
+                        c
+                    }
+                }) {
+                    if !c.is_control() {
+                        prompt.push_char(c);
+                    }
+                }
+            }
+            return;
+        }
+        let Some(prompt) = self.input_prompt.as_mut() else {
+            return;
+        };
         match (key.code, key.modifiers) {
             (KeyCode::Esc, _) => self.close_input_prompt(),
             (KeyCode::Enter, _) => self.submit_input_prompt(),
