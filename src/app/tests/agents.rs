@@ -4305,3 +4305,15 @@ fn comment_reply_field_handles_delete_home_end() {
     key(&mut app, KeyCode::Delete);
     assert_eq!(app.editor.comment_focus.as_ref().unwrap().reply, "abd");
 }
+
+/// A model that wraps its whole notes in one fence still saves clean notes.
+#[test]
+fn context_notes_lose_a_wrapping_fence() {
+    use crate::app::agents_collab::strip_wrapping_fence;
+    assert_eq!(
+        strip_wrapping_fence("```markdown\n## Goal\nx\n```"),
+        "## Goal\nx"
+    );
+    assert_eq!(strip_wrapping_fence("## Goal\nx"), "## Goal\nx");
+    assert_eq!(strip_wrapping_fence("a ```b``` c"), "a ```b``` c");
+}

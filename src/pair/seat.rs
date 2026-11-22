@@ -255,6 +255,7 @@ pub(crate) fn seat_pilot(
 pub(crate) fn seat_local(
     socket: &Path,
     history: Option<PathBuf>,
+    project: &str,
     name: &str,
     base_url: &str,
     context: Option<usize>,
@@ -276,7 +277,8 @@ pub(crate) fn seat_local(
             base_url: base_url.clone(),
             context,
         })
-        .into_owned();
+        .into_owned()
+            + project;
         std::thread::spawn(move || {
             let mut messages: Vec<Value> = history
                 .as_deref()

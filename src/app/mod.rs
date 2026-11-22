@@ -3687,6 +3687,9 @@ pub struct App {
     /// The comment box a reply turn answers: the navigator's prose is
     /// appended to it (one thread) rather than opening a second box.
     pair_reply_note: Option<u64>,
+    /// Where the answer of a Save Context turn is written (CONTEXT.md in the
+    /// workspace); its prose is captured instead of anchored as a comment.
+    pair_save_context: Option<std::path::PathBuf>,
     /// A comment box to scroll into view on the next frame, once the
     /// snapshot that holds its new text has been merged.
     reveal_box: Option<u64>,
@@ -4969,6 +4972,7 @@ impl App {
             pair_commentary_buf: String::new(),
             pair_turn_origin: None,
             pair_reply_note: None,
+            pair_save_context: None,
             reveal_box: None,
             reply_waiting: None,
             pair_notes_this_turn: 0,

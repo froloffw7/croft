@@ -986,6 +986,22 @@ impl App {
                     let prose = std::mem::take(&mut self.pair_commentary_buf);
                     let origin = self.pair_turn_origin.take();
                     let reply_note = self.pair_reply_note.take();
+                    if let Some(path) = self.pair_save_context.take() {
+                        if cancelled || failed.is_some() || prose.trim().is_empty() {
+                            self.status =
+                                format!("{name}: context not saved (turn did not finish)");
+                        } else {
+                            let text = strip_wrapping_fence(prose.trim());
+                            self.status = match std::fs::write(&path, format!("{text}\n")) {
+                                Ok(()) => format!(
+                                    "Saved context to {} (edit it freely; it is loaded when the navigator starts)",
+                                    path.display()
+                                ),
+                                Err(e) => format!("Saving context failed: {e}"),
+                            };
+                        }
+                        continue;
+                    }
                     self.reply_waiting = None;
                     // Whatever the outcome, the fix turn is over: the row's
                     // spinner stops, and the LSP's next publish decides
@@ -1310,6 +1326,36 @@ impl App {
 
     /// Palette: drop every navigator comment — the pilot's anchors, the
     /// per-file snapshots, and the boxes they feed.
+    /// `Navigator: Save Context`: ask the model for notes to continue the
+    /// work in a new session and write its answer to CONTEXT.md in the
+    /// workspace root, updating the file when one exists.
+    pub(super) fn save_navigator_context(&mut self) {
+        let Some(host) = &self.pair_host else {
+            self.status =
+                String::from("Navigator is not active (run croft pair in this workspace)");
+            return;
+        };
+        if host.is_busy() {
+            self.status = format!("{} is mid-turn; wait for it to finish", host.name());
+            return;
+        }
+        let path = self.tree.root.join(crate::pair::CONTEXT_FILE);
+        let existing = std::fs::read_to_string(&path).ok();
+        let body = crate::pair::save_context_instruction(existing.as_deref());
+        match host.send_plain_turn(body) {
+            Ok(()) => {
+                self.pair_save_context = Some(path);
+                self.pair_turn_origin = None;
+                self.status = format!(
+                    "Asked {} to write {}",
+                    host.name(),
+                    crate::pair::CONTEXT_FILE
+                );
+            }
+            Err(e) => self.status = format!("Save context failed: {e}"),
+        }
+    }
+
     pub(super) fn clear_navigator_notes(&mut self) {
         if let Some(host) = &self.pair_host {
             host.clear_notes();
@@ -3406,4 +3452,17 @@ pub(super) fn participant_row(
         id: p.id.to_string(),
         label: format!("{}  {}  ({})", p.name, size, role),
     }
+}
+
+/// A model sometimes wraps the whole reply in one Markdown fence; the file
+/// should hold the notes, not the fence.
+pub(super) fn strip_wrapping_fence(text: &str) -> &str {
+    let t = text.trim();
+    if let Some(rest) = t.strip_prefix("```")
+        && let Some(nl) = rest.find('\n')
+        && let Some(body) = rest[nl + 1..].strip_suffix("```")
+    {
+        return body.trim();
+    }
+    t
 }

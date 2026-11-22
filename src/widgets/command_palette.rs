@@ -622,6 +622,7 @@ pub enum Command {
     ToggleNavigator,
     /// Drop every navigator comment box.
     ClearNavigatorNotes,
+    SaveNavigatorContext,
     /// Toggle the navigator's proactive comment-only looks (a completed
     /// construct plus a typing pause hands it the floor on its own).
     ToggleProactiveNavigator,
@@ -1097,6 +1098,7 @@ pub const ALL_COMMANDS: &[Command] = &[
     Command::YieldToNavigator,
     Command::ToggleNavigator,
     Command::ClearNavigatorNotes,
+    Command::SaveNavigatorContext,
     Command::ToggleProactiveNavigator,
     Command::NextComment,
     Command::IgnoreComment,
@@ -1596,6 +1598,7 @@ impl Command {
             Command::YieldToNavigator => "Navigator: Yield the Turn",
             Command::ToggleNavigator => "Navigator: Activate or Deactivate",
             Command::ClearNavigatorNotes => "Navigator: Clear Comments",
+            Command::SaveNavigatorContext => "Navigator: Save Context to CONTEXT.md",
             Command::ToggleProactiveNavigator => "Navigator: Toggle Proactive Comments",
             Command::NextComment => "Navigator: Next Comment",
             Command::IgnoreComment => "Navigator: Ignore Comment",
@@ -2107,6 +2110,7 @@ impl Command {
             Command::YieldToNavigator => "Cmd+K Y",
             Command::ToggleNavigator => "",
             Command::ClearNavigatorNotes => "",
+            Command::SaveNavigatorContext => "",
             Command::ToggleProactiveNavigator => "",
             Command::NextComment => "F4",
             Command::IgnoreComment => "Shift+F4",
@@ -2581,6 +2585,7 @@ impl Command {
             Command::YieldToNavigator => "navigator_yield",
             Command::ToggleNavigator => "navigator_toggle",
             Command::ClearNavigatorNotes => "navigator_clear_notes",
+            Command::SaveNavigatorContext => "navigator_save_context",
             Command::ToggleProactiveNavigator => "navigator_toggle_proactive",
             Command::NextComment => "navigator_next_comment",
             Command::IgnoreComment => "navigator_ignore_comment",

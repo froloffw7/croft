@@ -2405,6 +2405,7 @@ impl App {
             Cmd::YieldToNavigator => self.yield_to_navigator(),
             Cmd::ToggleNavigator => self.toggle_navigator(),
             Cmd::ClearNavigatorNotes => self.clear_navigator_notes(),
+            Cmd::SaveNavigatorContext => self.save_navigator_context(),
             Cmd::ToggleProactiveNavigator => self.toggle_proactive_navigator(),
             Cmd::NextComment => self.cycle_comment_box(),
             Cmd::IgnoreComment => self.ignore_focused_comment(),

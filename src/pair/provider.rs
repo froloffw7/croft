@@ -110,6 +110,68 @@ pub(crate) fn system_prompt(provider: &Provider) -> std::borrow::Cow<'static, st
     }
 }
 
+/// The project files the navigator reads when it sits down, both optional
+/// and plain text so the user can edit them:
+/// * `.croft/pair.md` — standing instructions for this workspace (house
+///   style, what to avoid, the build/test commands);
+/// * `CONTEXT.md` — the notes the navigator saved earlier
+///   (`Navigator: Save Context`), or that the user wrote.
+pub(crate) const PROJECT_PROMPT_FILE: &str = ".croft/pair.md";
+pub(crate) const CONTEXT_FILE: &str = "CONTEXT.md";
+/// A file bigger than this is cut: these ride in every request's prefill.
+const PROJECT_FILE_CAP: usize = 24_000;
+
+fn read_capped(path: &std::path::Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let cut: String = text.chars().take(PROJECT_FILE_CAP).collect();
+    Some(if cut.len() < text.len() {
+        format!("{cut}\n[...cut: the file is longer than {PROJECT_FILE_CAP} characters]")
+    } else {
+        cut
+    })
+}
+
+/// The workspace's own additions to the system prompt (empty when there are
+/// none), appended after the built-in protocol so the protocol stays first.
+pub(crate) fn project_prompt(workspace: &std::path::Path) -> String {
+    let mut out = String::new();
+    if let Some(t) = read_capped(&workspace.join(PROJECT_PROMPT_FILE)) {
+        out.push_str(&format!(
+            "\n\n--- PROJECT INSTRUCTIONS ({PROJECT_PROMPT_FILE}, written by your partner) ---\n{t}\n--- END PROJECT INSTRUCTIONS ---"
+        ));
+    }
+    if let Some(t) = read_capped(&workspace.join(CONTEXT_FILE)) {
+        out.push_str(&format!(
+            "\n\n--- SAVED CONTEXT ({CONTEXT_FILE}: notes from earlier sessions in this workspace; trust the code over them if they disagree) ---\n{t}\n--- END SAVED CONTEXT ---"
+        ));
+    }
+    out
+}
+
+/// The instruction of a Save Context turn: the model decides what is worth
+/// keeping, within a fixed shape, and updates rather than restarts.
+pub(crate) fn save_context_instruction(existing: Option<&str>) -> String {
+    let mut s = String::from(
+        "Write the notes your future self needs to continue this work in a NEW session. Reply \
+         with the notes ONLY: Markdown, no preamble, no code fences around the whole reply, no \
+         EDIT or NOTE fences. Keep it under ~60 lines. Sections: `## Goal` (what we are doing \
+         and why), `## Decisions` (choices made and the reason), `## State` (done / in progress / \
+         next), `## Files` (the files that matter and what each does), `## Open questions`. \
+         Prefer facts over narration; drop anything that is obvious from the code.",
+    );
+    if let Some(old) = existing {
+        s.push_str(&format!(
+            "\n\nThe current CONTEXT.md is below. UPDATE it: keep what is still true, fix what \
+             changed, remove what is done or stale.\n--- CURRENT CONTEXT.md ---\n{old}\n--- END ---"
+        ));
+    }
+    s
+}
+
 /// Everything `croft pair` needs to sit down: the relay socket, the
 /// workspace (cwd and MCP reader seat), the caret name, and the claude
 /// launch knobs.
