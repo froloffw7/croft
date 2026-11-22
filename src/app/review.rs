@@ -48,6 +48,14 @@ impl App {
     /// survives until the box goes), F4 hops to the next box, Shift+F4
     /// ignores this one.
     pub(super) fn handle_comment_focus_key(&mut self, key: KeyEvent) {
+        // Cmd+V / Ctrl+V where the terminal hands the chord over as a key
+        // rather than a bracketed paste: the reply field is the target.
+        if super::key_input::is_clipboard_paste_key(key) {
+            if let Some(text) = self.clipboard_text() {
+                self.comment_reply_insert(&text);
+            }
+            return;
+        }
         if matches!(key.code, KeyCode::F(4)) {
             if key.modifiers.contains(KeyModifiers::SHIFT) {
                 self.ignore_focused_comment();
@@ -101,6 +109,33 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// Insert pasted text at the reply caret. The field is one line, so line
+    /// breaks become spaces and other control characters are dropped.
+    pub(super) fn comment_reply_insert(&mut self, text: &str) {
+        let Some(focus) = self.editor.comment_focus.as_mut() else {
+            return;
+        };
+        let clean: String = text
+            .chars()
+            .map(|c| {
+                if c == '\n' || c == '\r' || c == '\t' {
+                    ' '
+                } else {
+                    c
+                }
+            })
+            .filter(|c| !c.is_control())
+            .collect();
+        let idx = focus
+            .reply
+            .char_indices()
+            .nth(focus.cursor)
+            .map(|(i, _)| i)
+            .unwrap_or(focus.reply.len());
+        focus.reply.insert_str(idx, &clean);
+        focus.cursor += clean.chars().count();
     }
 
     /// Enter in the focused box: append the reply to the box (the running
@@ -169,6 +204,12 @@ impl App {
                 // retry, and appending first would duplicate the reply in
                 // the box on every attempt.
                 host.append_to_note(focus.id, &format!("you: {reply}"));
+                // Show the echo now instead of at the next tick's snapshot,
+                // and keep the answer in this same thread.
+                self.navigator_notes
+                    .insert(file.clone(), host.notes_snapshot(&file));
+                self.pair_reply_note = Some(focus.id);
+                self.reveal_box = Some(focus.id);
                 self.pair_turn_origin = Some((file, row));
                 self.status = format!("Replied to {}", host.name());
                 self.editor.comment_focus = None;

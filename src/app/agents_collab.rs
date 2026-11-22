@@ -985,6 +985,7 @@ impl App {
                     let file = self.pair_last_noted_file.take();
                     let prose = std::mem::take(&mut self.pair_commentary_buf);
                     let origin = self.pair_turn_origin.take();
+                    let reply_note = self.pair_reply_note.take();
                     // Whatever the outcome, the fix turn is over: the row's
                     // spinner stops, and the LSP's next publish decides
                     // whether the row itself goes (#374).
@@ -1015,11 +1016,23 @@ impl App {
                                 (f, row)
                             })
                         });
-                        let landed = anchor.as_ref().and_then(|(f, row)| {
-                            self.pair_host
-                                .as_ref()
-                                .and_then(|h| h.add_note_now(f, *row, prose.trim()))
-                        });
+                        // A reply's answer continues the thread it answers.
+                        let landed_id = if let (Some(id), Some(h)) = (reply_note, &self.pair_host) {
+                            h.append_to_note(id, prose.trim());
+                            Some(id)
+                        } else {
+                            anchor.as_ref().and_then(|(f, row)| {
+                                self.pair_host
+                                    .as_ref()
+                                    .and_then(|h| h.add_note_now(f, *row, prose.trim()))
+                            })
+                        };
+                        // Scroll the answer into view: it lands below the
+                        // caret and sat off screen until the caret moved.
+                        if landed_id.is_some() {
+                            self.reveal_box = landed_id;
+                        }
+                        let landed = landed_id;
                         match (landed, anchor) {
                             (Some(_), Some((f, _))) => {
                                 notes += 1;

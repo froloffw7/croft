@@ -268,11 +268,24 @@ impl Editor {
         } else if box_row + 1 < height {
             let body_lines = Self::comment_body_lines(&b.body, w.saturating_sub(4));
             let text = body_lines.get(box_row - 1).cloned().unwrap_or_default();
-            Line::from(vec![
-                Span::styled("\u{2502} ", accent),
-                Span::styled(pad(&text, w - 4), body_st),
-                Span::styled(" \u{2502}", accent),
-            ])
+            // The driver's own replies are echoed as `you: ...`; the label
+            // gets its own colour so the thread reads as a conversation.
+            let mut spans = vec![Span::styled("\u{2502} ", accent)];
+            let padded = pad(&text, w - 4);
+            match padded.strip_prefix("you:") {
+                Some(rest) => {
+                    spans.push(Span::styled(
+                        "you:",
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .bg(self.theme.sticky_scroll_bg()),
+                    ));
+                    spans.push(Span::styled(rest.to_string(), body_st));
+                }
+                None => spans.push(Span::styled(padded, body_st)),
+            }
+            spans.push(Span::styled(" \u{2502}", accent));
+            Line::from(spans)
         } else {
             // Footer: `╰ ❯ <reply>            ✕ Ignore ╯`
             let focus = self.comment_focus.as_ref().filter(|f| f.id == b.id);
@@ -309,7 +322,14 @@ impl Editor {
                 }
                 _ => spans.push(Span::styled(draft, style)),
             }
-            spans.push(Span::styled(" \u{2715} Ignore ", accent));
+            // Ignore is destructive (it closes the thread): red, so it reads
+            // as the odd one out beside the accent-coloured chrome.
+            spans.push(Span::styled(
+                " \u{2715} Ignore ",
+                Style::default()
+                    .fg(Color::Red)
+                    .bg(self.theme.sticky_scroll_bg()),
+            ));
             spans.push(Span::styled("\u{256f}", accent));
             Line::from(spans)
         };
