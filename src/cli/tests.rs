@@ -853,6 +853,7 @@ fn parses_pair_subcommand() {
             task,
             provider: None,
             base_url: None,
+            context: None,
             off: false,
             repl: true,
         }) => {
@@ -874,6 +875,7 @@ fn parses_pair_subcommand() {
             task: None,
             provider: None,
             base_url: None,
+            context: None,
             off: false,
             repl: false,
         })

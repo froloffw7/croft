@@ -320,6 +320,7 @@ fn turn_done_status_keeps_the_notes_visible() {
             task: None,
             provider: None,
             base_url: None,
+            context: None,
         },
     )
     .unwrap();

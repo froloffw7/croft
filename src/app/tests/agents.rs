@@ -433,6 +433,7 @@ fn navigator_record_seats_the_pilot_and_self_appoints_owner() {
             task: None,
             provider: None,
             base_url: None,
+            context: None,
         },
     )
     .unwrap();
@@ -501,6 +502,7 @@ fn navigator_record_seats_the_pilot_and_self_appoints_owner() {
             task: None,
             provider: None,
             base_url: None,
+            context: None,
         },
     )
     .unwrap();
@@ -564,6 +566,7 @@ fn app_seats_local_provider_from_record() {
             task: None,
             provider: Some("ollama".into()),
             base_url: Some("http://localhost:11500".into()),
+            context: None,
         },
     )
     .unwrap();
@@ -573,7 +576,8 @@ fn app_seats_local_provider_from_record() {
         *seen.borrow(),
         Some((
             crate::pair::Provider::Local {
-                base_url: "http://localhost:11500".into()
+                base_url: "http://localhost:11500".into(),
+                context: None,
             },
             Some(String::from("qwen3-coder:30b")),
         )),
@@ -613,6 +617,7 @@ fn a_dead_navigator_is_not_respawned_until_reactivated() {
                 task: None,
                 provider: None,
                 base_url: None,
+                context: None,
             },
         )
         .unwrap();
@@ -645,6 +650,7 @@ fn a_dead_navigator_is_not_respawned_until_reactivated() {
             task: None,
             provider: None,
             base_url: None,
+            context: None,
         },
     )
     .unwrap();
@@ -674,6 +680,7 @@ fn toggling_the_navigator_preserves_its_provider() {
             task: None,
             provider: Some(String::from("ollama")),
             base_url: Some(String::from("http://localhost:11434")),
+            context: None,
         },
     )
     .unwrap();
@@ -723,6 +730,7 @@ fn only_one_croft_self_appoints_the_navigator_owner() {
                 task: None,
                 provider: None,
                 base_url: None,
+                context: None,
             },
         )
         .unwrap();
@@ -801,6 +809,7 @@ fn unseating_the_navigator_resets_the_turn_note_counters() {
         task: None,
         provider: None,
         base_url: None,
+        context: None,
     };
     let mut app = App::new(tmp.path().to_path_buf()).unwrap();
     app.pair_record_path = tmp.path().join("x.pair.json");
@@ -860,6 +869,7 @@ fn a_record_rewrite_re_arms_a_downed_navigator() {
         task: None,
         provider: None,
         base_url: None,
+        context: None,
     };
     let mut app = App::new(tmp.path().to_path_buf()).unwrap();
     app.pair_record_path = tmp.path().join("x.pair.json");

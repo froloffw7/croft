@@ -86,7 +86,7 @@ impl PairHost {
                 let cmd = claude_command(&cfg)?;
                 Self::spawn_cmd(&cfg.socket, &cfg.name, cfg.task.as_deref(), cmd)
             }
-            Provider::Local { base_url } => {
+            Provider::Local { base_url, context } => {
                 let model = cfg
                     .model
                     .as_deref()
@@ -97,6 +97,7 @@ impl PairHost {
                     Some(crate::pair::history_path(&cfg.workspace, &cfg.name)),
                     &cfg.name,
                     base_url,
+                    *context,
                     model,
                     Some(tx),
                 )?;

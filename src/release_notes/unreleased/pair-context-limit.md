@@ -1,0 +1,1 @@
+croft pair --context <tokens>: declare a local model's context window; the navigator trims the oldest exchanges to stay inside it, warns at 80% full in OUTPUT, and refuses a single turn that cannot fit instead of overflowing the server.

@@ -1170,6 +1170,7 @@ fn resident_seating_never_replays_a_persisted_task() {
             task: Some("delete the deprecated helpers".into()),
             provider: None,
             base_url: None,
+            context: None,
         },
     )
     .unwrap();

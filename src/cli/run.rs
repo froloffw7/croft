@@ -328,6 +328,7 @@ impl Cli {
                 task,
                 provider,
                 base_url,
+                context,
                 off,
                 repl,
             }) => {
@@ -374,6 +375,11 @@ impl Cli {
                         .then(|| current.as_ref().and_then(|r| r.base_url.clone()))
                         .flatten()
                 });
+                let context = context.or_else(|| {
+                    inherit
+                        .then(|| current.as_ref().and_then(|r| r.context))
+                        .flatten()
+                });
                 let provider = provider.or(recorded);
                 let (provider, base_url) = resolve_pair_provider(provider, base_url)?;
                 let name = pair_seat_name(
@@ -391,6 +397,7 @@ impl Cli {
                             task: None,
                             provider,
                             base_url,
+                            context,
                         },
                     )?;
                     println!("navigator deactivated for {}", workspace.display());
@@ -413,7 +420,8 @@ impl Cli {
                         provider: crate::pair::Provider::from_record(
                             provider.as_deref(),
                             base_url.as_deref(),
-                        ),
+                        )
+                        .with_context(context),
                     });
                 }
                 crate::session::write_pair_record(
@@ -428,6 +436,7 @@ impl Cli {
                         task: None,
                         provider,
                         base_url,
+                        context,
                     },
                 )?;
                 // The relay is up before croft looks, so the seat connects

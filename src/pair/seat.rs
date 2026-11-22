@@ -257,6 +257,7 @@ pub(crate) fn seat_local(
     history: Option<PathBuf>,
     name: &str,
     base_url: &str,
+    context: Option<usize>,
     model: &str,
     events: Option<Sender<crate::pair_host::PairEvent>>,
 ) -> Result<Pilot> {
@@ -273,6 +274,7 @@ pub(crate) fn seat_local(
         let (base_url, model) = (base_url.to_string(), model.to_string());
         let system = system_prompt(&Provider::Local {
             base_url: base_url.clone(),
+            context,
         })
         .into_owned();
         std::thread::spawn(move || {
@@ -280,8 +282,41 @@ pub(crate) fn seat_local(
                 .as_deref()
                 .map(history::load_local)
                 .unwrap_or_default();
+            if let Some(limit) = context {
+                context::fit(&system, &mut messages, limit);
+            }
             while let Ok(body) = turns_rx.recv() {
                 messages.push(json!({ "role": "user", "content": body }));
+                if let Some(limit) = context {
+                    match context::fit(&system, &mut messages, limit) {
+                        context::Fit::TooBig { used } => {
+                            messages.pop();
+                            local::refuse_turn(
+                                &state,
+                                &end_tx,
+                                context::too_big_message(used, limit),
+                            );
+                            continue;
+                        }
+                        context::Fit::Trimmed { dropped, used } => diag(
+                            &state,
+                            crate::output::OutputLevel::Info,
+                            &format!(
+                                "[pair] context: dropped {dropped} old message(s) to stay within \
+                                 {limit} tokens (now ~{used})"
+                            ),
+                        ),
+                        context::Fit::Ok { used } if used * 5 >= limit * 4 => diag(
+                            &state,
+                            crate::output::OutputLevel::Warn,
+                            &format!(
+                                "[pair] context is {}% full (~{used}/{limit} tokens)",
+                                used * 100 / limit
+                            ),
+                        ),
+                        context::Fit::Ok { .. } => {}
+                    }
+                }
                 local::stream_turn(&base_url, &model, &system, &mut messages, &state, &end_tx);
                 if let Some(h) = &history {
                     history::save_local(h, &messages);

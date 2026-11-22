@@ -832,6 +832,7 @@ fn a_relay_failure_releases_the_host_lock() {
             task: None,
             provider: None,
             base_url: None,
+            context: None,
         },
     )
     .unwrap();

@@ -25,7 +25,7 @@ fn ollama_live_smoke_drives_seat_local_end_to_end() {
         std::env::var("CROFT_SPIKE_OLLAMA_MODEL").unwrap_or_else(|_| "qwen3-coder:30b".into());
 
     let harness = OwnerHarness::start("def greet(name):\n    return \"hi \" + name\n");
-    let pilot = seat_local(&harness.socket, None, "pilot", &url, &model, None).unwrap();
+    let pilot = seat_local(&harness.socket, None, "pilot", &url, None, &model, None).unwrap();
     send_turn(
         &pilot.state,
         &pilot.sink,
@@ -87,6 +87,7 @@ fn turn_sink_claude_writes_stream_json_to_stdin() {
 fn local_provider_appends_line_range_guidance() {
     let prompt = system_prompt(&Provider::Local {
         base_url: String::from("http://localhost:11434"),
+        context: None,
     });
     assert!(prompt.starts_with(PAIR_SYSTEM_PROMPT));
     assert!(
@@ -406,6 +407,7 @@ fn ui_reads_answer_instantly_while_the_pilot_mutex_is_held() {
         task: None,
         provider: Provider::Local {
             base_url: String::from("http://127.0.0.1:9"),
+            context: None,
         },
     })
     .unwrap();
@@ -1473,6 +1475,7 @@ fn seat_local_drives_a_turn_end_to_end() {
         None,
         "pilot",
         &base_url,
+        None,
         "test-model",
         None,
     )
@@ -1517,6 +1520,7 @@ fn pair_host_spawns_local_backend_without_a_child() {
         task: None,
         provider: Provider::Local {
             base_url: String::from("http://127.0.0.1:9"),
+            context: None,
         },
     };
     let err = match crate::pair_host::PairHost::spawn(no_model) {
@@ -1539,7 +1543,10 @@ fn pair_host_spawns_local_backend_without_a_child() {
         name: String::from("claude"),
         model: Some(String::from("test-model")),
         task: None,
-        provider: Provider::Local { base_url },
+        provider: Provider::Local {
+            base_url,
+            context: None,
+        },
     })
     .unwrap();
     assert!(!host.is_busy());
@@ -1576,6 +1583,7 @@ fn local_navigator_badge_names_the_model() {
         task: None,
         provider: Provider::Local {
             base_url: String::from("http://127.0.0.1:9"),
+            context: None,
         },
     })
     .unwrap();
@@ -2639,6 +2647,7 @@ fn turns_name_the_gutter_line_beside_the_row() {
 fn system_prompt_numbers_lines_only_by_the_gutter() {
     let prompt = system_prompt(&Provider::Local {
         base_url: String::new(),
+        context: None,
     });
     for text in prompt.lines() {
         for (at, _) in text.match_indices("line") {
@@ -3025,7 +3034,8 @@ fn local_and_ollama_both_name_a_local_endpoint() {
         assert_eq!(
             Provider::from_record(Some(name), Some("http://h:1")),
             Provider::Local {
-                base_url: "http://h:1".into()
+                base_url: "http://h:1".into(),
+                context: None,
             },
             "{name}"
         );
@@ -3076,4 +3086,37 @@ fn pair_history_trims_roundtrips_and_picks_claude_flags() {
     // fresh discards; off adds nothing.
     assert_eq!(claude_args_in(&sess, &cfg, Mode::Fresh)[0], "--session-id");
     assert!(claude_args_in(&sess, &cfg, Mode::Off).is_empty());
+}
+
+/// Context accounting: nothing happens under the limit; over it the oldest
+/// exchanges go first, whole, keeping the newest turn; a turn that cannot fit
+/// alone is reported, not sent.
+#[test]
+fn context_fit_trims_oldest_exchanges_and_refuses_oversized_turns() {
+    use super::context::*;
+    use serde_json::json;
+    let big = "x".repeat(30_000); // ~10k tokens
+    let mk = |role: &str, text: &str| json!({ "role": role, "content": text });
+    let mut m = vec![
+        mk("user", &big),
+        mk("assistant", "ok"),
+        mk("user", &big),
+        mk("assistant", "ok"),
+        mk("user", "now"),
+    ];
+    assert!(matches!(
+        fit("sys", &mut m.clone(), 100_000),
+        Fit::Ok { .. }
+    ));
+    // 24k window: reserve is a quarter (6k) -> 18k budget: one big turn fits.
+    let r = fit("sys", &mut m, 24_000);
+    assert!(matches!(r, Fit::Trimmed { .. }), "{r:?}");
+    assert_eq!(m.last().unwrap()["content"], "now");
+    assert_eq!(m[0]["role"], "user");
+    assert!(estimate("sys", &m) <= 18_000);
+    // A single turn bigger than the whole window is refused, and kept.
+    let mut one = vec![mk("user", &"y".repeat(300_000))];
+    assert!(matches!(fit("sys", &mut one, 24_000), Fit::TooBig { .. }));
+    assert_eq!(one.len(), 1);
+    assert!(too_big_message(100_000, 24_000).contains("--context"));
 }

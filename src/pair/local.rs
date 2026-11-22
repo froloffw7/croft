@@ -500,6 +500,11 @@ fn is_timeout(e: &std::io::Error) -> bool {
         })
 }
 
+/// End a turn that was never sent (it cannot fit the context window).
+pub(crate) fn refuse_turn(state: &Mutex<PairState>, turn_tx: &Sender<TurnEnd>, text: String) {
+    end_turn(state, turn_tx, true, text);
+}
+
 /// The local twin of the claude reader's `result` handling: reset the
 /// per-turn flags and report the turn's end.
 fn end_turn(state: &Mutex<PairState>, turn_tx: &Sender<TurnEnd>, is_error: bool, text: String) {

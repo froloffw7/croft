@@ -206,6 +206,15 @@ body), croft retries the turn on `/v1/chat/completions` and remembers that for t
 `CROFT_PAIR_API=openai` (or `anthropic`) pins the wire and skips the probe. Reasoning models'
 `reasoning_content` is ignored; only the answer is fenced.
 
+**Context window.** A local model has a fixed window (whatever the server was started with) and
+croft cannot read it from every server, so declare it: `croft pair --provider local --model <m>
+--context 131072` (kept in the pair record; later `croft pair` runs inherit it). croft then keeps
+the conversation inside it: it estimates tokens pessimistically (about 3 bytes per token), drops the
+oldest exchanges first (whole, newest turn kept), reports the trim and a "context is N% full" warning
+at 80% in the OUTPUT panel, and refuses a single turn that cannot fit even alone, telling you to ask
+about a smaller selection (Ask Navigator with a selection sends only those lines) or raise the
+limit. Room for the answer (up to 8192 tokens, a quarter of a small window) is always kept free.
+
 Local turns go straight to `/v1/messages` with a minimal payload (the claude CLI's ~213 KB
 tool-schema prefill is exactly what local servers choke on), and the badge names who is typing:
 `◆ local (qwen3-coder:30b) seated`.
