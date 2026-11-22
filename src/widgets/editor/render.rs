@@ -684,8 +684,15 @@ impl Widget for &mut Editor {
                 // overestimate their height (the cursor stays visible).
                 if !self.comment_boxes.is_empty() {
                     let bw = inner.width.saturating_sub(gutter_width + 3) as usize;
+                    // Rows already scrolled into the top line's own box
+                    // (`scroll_sub`) are off screen and cost nothing.
+                    let into_box = if self.scroll == scroll_before {
+                        self.scroll_sub
+                    } else {
+                        0
+                    };
                     while self.cursor_row + self.box_rows_between(self.scroll, self.cursor_row, bw)
-                        >= self.scroll + text_height
+                        >= self.scroll + text_height + into_box
                     {
                         self.scroll += 1;
                     }
