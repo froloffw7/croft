@@ -638,6 +638,12 @@ pub struct Editor {
     /// what was typed. Restored when the box is focused again, shown dimmed
     /// in its footer meanwhile, dropped on send or when the box goes.
     pub reply_drafts: std::collections::HashMap<u64, String>,
+    /// The box whose reply the navigator is answering right now; its footer
+    /// says so (instead of the "Reply" hint) until the answer lands.
+    pub comment_waiting: Option<u64>,
+    /// Screen cell of the focused reply field's caret, recorded by the last
+    /// paint so the terminal's own caret can sit in the field.
+    pub comment_caret: std::cell::Cell<Option<(u16, u16)>>,
     /// Enclosing scope header lines to pin at the top of the viewport (VS Code
     /// "Sticky Scroll"), outermost first, set by `App` from the outline scope
     /// chain of the top visible line. Empty disables the feature (e.g. wrap
@@ -1209,6 +1215,8 @@ impl Editor {
             stream_stop_line: None,
             comment_boxes: Vec::new(),
             comment_focus: None,
+            comment_waiting: None,
+            comment_caret: std::cell::Cell::new(None),
             reply_drafts: std::collections::HashMap::new(),
             sticky_lines: Vec::new(),
             sticky_click_rows: Vec::new(),

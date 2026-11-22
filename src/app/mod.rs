@@ -3690,6 +3690,9 @@ pub struct App {
     /// A comment box to scroll into view on the next frame, once the
     /// snapshot that holds its new text has been merged.
     reveal_box: Option<u64>,
+    /// The box whose reply the navigator is answering right now; its footer
+    /// shows a waiting hint until the turn ends.
+    reply_waiting: Option<u64>,
     /// Notes the navigator left since its turn started, so the TurnDone
     /// status can surface them instead of overwriting the NoteAdded status.
     pair_notes_this_turn: usize,
@@ -4967,6 +4970,7 @@ impl App {
             pair_turn_origin: None,
             pair_reply_note: None,
             reveal_box: None,
+            reply_waiting: None,
             pair_notes_this_turn: 0,
             pair_last_noted_file: None,
             pair_host_lock: None,
