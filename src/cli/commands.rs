@@ -270,6 +270,11 @@ pub enum CliCommand {
         /// to http://localhost:11434.
         #[arg(long)]
         base_url: Option<String>,
+        /// The local model's context window in tokens (what the server was
+        /// started with, e.g. 131072). croft trims the oldest part of the
+        /// conversation to stay inside it and refuses a turn that cannot fit.
+        #[arg(long, value_name = "TOKENS")]
+        context: Option<usize>,
         /// Deactivate the navigator for the workspace instead.
         #[arg(long, default_value_t = false)]
         off: bool,

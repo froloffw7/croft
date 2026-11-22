@@ -64,7 +64,11 @@ pub(super) const LOCAL_MODEL_PROMPT_SUFFIX: &str = r#"Local-model addendum:
 #[derive(Clone, Debug, PartialEq)]
 pub enum Provider {
     Claude,
-    Local { base_url: String },
+    Local {
+        base_url: String,
+        /// Context window in tokens, when the user declared one.
+        context: Option<usize>,
+    },
 }
 
 /// Whether a pair record's provider names a local endpoint: `local`, or the
@@ -80,9 +84,18 @@ impl Provider {
         match provider {
             Some("local" | "ollama") => Provider::Local {
                 base_url: base_url.unwrap_or("http://localhost:11434").to_string(),
+                context: None,
             },
             _ => Provider::Claude,
         }
+    }
+
+    /// The declared context window (local providers only).
+    pub fn with_context(mut self, tokens: Option<usize>) -> Self {
+        if let Provider::Local { context, .. } = &mut self {
+            *context = tokens;
+        }
+        self
     }
 }
 

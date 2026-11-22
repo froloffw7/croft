@@ -8,7 +8,7 @@ use super::*;
 pub fn run(cfg: PairConfig) -> Result<()> {
     let pilot = match &cfg.provider {
         Provider::Claude => seat_pilot(&cfg.socket, &cfg.name, claude_command(&cfg)?, None)?,
-        Provider::Local { base_url } => {
+        Provider::Local { base_url, context } => {
             let model = cfg
                 .model
                 .as_deref()
@@ -18,6 +18,7 @@ pub fn run(cfg: PairConfig) -> Result<()> {
                 Some(crate::pair::history_path(&cfg.workspace, &cfg.name)),
                 &cfg.name,
                 base_url,
+                *context,
                 model,
                 None,
             )?
