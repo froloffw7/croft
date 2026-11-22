@@ -157,7 +157,12 @@ impl App {
             return true;
         }
         if let Some(prompt) = self.input_prompt.as_mut() {
-            text.chars().for_each(|c| prompt.push_char(c));
+            // Line breaks become spaces: dropping them glued the last word
+            // of one line to the first of the next.
+            s.chars()
+                .map(|c| if matches!(c, '\n' | '\r' | '\t') { ' ' } else { c })
+                .filter(|c| !c.is_control())
+                .for_each(|c| prompt.push_char(c));
             return true;
         }
         if let Some(palette) = self.command_palette.as_mut() {
