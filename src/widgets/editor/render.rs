@@ -379,6 +379,7 @@ struct RowFrame<'a> {
 
 impl Widget for &mut Editor {
     fn render(self, area: Rect, buf: &mut Buffer) {
+        self.comment_caret.set(None);
         self.clamp_to_symbol_view();
         self.sync_tab_cells();
         let block_style = if self.focused {
@@ -2114,6 +2115,11 @@ impl Editor {
     pub fn cursor_screen_pos(&self) -> Option<(u16, u16)> {
         if self.last_inner.height == 0 {
             return None;
+        }
+        // A focused comment-box reply field owns the caret: showing it in
+        // the buffer text while typing into the field misled the user.
+        if self.comment_focus.is_some() {
+            return self.comment_caret.get();
         }
         self.sync_tab_cells();
         let text_x = self.last_inner.x + self.last_gutter_width + 1;

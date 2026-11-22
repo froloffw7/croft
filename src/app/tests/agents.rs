@@ -4229,3 +4229,29 @@ fn leaving_a_comment_reply_keeps_the_draft() {
     assert_eq!(f.cursor, 10);
     assert!(app.editor.reply_drafts.is_empty());
 }
+
+/// Delete, Home and End work in the comment-box reply field.
+#[test]
+fn comment_reply_field_handles_delete_home_end() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "l0\n").unwrap();
+    let mut app = App::new(dir.path().to_path_buf()).unwrap();
+    app.focus = Pane::Editor;
+    app.editor.comment_focus = Some(crate::widgets::editor::CommentFocus {
+        id: 1,
+        reply: String::from("abcd"),
+        cursor: 2,
+    });
+    let key = |app: &mut App, c| {
+        app.handle_key(KeyEvent::new(c, KeyModifiers::NONE))
+            .unwrap()
+    };
+    key(&mut app, KeyCode::Delete);
+    assert_eq!(app.editor.comment_focus.as_ref().unwrap().reply, "abd");
+    key(&mut app, KeyCode::Home);
+    assert_eq!(app.editor.comment_focus.as_ref().unwrap().cursor, 0);
+    key(&mut app, KeyCode::End);
+    assert_eq!(app.editor.comment_focus.as_ref().unwrap().cursor, 3);
+    key(&mut app, KeyCode::Delete);
+    assert_eq!(app.editor.comment_focus.as_ref().unwrap().reply, "abd");
+}

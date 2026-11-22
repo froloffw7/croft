@@ -3622,6 +3622,9 @@ pub struct App {
     /// Where the current turn was invoked: (collab file key, 0-based row).
     /// Anchors the turn's commentary box.
     pair_turn_origin: Option<(String, usize)>,
+    /// The box whose reply the navigator is answering right now; its footer
+    /// shows a waiting hint until the turn ends.
+    reply_waiting: Option<u64>,
     /// Notes the navigator left since its turn started, so the TurnDone
     /// status can surface them instead of overwriting the NoteAdded status.
     pair_notes_this_turn: usize,
@@ -4893,6 +4896,7 @@ impl App {
             navigator_notes: std::collections::HashMap::new(),
             pair_commentary_buf: String::new(),
             pair_turn_origin: None,
+            reply_waiting: None,
             pair_notes_this_turn: 0,
             pair_last_noted_file: None,
             pair_host_lock: None,

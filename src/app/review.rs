@@ -81,6 +81,13 @@ impl App {
                 focus.reply.remove(idx);
                 focus.cursor -= 1;
             }
+            KeyCode::Delete if focus.cursor < focus.reply.chars().count() => {
+                if let Some((idx, _)) = focus.reply.char_indices().nth(focus.cursor) {
+                    focus.reply.remove(idx);
+                }
+            }
+            KeyCode::Home => focus.cursor = 0,
+            KeyCode::End => focus.cursor = focus.reply.chars().count(),
             KeyCode::Left => focus.cursor = focus.cursor.saturating_sub(1),
             KeyCode::Right => {
                 focus.cursor = (focus.cursor + 1).min(focus.reply.chars().count());
@@ -169,6 +176,8 @@ impl App {
                 // retry, and appending first would duplicate the reply in
                 // the box on every attempt.
                 host.append_to_note(focus.id, &format!("you: {reply}"));
+                // The footer says so while the answer is on its way.
+                self.reply_waiting = Some(focus.id);
                 self.pair_turn_origin = Some((file, row));
                 self.status = format!("Replied to {}", host.name());
                 self.editor.comment_focus = None;

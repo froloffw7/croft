@@ -985,6 +985,7 @@ impl App {
                     let file = self.pair_last_noted_file.take();
                     let prose = std::mem::take(&mut self.pair_commentary_buf);
                     let origin = self.pair_turn_origin.take();
+                    self.reply_waiting = None;
                     // Whatever the outcome, the fix turn is over: the row's
                     // spinner stops, and the LSP's next publish decides
                     // whether the row itself goes (#374).
@@ -1066,6 +1067,7 @@ impl App {
             self.navigator_notes.clear();
             self.pair_commentary_buf.clear();
             self.pair_turn_origin = None;
+            self.reply_waiting = None;
             self.clear_problem_fix();
             // The turn counters die with the seat (see the unseat twin).
             self.pair_notes_this_turn = 0;

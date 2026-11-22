@@ -22791,3 +22791,37 @@ fn wheeling_a_focused_box_out_of_sight_releases_its_reply_field() {
     assert!(e.scroll > 5);
     assert!(e.comment_focus.is_none(), "focus released once off screen");
 }
+
+/// With a reply field focused, the terminal caret sits in the field (after
+/// the typed text), not in the buffer text.
+#[test]
+fn focused_reply_field_owns_the_caret() {
+    let mut e = editor_with("first\nsecond");
+    e.comment_boxes = vec![CommentBox {
+        id: 7,
+        line: 0,
+        author: "navigator".into(),
+        body: "note".into(),
+    }];
+    e.comment_focus = Some(CommentFocus {
+        id: 7,
+        reply: "abc".into(),
+        cursor: 2,
+    });
+    let area = Rect {
+        x: 0,
+        y: 0,
+        width: 60,
+        height: 10,
+    };
+    let mut buf = ratatui::buffer::Buffer::empty(area);
+    (&mut e as &mut Editor).render(area, &mut buf);
+    let (x, y) = e.cursor_screen_pos().expect("caret in the field");
+    // Footer is the 4th row of the box: breadcrumb, line 0, title, body, footer.
+    assert_eq!(y, 4);
+    let text_x = e.last_inner.x + e.last_gutter_width + 1;
+    assert_eq!(x, text_x + 4 + 2);
+    e.comment_focus = None;
+    (&mut e as &mut Editor).render(area, &mut buf);
+    assert_ne!(e.cursor_screen_pos().map(|p| p.1), Some(4));
+}

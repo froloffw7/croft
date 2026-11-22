@@ -290,9 +290,20 @@ impl Editor {
                 // looks like losing it.
                 None => match self.reply_drafts.get(&b.id) {
                     Some(d) => (pad(d, field_w), dim),
+                    // The "Reply" hint comes back once the answer has: while
+                    // the navigator is still working the footer says so.
+                    None if self.comment_waiting == Some(b.id) => {
+                        (pad("waiting for the answer\u{2026}", field_w), dim)
+                    }
                     None => (pad("Reply", field_w), dim),
                 },
             };
+            if let Some(f) = focus {
+                // `╰ ❯ ` is 4 cells; the caret sits where the next typed
+                // character lands, inside the windowed field.
+                let col = f.cursor.saturating_sub(win).min(field_w);
+                self.comment_caret.set(Some((text_x + 4 + col as u16, y)));
+            }
             let mut spans = vec![
                 Span::styled("\u{2570} ", accent),
                 Span::styled("\u{276f} ", accent),
