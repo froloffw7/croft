@@ -1,1 +1,2 @@
 Ask Navigator with a selection now sends the model only the selected lines (numbered by their real file rows) instead of the whole file, which helps local models and big files. Set `CROFT_PAIR_CONTEXT=buffer` to keep sending the whole buffer.
+Ask Navigator About Selection now also works on files outside the workspace (system headers, dependencies): the selected lines are sent read-only and the answer lands in the OUTPUT panel.

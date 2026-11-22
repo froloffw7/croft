@@ -1107,14 +1107,29 @@ impl App {
             self.status = format!("{} is mid-turn; wait for it to finish", host.name());
             return;
         }
-        let Some(file) = self
+        let key = self
             .editor
             .path
             .as_ref()
-            .and_then(|p| collab_file_key(&self.tree.root, p))
-        else {
-            self.status = String::from("Ask Navigator: no active workspace file");
-            return;
+            .and_then(|p| collab_file_key(&self.tree.root, p));
+        let file = match key {
+            Some(f) => f,
+            // Outside the workspace (a system header, a dependency): only a
+            // selection can be asked about; it goes out read-only under its
+            // absolute path, which no workspace key can be.
+            None if !selection.is_empty() => match self.editor.path.as_ref() {
+                Some(p) => p.to_string_lossy().into_owned(),
+                None => {
+                    self.status = String::from("Ask Navigator: no active file");
+                    return;
+                }
+            },
+            None => {
+                self.status = String::from(
+                    "Ask Navigator: this file is outside the workspace; select a fragment to ask about it",
+                );
+                return;
+            }
         };
         let scope = if range.0 == range.1 {
             format!("line {}", range.0 + 1)
