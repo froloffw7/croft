@@ -1,0 +1,1 @@
+Comment-box Reply: leaving the field (Up/Down/PageUp/PageDown, Esc, a click elsewhere) no longer discards the unsent draft; it is kept, shown dimmed in the box footer, and restored when the box is focused again.

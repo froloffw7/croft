@@ -727,6 +727,27 @@ impl Editor {
         self.nonwrap_set_top(end.saturating_sub(viewport).min(line_row));
     }
 
+    /// Release the reply field's focus, keeping a non-empty draft for when
+    /// the box is focused again.
+    pub fn release_comment_focus(&mut self) {
+        if let Some(f) = self.comment_focus.take()
+            && !f.reply.is_empty()
+        {
+            self.reply_drafts.insert(f.id, f.reply);
+        }
+    }
+
+    /// A focus on box `id` carrying its saved draft (empty when none), the
+    /// caret after the draft.
+    pub fn focus_for_comment(&mut self, id: u64) -> CommentFocus {
+        let reply = self.reply_drafts.remove(&id).unwrap_or_default();
+        CommentFocus {
+            id,
+            cursor: reply.chars().count(),
+            reply,
+        }
+    }
+
     pub(super) fn scroll_view_to(&mut self, top: usize) {
         let viewport = self.last_inner.height as usize;
         // A rendered log's text side is a one-line stub, so clamping against

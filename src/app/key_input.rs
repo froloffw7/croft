@@ -1220,7 +1220,7 @@ impl App {
                 KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown
             )
         {
-            self.editor.comment_focus = None;
+            self.editor.release_comment_focus();
         }
         if self.editor.comment_focus.is_some() && self.focus == Pane::Editor {
             self.handle_comment_focus_key(key);

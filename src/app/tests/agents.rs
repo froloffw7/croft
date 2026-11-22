@@ -4234,3 +4234,29 @@ fn paste_goes_into_the_focused_comment_reply() {
     assert_eq!(f.cursor, 4);
     assert_eq!(app.editor.lines, before, "the buffer is untouched");
 }
+
+/// Leaving the reply field (arrow keys, Esc, a click elsewhere) keeps the
+/// draft; focusing the box again brings it back.
+#[test]
+fn leaving_a_comment_reply_keeps_the_draft() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "l0\nl1\nl2\n").unwrap();
+    let mut app = App::new(dir.path().to_path_buf()).unwrap();
+    app.focus = Pane::Editor;
+    app.editor.comment_focus = Some(crate::widgets::editor::CommentFocus {
+        id: 4,
+        reply: String::from("half-typed"),
+        cursor: 10,
+    });
+    app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+        .unwrap();
+    assert!(app.editor.comment_focus.is_none());
+    assert_eq!(
+        app.editor.reply_drafts.get(&4).map(String::as_str),
+        Some("half-typed")
+    );
+    let f = app.editor.focus_for_comment(4);
+    assert_eq!(f.reply, "half-typed");
+    assert_eq!(f.cursor, 10);
+    assert!(app.editor.reply_drafts.is_empty());
+}

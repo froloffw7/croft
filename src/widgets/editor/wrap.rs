@@ -299,7 +299,12 @@ impl Editor {
                     let visible: String = f.reply.chars().skip(win).take(field_w).collect();
                     (pad(&visible, field_w), body_st)
                 }
-                None => (pad("Reply", field_w), dim),
+                // A kept draft shows (dimmed) so leaving the field never
+                // looks like losing it.
+                None => match self.reply_drafts.get(&b.id) {
+                    Some(d) => (pad(d, field_w), dim),
+                    None => (pad("Reply", field_w), dim),
+                },
             };
             let mut spans = vec![
                 Span::styled("\u{2570} ", accent),
