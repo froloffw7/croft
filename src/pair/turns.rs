@@ -125,6 +125,38 @@ pub(crate) fn compose_ask_turn(
     text
 }
 
+/// Like [`compose_ask_turn`], but the model sees ONLY the selected lines, not
+/// the whole file: each line is numbered with its real 0-based file row, so
+/// EDIT/NOTE coordinates stay valid against the full buffer. Meant for local
+/// models and big files where the whole buffer will not fit or is slow.
+pub(crate) fn compose_ask_turn_selection(
+    file: &str,
+    range: (usize, usize),
+    instruction: &str,
+    content: &str,
+) -> String {
+    let (s, e) = range;
+    let body = content
+        .split('\n')
+        .enumerate()
+        .skip(s)
+        .take(e.saturating_sub(s) + 1)
+        .map(|(i, l)| format!("{i}|{l}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "Your partner invoked you on {file} at lines {s}-{e} (0-based; lines {}-{} in \
+         your partner's gutter) and asked about THIS SELECTION ONLY. The rest of the \
+         file is deliberately not shared; do not guess at it (read it with the collab \
+         tools only if you truly need more).\n\nTask: {instruction}\n\n\
+         --- SELECTED LINES OF {file} (each line prefixed with its 0-based FILE row \
+         and '|'; coordinates in EDIT/NOTE fences are file coordinates) ---\n{body}\n\
+         --- END SELECTED ---",
+        s + 1,
+        e + 1
+    )
+}
+
 /// Compose a yield turn: the driver handed the navigator the floor. Comment
 /// only — the host discards EDIT fences on this turn — with the diff since
 /// the navigator last saw the file, and the numbered buffer.

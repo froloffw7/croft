@@ -61,7 +61,7 @@ pub(crate) use seat::seat_pilot;
 use seat::*;
 pub(crate) use state::StagedTurn;
 pub(crate) use state::lock_briefly;
-pub(crate) use turns::compose_ask_turn;
+pub(crate) use turns::{compose_ask_turn, compose_ask_turn_selection};
 pub(crate) use turns::compose_reply_turn;
 pub(crate) use turns::compose_yield_turn;
 pub(crate) use turns::send_turn;

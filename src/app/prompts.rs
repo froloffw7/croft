@@ -792,7 +792,19 @@ impl App {
                 };
                 let content = self.editor.lines.join("\n");
                 let name = host.name().to_string();
-                let result = host.send_ask_turn(&file, range, &selection, &value, &content);
+                // A real selection scopes the turn to those lines (cheap for
+                // local models and big files); CROFT_PAIR_CONTEXT=buffer
+                // restores the whole-file context.
+                let selection_only = !selection.is_empty()
+                    && std::env::var("CROFT_PAIR_CONTEXT").as_deref() != Ok("buffer");
+                let result = host.send_ask_turn_scoped(
+                    &file,
+                    range,
+                    &selection,
+                    &value,
+                    &content,
+                    selection_only,
+                );
                 match result {
                     Ok(()) => {
                         self.close_input_prompt();

@@ -14,7 +14,7 @@ use anyhow::{Context, Result};
 
 use crate::collab::position;
 use crate::pair::{
-    PairConfig, Pilot, Provider, claude_command, compose_ask_turn, compose_yield_turn,
+    PairConfig, Pilot, Provider, claude_command, compose_ask_turn, compose_ask_turn_selection, compose_yield_turn,
     lock_briefly, seat_local, seat_pilot, send_turn, write_user_turn,
 };
 
@@ -277,6 +277,21 @@ impl PairHost {
         instruction: &str,
         content: &str,
     ) -> Result<()> {
+        self.send_ask_turn_scoped(file, range, selection, instruction, content, false)
+    }
+
+    /// [`Self::send_ask_turn`] with `selection_only`: the turn carries just
+    /// the selected lines (real file row numbers), not the whole buffer.
+    /// The host still stages the full `content`, so edits apply correctly.
+    pub fn send_ask_turn_scoped(
+        &self,
+        file: &str,
+        range: (usize, usize),
+        selection: &str,
+        instruction: &str,
+        content: &str,
+        selection_only: bool,
+    ) -> Result<()> {
         let p = self.pilot.as_ref().context("navigator pilot is gone")?;
         // A parked rollback is applied before a new turn may stage (see
         // `pending_rollback`); refusing beats staging over stale books.
@@ -300,7 +315,11 @@ impl PairHost {
             st.park_caret(file, range.0); // visible presence at the ask site
             staged
         };
-        let body = compose_ask_turn(file, range, selection, instruction, content);
+        let body = if selection_only && !selection.is_empty() {
+            compose_ask_turn_selection(file, range, instruction, content)
+        } else {
+            compose_ask_turn(file, range, selection, instruction, content)
+        };
         self.commit_or_unstage(write_user_turn(&p.state, &p.sink, body), &p.state, staged)
     }
 
