@@ -52,6 +52,7 @@ pub use provider::PairConfig;
 pub use provider::Provider;
 pub use provider::is_local;
 use provider::*;
+pub(crate) use provider::{CONTEXT_FILE, project_prompt, save_context_instruction};
 pub use repl::run;
 #[cfg(test)]
 use repl::*;

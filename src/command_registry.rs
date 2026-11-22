@@ -2588,6 +2588,12 @@ commands! {
         title: "Navigator: Ask About Line or Selection",
         hint: "Cmd+K Q",
     }
+    /// Ask the navigator to write its context to `CONTEXT.md`.
+    SaveNavigatorContext {
+        id: "navigator_save_context",
+        title: "Navigator: Save Context to CONTEXT.md",
+        hint: "",
+    }
     AskNavigatorAboutCapture {
         id: "captures_ask_navigator",
         title: "Captures: Ask Navigator About This Line",

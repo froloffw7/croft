@@ -16,6 +16,7 @@ pub fn run(cfg: PairConfig) -> Result<()> {
             seat_local(
                 &cfg.socket,
                 Some(crate::pair::history_path(&cfg.workspace, &cfg.name)),
+                &crate::pair::project_prompt(&cfg.workspace),
                 &cfg.name,
                 base_url,
                 *context,

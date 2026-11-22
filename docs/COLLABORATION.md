@@ -20,6 +20,19 @@ available locally with no external dependency.
 
 Sessions started by an older croft under dtach keep reattaching through dtach until they end.
 
+### Project files the navigator reads
+
+Two optional, plain-text files in the workspace ride in the navigator's system prompt (after the
+built-in fence protocol, each cut at 24,000 characters), so you can edit what it is told:
+
+- `.croft/pair.md` — standing instructions for this project: house style, what to avoid, the
+  build and test commands.
+- `CONTEXT.md` — notes for continuing the work. **Command Palette → "Navigator: Save Context to
+  CONTEXT.md"** asks the model to write them (Goal, Decisions, State, Files, Open questions; under
+  ~60 lines). The model chooses what is worth keeping; when the file exists it is sent along and the
+  model updates it instead of starting over. Edit the file freely: it is read when the navigator
+  starts, so a new `croft pair` session begins with it.
+
 ### Navigator memory
 
 `croft pair` keeps the navigator's conversation between runs, per workspace and seat name. A

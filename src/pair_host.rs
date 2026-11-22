@@ -96,6 +96,7 @@ impl PairHost {
                 let pilot = seat_local(
                     &cfg.socket,
                     Some(crate::pair::history_path(&cfg.workspace, &cfg.name)),
+                    &crate::pair::project_prompt(&cfg.workspace),
                     &cfg.name,
                     base_url,
                     *context,
@@ -356,6 +357,25 @@ impl PairHost {
             st.set_comment_only(true);
         }
         let body = compose_external_selection_turn(path, range, instruction, content);
+        write_user_turn(&p.state, &p.sink, body)
+    }
+
+    /// A comment-only turn that is not about any file (Save Context): the
+    /// caller captures the prose of the answer.
+    pub fn send_plain_turn(&self, body: String) -> Result<()> {
+        let p = self.pilot.as_ref().context("navigator pilot is gone")?;
+        if !self.drain_rollback(|| lock_briefly(&p.state)) {
+            anyhow::bail!("the navigator is mid-turn; wait for it to finish");
+        }
+        {
+            let Some(mut st) = lock_briefly(&p.state) else {
+                anyhow::bail!("the navigator is mid-turn; wait for it to finish");
+            };
+            if st.turn_active() || self.turn_pending.load(std::sync::atomic::Ordering::Relaxed) {
+                anyhow::bail!("the navigator is mid-turn; wait for it to finish");
+            }
+            st.set_comment_only(true);
+        }
         write_user_turn(&p.state, &p.sink, body)
     }
 

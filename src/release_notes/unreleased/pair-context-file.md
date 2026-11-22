@@ -1,0 +1,1 @@
+Navigator: new command "Save Context to CONTEXT.md" asks the model for notes to continue the work and writes them to CONTEXT.md in the workspace (updating an existing file); CONTEXT.md and the optional .croft/pair.md are read into the navigator's system prompt when it starts.

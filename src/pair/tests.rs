@@ -25,7 +25,7 @@ fn ollama_live_smoke_drives_seat_local_end_to_end() {
         std::env::var("CROFT_SPIKE_OLLAMA_MODEL").unwrap_or_else(|_| "qwen3-coder:30b".into());
 
     let harness = OwnerHarness::start("def greet(name):\n    return \"hi \" + name\n");
-    let pilot = seat_local(&harness.socket, None, "pilot", &url, None, &model, None).unwrap();
+    let pilot = seat_local(&harness.socket, None, "", "pilot", &url, None, &model, None).unwrap();
     send_turn(
         &pilot.state,
         &pilot.sink,
@@ -1474,6 +1474,7 @@ fn seat_local_drives_a_turn_end_to_end() {
     let pilot = seat_local(
         &harness.socket,
         None,
+        "",
         "pilot",
         &base_url,
         None,
@@ -3143,4 +3144,37 @@ fn external_selection_turn_is_read_only_and_scoped() {
     assert!(t.contains("1|b") && t.contains("2|c"));
     assert!(!t.contains("0|a") && !t.contains("3|d"));
     assert!(t.contains("Do NOT emit EDIT or NOTE"));
+}
+
+/// The workspace's `.croft/pair.md` and `CONTEXT.md` ride in the system
+/// prompt after the protocol; absent or empty files add nothing.
+#[test]
+fn project_prompt_reads_the_editable_files() {
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(project_prompt(dir.path()), "");
+    std::fs::create_dir_all(dir.path().join(".croft")).unwrap();
+    std::fs::write(dir.path().join(".croft/pair.md"), "Prefer small diffs.\n").unwrap();
+    std::fs::write(dir.path().join("CONTEXT.md"), "  \n").unwrap();
+    let p = project_prompt(dir.path());
+    assert!(p.contains("PROJECT INSTRUCTIONS") && p.contains("Prefer small diffs."));
+    assert!(
+        !p.contains("SAVED CONTEXT"),
+        "a blank CONTEXT.md adds nothing"
+    );
+    std::fs::write(dir.path().join("CONTEXT.md"), "## Goal\nport to vulkan\n").unwrap();
+    let p = project_prompt(dir.path());
+    assert!(p.contains("SAVED CONTEXT") && p.contains("port to vulkan"));
+    // A huge file is cut, not sent whole in every request.
+    std::fs::write(dir.path().join("CONTEXT.md"), "z".repeat(100_000)).unwrap();
+    assert!(project_prompt(dir.path()).len() < 60_000);
+}
+
+/// The save instruction names the sections and, when a file exists, asks for
+/// an update of it.
+#[test]
+fn save_context_instruction_updates_an_existing_file() {
+    let fresh = save_context_instruction(None);
+    assert!(fresh.contains("## Decisions") && !fresh.contains("CURRENT CONTEXT.md"));
+    let upd = save_context_instruction(Some("old notes"));
+    assert!(upd.contains("UPDATE it") && upd.contains("old notes"));
 }
