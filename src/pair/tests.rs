@@ -3132,3 +3132,15 @@ fn context_fit_trims_oldest_exchanges_and_refuses_oversized_turns() {
     assert_eq!(one.len(), 1);
     assert!(too_big_message(100_000, 24_000).contains("--context"));
 }
+
+/// An ask about a file outside the workspace is read-only prose over the
+/// selected rows only.
+#[test]
+fn external_selection_turn_is_read_only_and_scoped() {
+    let t =
+        compose_external_selection_turn("/usr/include/x.h", (1, 2), "what is this", "a\nb\nc\nd");
+    assert!(t.contains("OUTSIDE the workspace"));
+    assert!(t.contains("1|b") && t.contains("2|c"));
+    assert!(!t.contains("0|a") && !t.contains("3|d"));
+    assert!(t.contains("Do NOT emit EDIT or NOTE"));
+}

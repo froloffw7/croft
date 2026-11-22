@@ -14,8 +14,9 @@ use anyhow::{Context, Result};
 
 use crate::collab::position;
 use crate::pair::{
-    PairConfig, Pilot, Provider, claude_command, compose_ask_turn, compose_ask_turn_selection, compose_yield_turn,
-    lock_briefly, seat_local, seat_pilot, send_turn, write_user_turn,
+    PairConfig, Pilot, Provider, claude_command, compose_ask_turn, compose_ask_turn_selection,
+    compose_external_selection_turn, compose_yield_turn, lock_briefly, seat_local, seat_pilot,
+    send_turn, write_user_turn,
 };
 
 /// What the pilot surfaces to the App, drained by `poll` once per tick.
@@ -327,6 +328,35 @@ impl PairHost {
             compose_ask_turn(file, range, selection, instruction, content)
         };
         self.commit_or_unstage(write_user_turn(&p.state, &p.sink, body), &p.state, staged)
+    }
+
+    /// Ask about a selection in a file outside the workspace: a read-only,
+    /// comment-only turn (nothing is staged, no session file is requested).
+    /// The answer has no buffer to anchor to and lands in the OUTPUT channel.
+    pub fn send_external_selection_turn(
+        &self,
+        path: &str,
+        range: (usize, usize),
+        instruction: &str,
+        content: &str,
+    ) -> Result<()> {
+        let p = self.pilot.as_ref().context("navigator pilot is gone")?;
+        if !self.drain_rollback(|| lock_briefly(&p.state)) {
+            anyhow::bail!("the navigator is mid-turn; wait for it to finish");
+        }
+        {
+            let Some(mut st) = lock_briefly(&p.state) else {
+                anyhow::bail!("the navigator is mid-turn; wait for it to finish");
+            };
+            if st.turn_active() || self.turn_pending.load(std::sync::atomic::Ordering::Relaxed) {
+                anyhow::bail!("the navigator is mid-turn; wait for it to finish");
+            }
+            // Edits are host-gated off for this turn; the next staged turn
+            // resets the flag.
+            st.set_comment_only(true);
+        }
+        let body = compose_external_selection_turn(path, range, instruction, content);
+        write_user_turn(&p.state, &p.sink, body)
     }
 
     /// Yield turn: the driver hands the navigator the floor. Comment-only,

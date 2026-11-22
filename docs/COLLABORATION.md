@@ -166,7 +166,9 @@ it leaves, and riding its edits as they stream. Inside the editor:
 - **Ask it** about a line or a selection — right-click the gutter ("Ask Navigator"), right-click
   a selection ("Ask Navigator About Selection"), or press `Cmd+K Q`. With a selection, only the selected lines (numbered by their real file rows) go to
   the model, not the whole file — handy for local models and big files; set `CROFT_PAIR_CONTEXT=buffer`
-  to send the whole buffer as before. From the CAPTURES panel, `n` on a
+  to send the whole buffer as before. A selection in a file OUTSIDE the workspace (a system header, a
+  dependency) can be asked about too: it goes out read-only, the model answers in plain prose, and the
+  answer appears in the OUTPUT panel (there is no buffer to pin a comment box to). From the CAPTURES panel, `n` on a
   captured line asks about that line with the pane rows around it. From the PROBLEMS panel,
   right-click a diagnostic → **Fix with Navigator** (also the last row of the `Cmd+.` Quick Fix
   picker) sends it the diagnostic with the server's quick fixes as hints; the row wears a spinner
