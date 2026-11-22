@@ -1156,6 +1156,17 @@ impl App {
         // A focused comment-box reply field owns the keyboard: typing edits
         // the draft, Enter sends, Esc leaves, F4 hops on. Sits below the
         // real modals (palette, prompts) and above every editor key.
+        // Up/Down/PageUp/PageDown are not reply-field keys: they leave the
+        // box and move the caret, so a box scrolled out of sight (wheel,
+        // scrollbar) cannot keep swallowing the keyboard.
+        if self.editor.comment_focus.is_some()
+            && matches!(
+                key.code,
+                KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown
+            )
+        {
+            self.editor.comment_focus = None;
+        }
         if self.editor.comment_focus.is_some() && self.focus == Pane::Editor {
             self.handle_comment_focus_key(key);
             return Ok(());
