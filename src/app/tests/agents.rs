@@ -4203,3 +4203,26 @@ fn completing_an_approval_merge_approves_it_and_stages_nothing() {
         assert_eq!(input["content"], "one\ntheirs\nthree\n");
     });
 }
+
+/// Pasting into the Ask Navigator prompt (and any input prompt) fills the
+/// field; line breaks become spaces rather than gluing words together.
+#[test]
+fn paste_into_the_ask_prompt_keeps_words_apart() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "l0\n").unwrap();
+    let mut app = App::new(dir.path().to_path_buf()).unwrap();
+    app.open_input_prompt(crate::widgets::input_prompt::InputPrompt::new(
+        crate::widgets::input_prompt::InputPurpose::AskNavigator {
+            file: "a.txt".into(),
+            range: (0, 0),
+            selection: String::new(),
+        },
+        "Ask",
+        "What?",
+    ));
+    app.handle_paste("first line\nsecond");
+    assert_eq!(
+        app.input_prompt.as_ref().unwrap().value,
+        "first line second"
+    );
+}
