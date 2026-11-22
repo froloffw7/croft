@@ -22246,3 +22246,81 @@ fn the_toggle_disables_every_pair_behavior() {
     e.backspace();
     assert_eq!(e.lines[0], ")", "off means plain backspace");
 }
+
+fn render_once(e: &mut Editor, area: Rect) {
+    let mut buf = ratatui::buffer::Buffer::empty(area);
+    (e as &mut Editor).render(area, &mut buf);
+}
+
+/// A tall comment box can be wheeled into view from below: the caret the
+/// wheel drags along must be clamped by rows (box rows included), or the
+/// render scrolls the view back down to fetch it and the box never shows.
+#[test]
+fn wheeling_up_reaches_a_tall_comment_box_above_the_caret() {
+    let text: String = (0..60).map(|i| format!("line {i}\n")).collect();
+    let mut e = editor_with(&text);
+    e.wrap_override = Some(false);
+    e.comment_boxes = vec![CommentBox {
+        id: 1,
+        line: 20,
+        author: "navigator".into(),
+        body: (0..30)
+            .map(|i| format!("point {i}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    }];
+    let area = Rect {
+        x: 0,
+        y: 0,
+        width: 60,
+        height: 12,
+    };
+    render_once(&mut e, area);
+    e.scroll = 40;
+    e.cursor_row = 45;
+    render_once(&mut e, area);
+    for _ in 0..80 {
+        e.scroll_up(1);
+        render_once(&mut e, area);
+    }
+    assert!(
+        e.scroll <= 20,
+        "the view reached the box: scroll {} sub {}",
+        e.scroll,
+        e.scroll_sub
+    );
+}
+
+/// A reply field whose box was wheeled out of sight no longer holds the
+/// keyboard.
+#[test]
+fn wheeling_a_focused_box_out_of_sight_releases_its_reply_field() {
+    let text: String = (0..60).map(|i| format!("line {i}\n")).collect();
+    let mut e = editor_with(&text);
+    e.wrap_override = Some(false);
+    e.comment_boxes = vec![CommentBox {
+        id: 1,
+        line: 5,
+        author: "navigator".into(),
+        body: "a\nb\nc".into(),
+    }];
+    let area = Rect {
+        x: 0,
+        y: 0,
+        width: 60,
+        height: 12,
+    };
+    render_once(&mut e, area);
+    e.cursor_row = 5;
+    e.comment_focus = Some(CommentFocus {
+        id: 1,
+        reply: String::new(),
+        cursor: 0,
+    });
+    for _ in 0..40 {
+        e.scroll_down(1);
+        render_once(&mut e, area);
+    }
+    assert!(e.scroll > 5);
+    assert!(e.comment_focus.is_none(), "focus released once off screen");
+}

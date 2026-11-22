@@ -635,8 +635,30 @@ impl Editor {
         }
         self.scroll = line.min(self.lines.len().saturating_sub(1));
         self.scroll_sub = row.saturating_sub(acc);
-        let last_visible = (self.scroll + viewport - 1).min(self.lines.len().saturating_sub(1));
-        let floor = self.caret_floor_row().min(last_visible);
+        // Comment boxes eat rows: the last line whose own text row is on
+        // screen comes earlier than `scroll + viewport - 1`, and a top that
+        // sits inside a box has not got its own text row on screen at all.
+        // Clamping the caret by line count alone left it below the fold, and
+        // the render then scrolled the view back down to fetch it, so a box
+        // could never be wheeled into view from below.
+        let last_visible = self.nonwrap_last_visible_line(viewport);
+        let first_visible = if self.scroll_sub > 0 {
+            (self.scroll + 1).min(last_visible)
+        } else {
+            self.scroll
+        };
+        let floor = self.caret_floor_row().max(first_visible).min(last_visible);
+        // A reply field whose box left the screen no longer holds the keys.
+        if let Some(focus) = &self.comment_focus {
+            let anchor = self
+                .comment_boxes
+                .iter()
+                .find(|b| b.id == focus.id)
+                .map(|b| b.line);
+            if anchor.is_none_or(|l| l < self.scroll || l > last_visible) {
+                self.comment_focus = None;
+            }
+        }
         if self.cursor_row < floor {
             self.cursor_row = floor;
         } else if self.cursor_row > last_visible {
@@ -644,6 +666,28 @@ impl Editor {
         }
         self.cursor_col = self.cursor_col.min(self.line_char_len(self.cursor_row));
         self.last_edit_kind = None;
+    }
+
+    /// The last buffer line whose text row is on screen for the current
+    /// `(scroll, scroll_sub)` top, counting the comment-box rows between
+    /// lines.
+    fn nonwrap_last_visible_line(&self, viewport: usize) -> usize {
+        let bw = self.visible_text_width();
+        let last_line = self.lines.len().saturating_sub(1);
+        // Row of `line`'s text relative to the viewport top; the top line's
+        // own text row is `scroll_sub` rows above it.
+        let mut pos = -(self.scroll_sub as isize);
+        let mut last = self.scroll.min(last_line);
+        let mut line = self.scroll;
+        while line < self.lines.len() {
+            if pos >= viewport as isize {
+                break;
+            }
+            last = line;
+            pos += 1 + self.box_rows_between(line, line + 1, bw) as isize;
+            line += 1;
+        }
+        last
     }
 
     pub(super) fn scroll_view_to(&mut self, top: usize) {
