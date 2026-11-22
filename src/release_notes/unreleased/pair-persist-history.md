@@ -1,0 +1,1 @@
+The navigator now remembers its conversation between `croft pair` runs: a local model keeps its last few messages in the state directory, and the claude provider resumes its session (`--session-id` / `--resume`) per workspace and seat. `CROFT_PAIR_HISTORY=fresh` starts over, `CROFT_PAIR_HISTORY=off` disables it.

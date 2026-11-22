@@ -25,7 +25,7 @@ fn ollama_live_smoke_drives_seat_local_end_to_end() {
         std::env::var("CROFT_SPIKE_OLLAMA_MODEL").unwrap_or_else(|_| "qwen3-coder:30b".into());
 
     let harness = OwnerHarness::start("def greet(name):\n    return \"hi \" + name\n");
-    let pilot = seat_local(&harness.socket, "pilot", &url, &model, None).unwrap();
+    let pilot = seat_local(&harness.socket, None, "pilot", &url, &model, None).unwrap();
     send_turn(
         &pilot.state,
         &pilot.sink,
@@ -1398,7 +1398,15 @@ fn seat_local_drives_a_turn_end_to_end() {
         " edit",
         "\n<<<END>>>\nDone.\n",
     ]);
-    let pilot = seat_local(&harness.socket, "pilot", &base_url, "test-model", None).unwrap();
+    let pilot = seat_local(
+        &harness.socket,
+        None,
+        "pilot",
+        &base_url,
+        "test-model",
+        None,
+    )
+    .unwrap();
     assert!(!pilot.reader_finished(), "a local seat never loses a child");
 
     send_turn(&pilot.state, &pilot.sink, "fix demo.txt").unwrap();
@@ -2882,4 +2890,44 @@ fn compose_turn_always_names_target_file() {
     let noted = with_pending_note(Some("stream was cancelled".into()), "task".into());
     assert!(noted.starts_with("stream was cancelled"));
     assert!(noted.contains("task"));
+}
+
+/// History: trimming keeps the tail starting on a user message; saved local
+/// messages round-trip; the claude flags are `--session-id` first and
+/// `--resume` once the CLI has the transcript.
+#[test]
+fn pair_history_trims_roundtrips_and_picks_claude_flags() {
+    use super::history::*;
+    use serde_json::json;
+    let msgs: Vec<_> = (0..10)
+        .map(|i| json!({ "role": if i % 2 == 0 { "user" } else { "assistant" }, "content": i }))
+        .collect();
+    let t = trim(msgs.clone());
+    assert!(t.len() <= KEEP_MESSAGES);
+    assert_eq!(t[0]["role"], "user");
+    assert_eq!(t.last().unwrap()["content"], 9);
+
+    let dir = tempfile::tempdir().unwrap();
+    let f = dir.path().join("pair/x.json");
+    save_local(&f, &msgs);
+    assert_eq!(load_local(&f), t);
+
+    let sess = dir.path().join("s/x.session");
+    let cfg = dir.path().join("claude");
+    let first = claude_args_in(&sess, &cfg, Mode::On);
+    assert_eq!(first[0], "--session-id");
+    let id = first[1].clone();
+    // The CLI has not written a transcript yet: still a new session, new id.
+    assert_eq!(claude_args_in(&sess, &cfg, Mode::On)[0], "--session-id");
+    let id2 = std::fs::read_to_string(&sess).unwrap();
+    std::fs::create_dir_all(cfg.join("projects/p")).unwrap();
+    std::fs::write(cfg.join(format!("projects/p/{id2}.jsonl")), "{}").unwrap();
+    assert_eq!(
+        claude_args_in(&sess, &cfg, Mode::On),
+        vec!["--resume".to_string(), id2.clone()]
+    );
+    assert_ne!(id, id2);
+    // fresh discards; off adds nothing.
+    assert_eq!(claude_args_in(&sess, &cfg, Mode::Fresh)[0], "--session-id");
+    assert!(claude_args_in(&sess, &cfg, Mode::Off).is_empty());
 }

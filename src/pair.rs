@@ -24,6 +24,7 @@ mod apply;
 mod caret;
 mod claude_cli;
 mod fence;
+mod history;
 pub(crate) mod local;
 mod notes;
 mod offsets;
@@ -40,6 +41,7 @@ pub(crate) use claude_cli::FAKE_CLAUDE;
 pub(crate) use claude_cli::claude_command;
 use claude_cli::*;
 use fence::*;
+pub(crate) use history::local_path as history_path;
 #[cfg(test)]
 pub(crate) use notes::inject_note;
 pub(crate) use notes::inject_note_now;
