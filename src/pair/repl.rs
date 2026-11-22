@@ -13,7 +13,14 @@ pub fn run(cfg: PairConfig) -> Result<()> {
                 .model
                 .as_deref()
                 .context("a local provider needs --model (there is no CLI default)")?;
-            seat_local(&cfg.socket, &cfg.name, base_url, model, None)?
+            seat_local(
+                &cfg.socket,
+                Some(crate::pair::history_path(&cfg.workspace, &cfg.name)),
+                &cfg.name,
+                base_url,
+                model,
+                None,
+            )?
         }
     };
     let stdin = std::io::stdin();

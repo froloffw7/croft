@@ -263,6 +263,7 @@ pub(crate) fn seat_pilot(
 /// [`local::stream_turn`] per queued turn body.
 pub(crate) fn seat_local(
     socket: &Path,
+    history: Option<PathBuf>,
     name: &str,
     base_url: &str,
     model: &str,
@@ -284,10 +285,16 @@ pub(crate) fn seat_local(
         })
         .into_owned();
         std::thread::spawn(move || {
-            let mut messages: Vec<Value> = Vec::new();
+            let mut messages: Vec<Value> = history
+                .as_deref()
+                .map(history::load_local)
+                .unwrap_or_default();
             while let Ok(body) = turns_rx.recv() {
                 messages.push(json!({ "role": "user", "content": body }));
                 local::stream_turn(&base_url, &model, &system, &mut messages, &state, &end_tx);
+                if let Some(h) = &history {
+                    history::save_local(h, &messages);
+                }
             }
         });
     }
