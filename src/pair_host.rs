@@ -92,7 +92,14 @@ impl PairHost {
                     .as_deref()
                     .context("a local provider needs --model (there is no CLI default)")?;
                 let (tx, rx) = channel();
-                let pilot = seat_local(&cfg.socket, &cfg.name, base_url, model, Some(tx))?;
+                let pilot = seat_local(
+                    &cfg.socket,
+                    Some(crate::pair::history_path(&cfg.workspace, &cfg.name)),
+                    &cfg.name,
+                    base_url,
+                    model,
+                    Some(tx),
+                )?;
                 let mut host = Self::seated(pilot, rx, &cfg.name, cfg.task.as_deref())?;
                 host.model_label = Some(model.to_string());
                 Ok(host)
