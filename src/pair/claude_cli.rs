@@ -99,6 +99,7 @@ pub(crate) fn claude_command(cfg: &PairConfig) -> Result<Command> {
         .args(["--mcp-config", &mcp_config.to_string()])
         .args(["--append-system-prompt", &system_prompt(&cfg.provider)])
         .current_dir(&cfg.workspace);
+    cmd.args(super::history::claude_args(&cfg.workspace, &cfg.name));
     if let Some(model) = &cfg.model {
         cmd.args(["--model", model]);
     }

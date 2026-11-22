@@ -20,6 +20,14 @@ available locally with no external dependency.
 
 Sessions started by an older croft under dtach keep reattaching through dtach until they end.
 
+### Navigator memory
+
+`croft pair` keeps the navigator's conversation between runs, per workspace and seat name. A
+`local` model gets its last three exchanges back (stored under croft's state directory, in
+`pair/`); older ones are dropped because each carried a now-stale copy of the buffer. The `claude`
+provider resumes its own session, so the CLI's usual context management applies. Set
+`CROFT_PAIR_HISTORY=fresh` to discard it and start over, or `CROFT_PAIR_HISTORY=off` to disable it.
+
 ## Shared sessions
 
 Several people (or several of your own windows) can `croft attach` the same folder and share
