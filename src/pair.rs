@@ -47,6 +47,7 @@ use notes::*;
 use offsets::*;
 pub use provider::PairConfig;
 pub use provider::Provider;
+pub use provider::is_local;
 use provider::*;
 pub use repl::run;
 #[cfg(test)]

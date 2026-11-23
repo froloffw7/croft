@@ -3009,3 +3009,24 @@ fn an_openai_only_endpoint_is_reached_through_chat_completions() {
     stop.store(true, Ordering::Relaxed);
     pump.join().unwrap();
 }
+
+/// `local` and the older `ollama` both seat a local endpoint; anything else
+/// is the claude CLI.
+#[test]
+fn local_and_ollama_both_name_a_local_endpoint() {
+    for name in ["local", "ollama"] {
+        assert_eq!(
+            Provider::from_record(Some(name), Some("http://h:1")),
+            Provider::Local {
+                base_url: "http://h:1".into()
+            },
+            "{name}"
+        );
+        assert!(crate::pair::is_local(Some(name)));
+    }
+    assert_eq!(
+        Provider::from_record(Some("claude"), None),
+        Provider::Claude
+    );
+    assert!(!crate::pair::is_local(None));
+}

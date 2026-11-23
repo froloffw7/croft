@@ -349,7 +349,11 @@ impl Cli {
                 // The caret name belongs to the seat, not to a backend, so
                 // it is inherited even across a provider switch; only an
                 // explicit --name changes it (#1907).
-                let recorded = current.as_ref().and_then(|r| r.provider.clone());
+                let recorded = current
+                    .as_ref()
+                    .and_then(|r| r.provider.clone())
+                    .map(canonical_provider);
+                let provider = provider.map(canonical_provider);
                 // An explicit provider SWITCH starts that backend fresh:
                 // inheriting the other backend's endpoint or model would
                 // mis-configure the new seat (a claude record persists
@@ -393,8 +397,8 @@ impl Cli {
                     return Ok(());
                 }
                 anyhow::ensure!(
-                    provider.as_deref() != Some("ollama") || model.is_some(),
-                    "--provider ollama needs --model <name> (e.g. --model qwen3-coder:30b); \
+                    provider.as_deref() != Some("local") || model.is_some(),
+                    "--provider local needs --model <name> (e.g. --model qwen3-coder:30b); \
                      a local endpoint has no CLI default"
                 );
                 if repl {

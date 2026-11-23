@@ -552,11 +552,11 @@ The navigator re-engages on its own as the driver works.
 
 ### Local models
 
-`--provider ollama` seats the same navigator on any local Anthropic-compatible
+`--provider local` seats the same navigator on any local Anthropic-compatible
 endpoint (Ollama, LM Studio, llama.cpp, vLLM):
 
 ```sh
-croft pair --provider ollama --model qwen3-coder:30b            # localhost:11434
+croft pair --provider local --model qwen3-coder:30b            # localhost:11434
 croft pair --base-url http://box:8080 --model qwen3-coder:30b   # implies ollama
 ```
 
