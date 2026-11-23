@@ -1,0 +1,1 @@
+perf(app): An idle editor now wakes 25 times a second instead of 125 once it has been quiet for a moment, so it no longer burns a few percent of a core in the background. Typing, terminals and background results keep the fast poll.
