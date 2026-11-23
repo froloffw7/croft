@@ -301,14 +301,17 @@ impl Widget for &mut SearchPanel {
         buf.set_string(inner.x, inner.y, "SEARCH", title_style);
 
         // Header action icons, laid out from the right edge: clear (rightmost)
-        // then refresh, each a single-cell click target that lifts to the accent
-        // on hover. Only drawn when the panel is wide enough to clear the label.
+        // then refresh, each a two-cell click target drawn by the shared
+        // header pill (bold, lifting on hover) like the other view headers. Only
+        // drawn when the panel is wide enough to clear the label.
         self.refresh_x = 0;
         self.refresh_y = inner.y;
         self.clear_x = 0;
         self.clear_y = inner.y;
         if inner.width > 16 {
-            let clear_x = inner.x + inner.width - 1;
+            // Each icon owns two cells (the glyph and the one after it, as in
+            // the other headers); a cell apart, flush with the panel's edge.
+            let clear_x = inner.x + inner.width - 2;
             let refresh_x = clear_x - 3;
             for (x, glyph) in [
                 (refresh_x, crate::icons::SEARCH_REFRESH),
@@ -316,18 +319,8 @@ impl Widget for &mut SearchPanel {
             ] {
                 let hot = self
                     .hover_pointer
-                    .is_some_and(|(px, py)| py == inner.y && px == x);
-                // Croft Loch: the side bar's header actions, muted at rest
-                // and lifted to the strong ink on a faint chip under the
-                // pointer; the accent stays for focus.
-                let style = if tones.is_some() {
-                    crate::widgets::header_pill::action_style(self.theme, hot)
-                } else if hot {
-                    Style::default().fg(accent)
-                } else {
-                    Style::default().fg(self.theme.ui(Color::Rgb(0x8b, 0x94, 0xa4)))
-                };
-                buf.set_string(x, inner.y, glyph.to_string(), style);
+                    .is_some_and(|(px, py)| py == inner.y && (x..x + 2).contains(&px));
+                crate::widgets::header_pill::render(buf, x, inner.y, glyph, self.theme, hot);
             }
             self.refresh_x = refresh_x;
             self.clear_x = clear_x;

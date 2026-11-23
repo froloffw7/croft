@@ -81,7 +81,7 @@ r00 c000-003 fg=reset bg=#000000
 r00 c004-004 fg=darkgray bg=#000000
 r00 c005-014 fg=#e7e7e7 bg=#000000 mod=BOLD
 r00 c015-031 fg=darkgray bg=#000000
-r00 c032-034 fg=#4fb1a6 bg=#000000
+r00 c032-034 fg=#e7e7e7 bg=#000000
 r00 c035-035 fg=darkgray bg=#000000
 r00 c036-046 fg=white bg=#264f4a mod=BOLD
 r00 c047-111 fg=reset bg=#1f2436
@@ -708,7 +708,7 @@ r25 c071-077 fg=#808898 bg=#000000
 r25 c078-078 fg=reset bg=#000000
 r25 c079-088 fg=#808898 bg=#000000
 r25 c089-115 fg=reset bg=#000000
-r25 c116-118 fg=#4fb1a6 bg=#000000
+r25 c116-118 fg=#e7e7e7 bg=#000000
 r25 c119-119 fg=reset bg=#000000
 r26 c000-003 fg=reset bg=#000000
 r26 c004-004 fg=darkgray bg=#000000

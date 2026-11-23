@@ -28,12 +28,14 @@ impl SearchPanel {
 
     /// True when `(col, row)` lands on the header "Refresh" action icon.
     pub fn refresh_at(&self, col: u16, row: u16) -> bool {
-        self.refresh_x != 0 && row == self.refresh_y && col == self.refresh_x
+        self.refresh_x != 0
+            && row == self.refresh_y
+            && (self.refresh_x..self.refresh_x + 2).contains(&col)
     }
 
     /// True when `(col, row)` lands on the header "Clear Search Results" icon.
     pub fn clear_at(&self, col: u16, row: u16) -> bool {
-        self.clear_x != 0 && row == self.clear_y && col == self.clear_x
+        self.clear_x != 0 && row == self.clear_y && (self.clear_x..self.clear_x + 2).contains(&col)
     }
 
     /// The hover-tooltip label for whatever actionable control sits under

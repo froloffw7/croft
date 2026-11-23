@@ -400,6 +400,41 @@ pub struct Prefs {
     /// first non-blank character and column 0.
     #[serde(default)]
     pub home_walks_wrapped_rows: bool,
+    /// How a hovered heading (a panel tab such as PROBLEMS) shows the pointer:
+    /// "soft" (the default, also what an empty string means; a soft white),
+    /// "color" (`hover_heading_color`), "accent" or "pill". Parsed by
+    /// `HeadingHover::from_pref`.
+    #[serde(default)]
+    pub hover_heading: String,
+    /// The colour of a hovered heading in the "color" mode: an ANSI colour
+    /// name of the active theme (`red`, `bright_cyan`, ...) or `#rrggbb`. The
+    /// theme's accent when empty or unknown.
+    #[serde(default)]
+    pub hover_heading_color: String,
+    /// How a hovered icon (header icons, the open-tabs button, the layout
+    /// toggles, `+` / `-` / `⋯`) shows the pointer: "accent" (the default, also
+    /// what an empty string means), "color" (`hover_icon_color`) or "pill".
+    /// Parsed by `IconHover::from_pref`.
+    #[serde(default)]
+    pub hover_icon: String,
+    /// The colour of a hovered icon in the "color" mode, as
+    /// `hover_heading_color`.
+    #[serde(default)]
+    pub hover_icon_color: String,
+    /// The fill of the "pill" hover mode for headings: an ANSI colour name of
+    /// the active theme or `#rrggbb`. The theme's accent when empty or
+    /// unknown. The text on it is black or white, whichever reads better.
+    #[serde(default)]
+    pub hover_heading_pill_color: String,
+    /// The fill of the "pill" hover mode for icons, as
+    /// `hover_heading_pill_color`.
+    #[serde(default)]
+    pub hover_icon_pill_color: String,
+    /// The border of the hint popups (LSP hover, signature help, completion
+    /// list, UI tooltips): "plain" (the default, also what an empty string
+    /// means), "rounded", "double" or "thick".
+    #[serde(default)]
+    pub popup_border: String,
     /// Gutter line numbers (#1576, VS Code's `editor.lineNumbers`): "on"
     /// (also what the empty string an older config deserializes to means),
     /// "relative", "interval" or "off". Parsed by `LineNumbers::from_pref`.

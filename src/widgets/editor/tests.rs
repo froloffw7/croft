@@ -14428,6 +14428,10 @@ fn close_at_maps_a_click_on_the_x_glyph_to_its_tab_index() {
 #[test]
 fn hovering_the_close_cross_paints_a_pill_on_that_cell() {
     use ratatui::buffer::Buffer;
+    crate::widgets::hover::set_modes(
+        crate::widgets::hover::HeadingHover::Soft,
+        crate::widgets::hover::IconHover::Pill,
+    );
     let mut t = EditorTabs::new();
     t.editors[0].path = Some(std::path::PathBuf::from("/foo.rs"));
     t.add_tab_with_path(std::path::PathBuf::from("/bar.rs"));
@@ -14534,6 +14538,10 @@ fn cell_of(buf: &ratatui::buffer::Buffer, width: u16, text: &str) -> u16 {
 #[test]
 fn high_contrast_close_pill_glyph_contrasts_with_the_pill() {
     use ratatui::buffer::Buffer;
+    crate::widgets::hover::set_modes(
+        crate::widgets::hover::HeadingHover::Soft,
+        crate::widgets::hover::IconHover::Pill,
+    );
     for (id, want) in [
         ("hc-black", Color::Black),
         ("hc-light", Color::White),
@@ -14556,14 +14564,62 @@ fn high_contrast_close_pill_glyph_contrasts_with_the_pill() {
         let mut buf = Buffer::empty(area);
         (&mut t).render(area, &mut buf);
         let cell = &buf[(cx, area.y)];
-        assert_eq!(cell.bg, theme.tab_close_pill_bg(), "{id}: the pill shows");
+        assert_eq!(
+            cell.bg,
+            crate::widgets::hover::pill_bg(theme),
+            "{id}: the pill shows"
+        );
         assert_eq!(cell.fg, want, "{id}: the glyph's ink");
+    }
+}
+
+/// The close cross highlights like every other icon (`hover_icon`): the
+/// theme's accent by default, the chosen colour for `color`, no pill but
+/// in `pill`.
+#[test]
+fn the_close_cross_hover_follows_the_icon_setting() {
+    use crate::widgets::hover::{HoverColor, HoverSettings, IconHover, set_settings};
+    use ratatui::buffer::Buffer;
+    // Croft Loch paints its tabs by its own look and ignores the setting.
+    let theme = crate::theme::Theme::DARK_BLUE;
+    for (mode, fg, pill) in [
+        (IconHover::Accent, theme.accent(), false),
+        (IconHover::Color, HoverColor::Ansi(1).resolve(theme), false),
+        (IconHover::Pill, Color::White, true),
+    ] {
+        set_settings(HoverSettings {
+            icon: mode,
+            icon_color: Some(HoverColor::Ansi(1)),
+            ..HoverSettings::default()
+        });
+        let mut t = EditorTabs::new();
+        t.editors[0].path = Some(std::path::PathBuf::from("/foo.rs"));
+        t.editors[0].theme = theme;
+        let area = Rect::new(0, 0, 80, 10);
+        let mut buf = Buffer::empty(area);
+        (&mut t).render(area, &mut buf);
+        let cx = t.close_screen_x(t.active).expect("a close cross");
+        t.hover_pointer = Some((cx, area.y));
+        let mut buf = Buffer::empty(area);
+        (&mut t).render(area, &mut buf);
+        let cell = &buf[(cx, area.y)];
+        assert_eq!(cell.symbol(), "\u{2715}", "{mode:?}");
+        assert_eq!(cell.fg, fg, "{mode:?}: the cross's ink");
+        assert_eq!(
+            cell.bg == crate::widgets::hover::pill_bg(theme),
+            pill,
+            "{mode:?}: the pill"
+        );
     }
 }
 
 #[test]
 fn black_theme_close_pill_is_distinct_from_the_active_tab_bg() {
     use ratatui::buffer::Buffer;
+    crate::widgets::hover::set_modes(
+        crate::widgets::hover::HeadingHover::Soft,
+        crate::widgets::hover::IconHover::Pill,
+    );
     let mut t = EditorTabs::new();
     t.editors[0].path = Some(std::path::PathBuf::from("/foo.rs"));
     t.editors[0].theme = crate::theme::Theme::BLACK;
@@ -14592,8 +14648,8 @@ fn black_theme_close_pill_is_distinct_from_the_active_tab_bg() {
     );
     assert_eq!(
         buf[(cx, area.y)].bg,
-        black.tab_close_pill_bg(),
-        "the Black-theme close pill uses the brighter teal"
+        crate::widgets::hover::pill_bg(black),
+        "the Black-theme close pill is the accent teal"
     );
     assert_ne!(
         buf[(cx, area.y)].bg,

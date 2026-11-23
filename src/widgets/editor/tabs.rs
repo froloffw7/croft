@@ -1448,22 +1448,6 @@ pub(super) const TAB_INACTIVE_FG: Color = Color::Rgb(0x9d, 0xa5, 0xb4);
 
 pub(super) const TAB_ACTIVE_FG: Color = Color::White;
 
-/// Ink for the tab close/pin glyph on its hover pill: white, except that a
-/// high contrast theme (#1548) takes whichever of black or white reads
-/// better on its pill (black on High Contrast's orange).
-pub(super) fn close_pill_fg(theme: crate::theme::Theme, pill: Color) -> Color {
-    match pill {
-        Color::Rgb(r, g, b)
-            if theme.high_contrast()
-                && crate::theme::contrast_ratio((r, g, b), (0, 0, 0))
-                    > crate::theme::contrast_ratio((r, g, b), (0xff, 0xff, 0xff)) =>
-        {
-            Color::Black
-        }
-        _ => Color::White,
-    }
-}
-
 /// The file-type icon a tab leads with on a `surfaces` theme: the
 /// Explorer's icon for its file (a diff tab's left side), the plain file
 /// icon for an untitled buffer.
@@ -1731,18 +1715,15 @@ impl Widget for &mut EditorTabs {
             let hovered = self.hover_pointer.is_some_and(|(px, py)| {
                 py == strip.y && px >= strip_right && px < strip_right + TAB_LIST_W
             });
-            // As the layout icons beside it: the glyph goes from grey to the
-            // accent on hover, the cell keeps the strip's own background. On
-            // a `surfaces` theme it is a header action: muted at rest, the
+            // As the layout icons beside it (`hover_icon`).
+            let rest = Style::default()
+                .fg(theme.ui(Color::Rgb(0xcc, 0xcc, 0xcc)))
+                .bg(theme.tab_strip_bg());
+            let mut style = crate::widgets::hover::icon_style(theme, rest, hovered);
+            // On a `surfaces` theme it is a header action: muted at rest, the
             // strong ink on a faint chip under the pointer.
-            let fg = if hovered {
-                theme.ui(Color::Rgb(0x4e, 0x9a, 0xff))
-            } else {
-                theme.ui(Color::Rgb(0xcc, 0xcc, 0xcc))
-            };
-            let mut style = Style::default().fg(fg).bg(theme.tab_strip_bg());
             if tones.is_some() {
-                style = style.patch(crate::widgets::header_pill::action_style(theme, hovered));
+                style = rest.patch(crate::widgets::header_pill::action_style(theme, hovered));
             }
             buf.set_string(strip_right, strip.y, " \u{2261} ", style);
         }
@@ -1861,16 +1842,10 @@ impl Widget for &mut EditorTabs {
             // Overpaint the close/pin cell with its hover pill so the user sees
             // exactly which glyph their click will land on.
             if on_close {
-                let pill_bg = theme.tab_close_pill_bg();
-                buf.set_string(
-                    close_x,
-                    strip.y,
-                    close_glyph,
-                    Style::default()
-                        .fg(close_pill_fg(theme, pill_bg))
-                        .bg(pill_bg)
-                        .add_modifier(Modifier::BOLD),
-                );
+                // The same highlight every icon gets (`hover_icon`).
+                let rest = Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD);
+                let lit = crate::widgets::hover::icon_style(theme, rest, true);
+                buf.set_string(close_x, strip.y, close_glyph, lit);
             }
             self.tab_screen_ranges.push((cursor_x, width));
             self.tab_close_x.push(close_x);

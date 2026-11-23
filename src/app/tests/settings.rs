@@ -643,8 +643,8 @@ fn terminal_header_probe(app: &mut App) -> Rect {
 }
 
 #[test]
-fn black_theme_terminal_buttons_are_teal_icons_not_navy_chips() {
-    use crate::gradient::{INNER_ACCENT, rgb_color};
+fn black_theme_terminal_buttons_are_light_icons_not_navy_chips() {
+    use crate::gradient::{PANEL_TITLE_FG, rgb_color};
     let tmp = tempfile::tempdir().unwrap();
     let mut app = App::new(tmp.path().to_path_buf()).unwrap();
     app.apply_theme(crate::theme::Theme::BLACK);
@@ -655,7 +655,7 @@ fn black_theme_terminal_buttons_are_teal_icons_not_navy_chips() {
     let buf = term.backend().buffer();
     let plus = (add.x + 1, add.y);
     assert_eq!(buf[plus].symbol(), "+");
-    assert_eq!(buf[plus].fg, rgb_color(INNER_ACCENT));
+    assert_eq!(buf[plus].fg, rgb_color(PANEL_TITLE_FG));
     assert_ne!(
         buf[plus].bg,
         Color::Rgb(0x1e, 0x3a, 0x6e),
@@ -664,8 +664,7 @@ fn black_theme_terminal_buttons_are_teal_icons_not_navy_chips() {
 }
 
 #[test]
-fn black_theme_terminal_button_hover_paints_teal_pill() {
-    use crate::gradient::{POPUP_SEL_BG, rgb_color};
+fn black_theme_terminal_button_hover_lifts_the_icon_to_the_theme_accent() {
     let tmp = tempfile::tempdir().unwrap();
     let mut app = App::new(tmp.path().to_path_buf()).unwrap();
     app.apply_theme(crate::theme::Theme::BLACK);
@@ -682,11 +681,15 @@ fn black_theme_terminal_button_hover_paints_teal_pill() {
     let buf = term.backend().buffer();
     let plus = (add.x + 1, add.y);
     assert_eq!(
-        buf[plus].bg,
-        rgb_color(POPUP_SEL_BG),
-        "hovered button wears the teal pill"
+        buf[plus].fg,
+        app.theme.accent(),
+        "the hovered button takes the theme's own accent"
     );
-    assert_eq!(buf[plus].fg, Color::White);
+    assert_ne!(
+        buf[plus].bg,
+        Color::Rgb(0x1e, 0x3a, 0x6e),
+        "and still no navy chip behind it"
+    );
 }
 
 #[test]
@@ -1354,6 +1357,32 @@ fn workspace_settings_layer_applies_at_startup_and_reloads_live() {
     app.reload_config_for_path(&layer);
     assert!(!app.format_on_save, "the edit applied without a restart");
     assert!(app.status.contains("Settings reloaded"), "{}", app.status);
+}
+
+#[test]
+fn the_hover_settings_apply_from_the_loaded_prefs_not_only_on_a_reload() {
+    use crate::widgets::hover::{popup_border_type, set_popup_border, set_settings};
+    use ratatui::widgets::BorderType;
+    // `App::new` runs this on the loaded prefs; they are user-layer keys, so
+    // the workspace layer (all a test build reads) cannot carry them.
+    let prefs: crate::prefs::Prefs = serde_json::from_str(
+        r#"{"hover_icon":"pill","hover_icon_pill_color":"red","popup_border":"rounded"}"#,
+    )
+    .unwrap();
+    set_settings(Default::default());
+    set_popup_border("");
+    super::super::apply_hover_prefs(&prefs);
+    let theme = crate::theme::Theme::DARK_BLUE;
+    let area = ratatui::layout::Rect::new(0, 0, 2, 1);
+    let mut buf = ratatui::buffer::Buffer::empty(area);
+    crate::widgets::hover::icon_backdrop(&mut buf, area, theme, true);
+    assert_eq!(
+        buf[(0, 0)].bg,
+        crate::widgets::hover::HoverColor::Ansi(1).resolve(theme)
+    );
+    assert_eq!(popup_border_type(), BorderType::Rounded);
+    set_settings(Default::default());
+    set_popup_border("");
 }
 
 #[test]
