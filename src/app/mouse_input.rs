@@ -5,6 +5,179 @@ use super::*;
 use crate::widgets::source_control::KeyStop;
 
 impl App {
+    /// Whether `(col, row)` grabs the seam between the sidebar and the editor.
+    ///
+    /// Two columns count: the seam itself (`x`, the editor's left edge) and
+    /// the one to its left (the tree's right border), since a 1-cell target is
+    /// too easy to miss. Exempt are the cells that share the column but have a
+    /// gesture of their own: the OUTLINE and COMMITS scrollbars (neither
+    /// panel draws a right border; each rect is gated on its view, as a stale
+    /// one must not deaden the seam after a view switch), a collapsed terminal
+    /// pane's one-column strip (#468; its click unfolds it) and a command
+    /// decoration dot on a lone terminal pane's left border.
+    pub(super) fn sidebar_splitter_hit(&self, col: u16, row: u16) -> bool {
+        let Some(x) = self.sidebar_splitter_x else {
+            return false;
+        };
+        let outline_bar = self.sidebar_view == SidebarView::Explorer
+            && rect_contains(self.outline.last_scrollbar, col, row);
+        let graph_bar = self.sidebar_view == SidebarView::SourceControl
+            && rect_contains(self.commit_graph.last_scrollbar, col, row);
+        let on_strip = self
+            .terminal_strip_rects
+            .iter()
+            .any(|r| rect_contains(*r, col, row));
+        (col == x || col == x.saturating_sub(1))
+            && !on_strip
+            && !outline_bar
+            && !graph_bar
+            && self.decoration_dot_at(col, row).is_none()
+    }
+
+    /// Whether `(col, row)` grabs the seam between the editor and the terminal
+    /// panel: its top border (`y`) or the editor's bottom border (`y - 1`),
+    /// but only in the column right of the sidebar seam. Without the column
+    /// gate a click on a tree row whose y lines up with the seam is hijacked
+    /// into a drag and never reaches the row.
+    pub(super) fn terminal_splitter_hit(&self, col: u16, row: u16) -> bool {
+        let Some(y) = self.terminal_splitter_y else {
+            return false;
+        };
+        self.sidebar_splitter_x.is_none_or(|x| col >= x) && (row == y || row == y.saturating_sub(1))
+    }
+
+    /// Whether `(col, row)` is over a single-line input the user types into:
+    /// the value row of the prompt popups or a Search view field.
+    pub(super) fn input_field_at(&self, col: u16, row: u16) -> bool {
+        let field_row = |popup: Rect| Rect {
+            x: popup.x + 2,
+            y: popup.y + 1,
+            width: popup.width.saturating_sub(4),
+            height: 1,
+        };
+        if let Some(p) = &self.prompt {
+            return rect_contains(
+                field_row(prompt_rect(self.last_frame_area, p.error.is_some())),
+                col,
+                row,
+            );
+        }
+        if let Some(p) = &self.input_prompt {
+            return !p.confirm && rect_contains(field_row(p.last_rect), col, row);
+        }
+        if self.popup_open() || self.context_menu.is_some() {
+            return false;
+        }
+        self.sidebar_view == SidebarView::Search && self.search.field_at(col, row).is_some()
+    }
+
+    /// [`Self::terminal_splitter_hit`] minus the panel header's own controls:
+    /// the PROBLEMS / OUTPUT / TERMINAL / PORTS / CAPTURES tabs and the
+    /// maximize and focus buttons sit on the seam's rows and act on a click,
+    /// so over them the pointer is not a resize arrow.
+    pub(super) fn panel_splitter_hit(&self, col: u16, row: u16) -> bool {
+        self.terminal_splitter_hit(col, row)
+            && ![
+                self.panel_maximize_button,
+                self.terminal_focus_button,
+                self.problems_tab_rect,
+                self.output_tab_rect,
+                self.terminal_tab_rect,
+                self.ports_tab_rect,
+                self.captures_tab_rect,
+            ]
+            .iter()
+            .any(|r| rect_contains(*r, col, row))
+    }
+
+    /// The terminal pane whose text area (inside its border) holds
+    /// `(col, row)`.
+    pub(super) fn terminal_inner_at_pos(&self, col: u16, row: u16) -> Option<usize> {
+        // A pane that is not drawn keeps the rect of its last frame: with the
+        // panel hidden (`Ctrl+J`) or on another tab, that rect would still
+        // claim the cells the editor now occupies.
+        if !self.show_terminal || self.bottom_panel_tab != BottomPanelTab::Terminal {
+            return None;
+        }
+        self.terminals
+            .iter()
+            .position(|t| rect_contains(t.last_inner, col, row))
+    }
+
+    /// The pointer shape for the cell `(col, row)`: the I-beam over text the
+    /// user edits (the editor's text, a terminal pane, the Remote view), the
+    /// arrow over everything else, and over any menu or modal on top.
+    pub(super) fn pointer_shape_at(
+        &self,
+        col: u16,
+        row: u16,
+    ) -> crate::pointer_shape::PointerShape {
+        use crate::pointer_shape::PointerShape;
+        // A text field takes the I-beam: the popups' value rows and the
+        // Search view's inputs.
+        if self.input_field_at(col, row) {
+            return PointerShape::Text;
+        }
+        if self.popup_open() || self.context_menu.is_some() {
+            return PointerShape::Arrow;
+        }
+        // A seam being dragged keeps its arrow wherever the pointer strays.
+        let seam = match self.splitter_drag {
+            Some(SplitterDrag::Sidebar) => Some(PointerShape::ResizeCols),
+            Some(SplitterDrag::Terminal) => Some(PointerShape::ResizeRows),
+            Some(SplitterDrag::EditorSeam(ref seam)) => Some(seam_shape(seam.dir)),
+            None if self.sidebar_splitter_hit(col, row) => Some(PointerShape::ResizeCols),
+            None if self.panel_splitter_hit(col, row) => Some(PointerShape::ResizeRows),
+            None => self.seam_at(col, row).map(|seam| seam_shape(seam.dir)),
+        };
+        if let Some(shape) = seam {
+            return shape;
+        }
+        let over_text = self.terminal_inner_at_pos(col, row).is_some()
+            || (self.sidebar_view == SidebarView::Remote
+                && rect_contains(self.remote.last_area, col, row))
+            || (self.editor_is_text() && self.editor.text_hit(col, row))
+            || self.editor_layout.inactive_groups().any(|g| {
+                !g.has_non_text_view() && g.markdown_preview.is_none() && g.text_hit(col, row)
+            });
+        if over_text {
+            PointerShape::Text
+        } else {
+            PointerShape::Arrow
+        }
+    }
+
+    /// Ask the terminal for the pointer shape that belongs under `(col, row)`,
+    /// when it has changed and the terminal said it can draw one (OSC 22).
+    pub(super) fn sync_pointer_shape(&mut self, col: u16, row: u16) {
+        self.pointer_pos = Some((col, row));
+        if !self.pointer_shapes {
+            return;
+        }
+        let want = self.pointer_shape_at(col, row);
+        if want == self.pointer_shape {
+            return;
+        }
+        self.pointer_shape = want;
+        // Not under test: the suite must not write escapes to the runner's tty.
+        if !cfg!(test) {
+            use std::io::Write;
+            let mut out = std::io::stdout();
+            let _ = out.write_all(&want.set_sequence(self.pointer_shape_names));
+            let _ = out.flush();
+        }
+    }
+
+    /// Decide the pointer shape again where the pointer last was. A key
+    /// that moves the layout under a still mouse (`Ctrl+J` hiding the panel,
+    /// so the editor's scrollbar slides under the I-beam) sends no mouse
+    /// event, and the shape would stay stale until the next move.
+    pub(super) fn resync_pointer_shape(&mut self) {
+        if let Some((col, row)) = self.pointer_pos {
+            self.sync_pointer_shape(col, row);
+        }
+    }
+
     /// [`Self::ui_tooltip_at`], plus the hints whose text is what sits under
     /// the pointer rather than a control's name: a Search result row shows
     /// its file's full path (#2008).
@@ -560,6 +733,7 @@ impl App {
     }
 
     pub(super) fn handle_mouse(&mut self, m: MouseEvent) {
+        self.sync_pointer_shape(m.column, m.row);
         self.editor.sync_occurrence_word_sel();
         if self.screencast.is_on()
             && let MouseEventKind::Down(button) = m.kind
@@ -1635,55 +1809,9 @@ impl App {
                 // single-row seam between editor and terminal) starts a
                 // resize drag instead of falling through to the underlying
                 // pane's click handler.
-                if let Some(x) = self.sidebar_splitter_x {
-                    // Two-column hit-zone: the seam itself (`x`, the editor's
-                    // left edge) and one column to the left (the tree's right
-                    // border). Either grab starts a sidebar drag — a 1-cell
-                    // target is too easy to miss.
-                    //
-                    // The OUTLINE panel draws no right border, so its scrollbar
-                    // sits on the sidebar's rightmost column (`x - 1`), inside
-                    // this zone. Exempt that column when it's the outline bar so
-                    // the press reaches the scrollbar handler below instead of
-                    // being swallowed as a resize.
-                    //
-                    // Likewise a lone terminal pane's left border shares this
-                    // column, and its command decoration dots live there: a
-                    // press on a dot cell must reach the decoration handler,
-                    // not start a resize (the rest of the column still drags).
-                    // The COMMITS graph draws no right border either, so its
-                    // scrollbar shares the same column (Codeberg #41).
-                    // Both scrollbar rects refresh only while their widget
-                    // renders (outline under Explorer, the graph under
-                    // Source Control), so each exemption is gated on its
-                    // view — a stale rect from the last visit must not keep
-                    // deadening the seam after a view switch.
-                    let outline_bar = self.sidebar_view == SidebarView::Explorer
-                        && rect_contains(self.outline.last_scrollbar, m.column, m.row);
-                    let graph_bar = self.sidebar_view == SidebarView::SourceControl
-                        && rect_contains(self.commit_graph.last_scrollbar, m.column, m.row);
-                    // A collapsed terminal pane's one-column strip shares this
-                    // zone too (#468): the leftmost pane starts on the seam
-                    // itself, and with the side bar on the right the last
-                    // pane ends one column short of it. The strip's only
-                    // gesture is the click that unfolds it, so the seam must
-                    // not take that click as a resize, or a folded pane on
-                    // that edge can never be brought back. The rects are
-                    // cleared whenever the panel is not painted, so a stale
-                    // strip cannot deaden the seam later.
-                    let on_strip = self
-                        .terminal_strip_rects
-                        .iter()
-                        .any(|r| rect_contains(*r, m.column, m.row));
-                    if (m.column == x || m.column == x.saturating_sub(1))
-                        && !on_strip
-                        && !outline_bar
-                        && !graph_bar
-                        && self.decoration_dot_at(m.column, m.row).is_none()
-                    {
-                        self.splitter_drag = Some(SplitterDrag::Sidebar);
-                        return;
-                    }
+                if self.sidebar_splitter_hit(m.column, m.row) {
+                    self.splitter_drag = Some(SplitterDrag::Sidebar);
+                    return;
                 }
                 // Any seam between editor groups in the grid (any depth). Same
                 // two-cell hit-zone as the other seams.
@@ -1991,25 +2119,9 @@ impl App {
                     }
                     return;
                 }
-                if let Some(y) = self.terminal_splitter_y {
-                    // Two-row hit-zone: the terminal's top border (`y`) and
-                    // the editor / welcome's bottom border (`y - 1`).
-                    // Symmetric with the sidebar drag — either edge of the
-                    // visible seam grabs the splitter.
-                    //
-                    // Gate by column too: the editor / terminal splitter
-                    // only spans the RIGHT column (everything at or past
-                    // `sidebar_splitter_x`). Without this gate, a click
-                    // on a tree row in the LEFT column whose y lines up
-                    // with the splitter is silently hijacked into a
-                    // splitter-drag and never reaches `node_at_y` -
-                    // exactly the dead-zone the user hit on the last
-                    // two files in the Explorer.
-                    let in_splitter_x_range = self.sidebar_splitter_x.is_none_or(|x| m.column >= x);
-                    if in_splitter_x_range && (m.row == y || m.row == y.saturating_sub(1)) {
-                        self.splitter_drag = Some(SplitterDrag::Terminal);
-                        return;
-                    }
+                if self.terminal_splitter_hit(m.column, m.row) {
+                    self.splitter_drag = Some(SplitterDrag::Terminal);
+                    return;
                 }
                 // Activity-bar hit-test takes precedence over the side panel.
                 if let Some(icon) = self.activity_icon_at(m.column, m.row) {
