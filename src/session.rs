@@ -168,7 +168,7 @@ pub(crate) struct PairRecord {
     #[serde(default)]
     pub(crate) task: Option<String>,
     /// Which backend seats the pilot: None or "claude" = the claude CLI;
-    /// "ollama" = a local Anthropic-compatible endpoint (absent on 0.1.635
+    /// "local" (older: "ollama") = a local endpoint (absent on 0.1.635
     /// records, which are all claude).
     #[serde(default)]
     pub(crate) provider: Option<String>,
@@ -176,6 +176,11 @@ pub(crate) struct PairRecord {
     /// for keyed gateways stays in the environment (ANTHROPIC_AUTH_TOKEN).
     #[serde(default)]
     pub(crate) base_url: Option<String>,
+    /// The local model's context window in tokens (what the server was
+    /// started with, e.g. 131072). The navigator trims its history to stay
+    /// inside it and refuses a single turn that cannot fit.
+    #[serde(default)]
+    pub(crate) context: Option<usize>,
 }
 
 pub(crate) fn write_pair_record(path: &Path, record: &PairRecord) -> Result<()> {
@@ -377,6 +382,7 @@ mod tests {
             task: None,
             provider: None,
             base_url: None,
+            context: None,
         };
         write_pair_record(&path, &record).unwrap();
         let a = std::fs::read(&path).unwrap();
@@ -605,6 +611,7 @@ mod tests {
             task: Some("look around".into()),
             provider: None,
             base_url: None,
+            context: None,
         };
         write_pair_record(&path, &record).unwrap();
         assert_eq!(read_pair_record(&path), Some(record));
@@ -630,6 +637,7 @@ mod tests {
             task: None,
             provider: Some("ollama".into()),
             base_url: Some("http://localhost:11434".into()),
+            context: None,
         };
         write_pair_record(&path, &record).unwrap();
         assert_eq!(read_pair_record(&path), Some(record));

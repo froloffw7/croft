@@ -342,6 +342,7 @@ pub(super) fn build_line_spans<'a>(
 impl Widget for &mut Editor {
     fn render(self, area: Rect, buf: &mut Buffer) {
         self.settle_semantic_carry();
+        self.comment_caret.set(None);
         self.clamp_to_symbol_view();
         self.sync_tab_cells();
         let block_style = if self.focused {
@@ -647,8 +648,15 @@ impl Widget for &mut Editor {
                 // overestimate their height (the cursor stays visible).
                 if !self.comment_boxes.is_empty() {
                     let bw = inner.width.saturating_sub(gutter_width + 3) as usize;
+                    // Rows already scrolled into the top line's own box
+                    // (`scroll_sub`) are off screen and cost nothing.
+                    let into_box = if self.scroll == scroll_before {
+                        self.scroll_sub
+                    } else {
+                        0
+                    };
                     while self.cursor_row + self.box_rows_between(self.scroll, self.cursor_row, bw)
-                        >= self.scroll + text_height
+                        >= self.scroll + text_height + into_box
                     {
                         self.scroll += 1;
                     }
@@ -2049,6 +2057,11 @@ impl Editor {
     pub fn cursor_screen_pos(&self) -> Option<(u16, u16)> {
         if self.last_inner.height == 0 {
             return None;
+        }
+        // A focused comment-box reply field owns the caret: showing it in
+        // the buffer text while typing into the field misled the user.
+        if self.comment_focus.is_some() {
+            return self.comment_caret.get();
         }
         self.sync_tab_cells();
         let text_x = self.last_inner.x + self.last_gutter_width + 1;

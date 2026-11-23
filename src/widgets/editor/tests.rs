@@ -5184,6 +5184,8 @@ fn a_long_reply_windows_so_the_caret_and_tail_stay_visible() {
         footer.contains("_TAIL"),
         "the field must window to keep the tail under the caret visible: {footer:?}"
     );
+    // No painted caret block: the terminal's own caret marks the position,
+    // inside the field, and a second painted one would double it.
     let caret_cells = (0..area.width)
         .filter(|&x| {
             buf[(x, 4)]
@@ -5192,7 +5194,10 @@ fn a_long_reply_windows_so_the_caret_and_tail_stay_visible() {
                 .contains(ratatui::style::Modifier::REVERSED)
         })
         .count();
-    assert_eq!(caret_cells, 1, "exactly one caret cell renders: {footer:?}");
+    assert_eq!(caret_cells, 0, "no painted caret cell: {footer:?}");
+    let (cx, cy) = e.cursor_screen_pos().expect("terminal caret in the field");
+    assert_eq!(cy, 4);
+    assert!(cx < area.width, "caret stays inside the box");
 }
 
 /// The focused box renders the typed reply in its footer field.
@@ -22583,4 +22588,178 @@ fn text_hit_stops_at_the_horizontal_scrollbar() {
     );
     assert!(!e.text_hit(col, bar.y), "the bar row keeps the arrow");
     assert!(!e.text_hit(bar.x + 1, bar.y));
+}
+
+
+fn render_once(e: &mut Editor, area: Rect) {
+    let mut buf = ratatui::buffer::Buffer::empty(area);
+    (e as &mut Editor).render(area, &mut buf);
+}
+
+/// A tall comment box can be wheeled into view from below: the caret the
+/// wheel drags along must be clamped by rows (box rows included), or the
+/// render scrolls the view back down to fetch it and the box never shows.
+#[test]
+fn wheeling_up_reaches_a_tall_comment_box_above_the_caret() {
+    let text: String = (0..60).map(|i| format!("line {i}\n")).collect();
+    let mut e = editor_with(&text);
+    e.wrap_override = Some(false);
+    e.comment_boxes = vec![CommentBox {
+        id: 1,
+        line: 20,
+        author: "navigator".into(),
+        body: (0..30)
+            .map(|i| format!("point {i}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    }];
+    let area = Rect {
+        x: 0,
+        y: 0,
+        width: 60,
+        height: 12,
+    };
+    render_once(&mut e, area);
+    e.scroll = 40;
+    e.cursor_row = 45;
+    render_once(&mut e, area);
+    for _ in 0..80 {
+        e.scroll_up(1);
+        render_once(&mut e, area);
+    }
+    assert!(
+        e.scroll <= 20,
+        "the view reached the box: scroll {} sub {}",
+        e.scroll,
+        e.scroll_sub
+    );
+}
+
+
+/// Ignore is red, and the `you:` label of an echoed reply gets its own colour.
+#[test]
+fn comment_box_colours_ignore_and_you_label() {
+    use ratatui::style::Color;
+    let mut e = editor_with("first\nsecond");
+    e.comment_boxes = vec![CommentBox {
+        id: 7,
+        line: 0,
+        author: "navigator".into(),
+        body: "answer\nyou: thanks".into(),
+    }];
+    let area = Rect {
+        x: 0,
+        y: 0,
+        width: 60,
+        height: 10,
+    };
+    let mut buf = ratatui::buffer::Buffer::empty(area);
+    (&mut e as &mut Editor).render(area, &mut buf);
+    let find = |needle: char, y: u16| {
+        (0..area.width).find(|&x| buf[(x, y)].symbol() == needle.to_string())
+    };
+    // Rows: 2 title, 3 "answer", 4 "you: thanks", 5 footer.
+    let x = find('y', 4).expect("you: label");
+    assert_eq!(buf[(x, 4)].style().fg, Some(Color::Cyan));
+    let x = find('I', 5).expect("Ignore");
+    assert_eq!(buf[(x, 5)].style().fg, Some(Color::Red));
+}
+
+/// An answer that lands below the viewport is scrolled into view without
+/// moving the caret off its line.
+#[test]
+fn reveal_comment_box_scrolls_a_hidden_box_into_view() {
+    let text: String = (0..40).map(|i| format!("l{i}\n")).collect();
+    let mut e = editor_with(&text);
+    let area = Rect {
+        x: 0,
+        y: 0,
+        width: 60,
+        height: 10,
+    };
+    let mut buf = ratatui::buffer::Buffer::empty(area);
+    e.comment_boxes = vec![CommentBox {
+        id: 9,
+        line: 6,
+        author: "navigator".into(),
+        body: "one\ntwo\nthree".into(),
+    }];
+    (&mut e as &mut Editor).render(area, &mut buf);
+    e.cursor_row = 0;
+    e.reveal_comment_box(9);
+    (&mut e as &mut Editor).render(area, &mut buf);
+    let screen: String = (0..area.height)
+        .flat_map(|y| (0..area.width).map(move |x| (x, y)))
+        .map(|(x, y)| buf[(x, y)].symbol().to_string())
+        .collect();
+    assert!(screen.contains("three"), "the box body is on screen");
+    assert!(e.scroll > 0);
+}
+
+/// A reply field whose box was wheeled out of sight no longer holds the
+/// keyboard.
+#[test]
+fn wheeling_a_focused_box_out_of_sight_releases_its_reply_field() {
+    let text: String = (0..60).map(|i| format!("line {i}\n")).collect();
+    let mut e = editor_with(&text);
+    e.wrap_override = Some(false);
+    e.comment_boxes = vec![CommentBox {
+        id: 1,
+        line: 5,
+        author: "navigator".into(),
+        body: "a\nb\nc".into(),
+    }];
+    let area = Rect {
+        x: 0,
+        y: 0,
+        width: 60,
+        height: 12,
+    };
+    render_once(&mut e, area);
+    e.cursor_row = 5;
+    e.comment_focus = Some(CommentFocus {
+        id: 1,
+        reply: String::new(),
+        cursor: 0,
+    });
+    for _ in 0..40 {
+        e.scroll_down(1);
+        render_once(&mut e, area);
+    }
+    assert!(e.scroll > 5);
+    assert!(e.comment_focus.is_none(), "focus released once off screen");
+}
+
+/// With a reply field focused, the terminal caret sits in the field (after
+/// the typed text), not in the buffer text.
+#[test]
+fn focused_reply_field_owns_the_caret() {
+    let mut e = editor_with("first\nsecond");
+    e.comment_boxes = vec![CommentBox {
+        id: 7,
+        line: 0,
+        author: "navigator".into(),
+        body: "note".into(),
+    }];
+    e.comment_focus = Some(CommentFocus {
+        id: 7,
+        reply: "abc".into(),
+        cursor: 2,
+    });
+    let area = Rect {
+        x: 0,
+        y: 0,
+        width: 60,
+        height: 10,
+    };
+    let mut buf = ratatui::buffer::Buffer::empty(area);
+    (&mut e as &mut Editor).render(area, &mut buf);
+    let (x, y) = e.cursor_screen_pos().expect("caret in the field");
+    // Footer is the 4th row of the box: breadcrumb, line 0, title, body, footer.
+    assert_eq!(y, 4);
+    let text_x = e.last_inner.x + e.last_gutter_width + 1;
+    assert_eq!(x, text_x + 4 + 2);
+    e.comment_focus = None;
+    (&mut e as &mut Editor).render(area, &mut buf);
+    assert_ne!(e.cursor_screen_pos().map(|p| p.1), Some(4));
 }

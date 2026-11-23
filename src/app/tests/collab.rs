@@ -888,6 +888,7 @@ fn solo_guest_never_hosts_the_navigator() {
             task: None,
             provider: None,
             base_url: None,
+            context: None,
         },
     )
     .unwrap();

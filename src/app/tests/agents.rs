@@ -433,6 +433,7 @@ fn navigator_record_seats_the_pilot_and_self_appoints_owner() {
             task: None,
             provider: None,
             base_url: None,
+            context: None,
         },
     )
     .unwrap();
@@ -501,6 +502,7 @@ fn navigator_record_seats_the_pilot_and_self_appoints_owner() {
             task: None,
             provider: None,
             base_url: None,
+            context: None,
         },
     )
     .unwrap();
@@ -564,6 +566,7 @@ fn app_seats_local_provider_from_record() {
             task: None,
             provider: Some("ollama".into()),
             base_url: Some("http://localhost:11500".into()),
+            context: None,
         },
     )
     .unwrap();
@@ -573,7 +576,8 @@ fn app_seats_local_provider_from_record() {
         *seen.borrow(),
         Some((
             crate::pair::Provider::Local {
-                base_url: "http://localhost:11500".into()
+                base_url: "http://localhost:11500".into(),
+                context: None,
             },
             Some(String::from("qwen3-coder:30b")),
         )),
@@ -613,6 +617,7 @@ fn a_dead_navigator_is_not_respawned_until_reactivated() {
                 task: None,
                 provider: None,
                 base_url: None,
+                context: None,
             },
         )
         .unwrap();
@@ -645,6 +650,7 @@ fn a_dead_navigator_is_not_respawned_until_reactivated() {
             task: None,
             provider: None,
             base_url: None,
+            context: None,
         },
     )
     .unwrap();
@@ -674,6 +680,7 @@ fn toggling_the_navigator_preserves_its_provider() {
             task: None,
             provider: Some(String::from("ollama")),
             base_url: Some(String::from("http://localhost:11434")),
+            context: None,
         },
     )
     .unwrap();
@@ -723,6 +730,7 @@ fn only_one_croft_self_appoints_the_navigator_owner() {
                 task: None,
                 provider: None,
                 base_url: None,
+                context: None,
             },
         )
         .unwrap();
@@ -801,6 +809,7 @@ fn unseating_the_navigator_resets_the_turn_note_counters() {
         task: None,
         provider: None,
         base_url: None,
+        context: None,
     };
     let mut app = App::new(tmp.path().to_path_buf()).unwrap();
     app.pair_record_path = tmp.path().join("x.pair.json");
@@ -860,6 +869,7 @@ fn a_record_rewrite_re_arms_a_downed_navigator() {
         task: None,
         provider: None,
         base_url: None,
+        context: None,
     };
     let mut app = App::new(tmp.path().to_path_buf()).unwrap();
     app.pair_record_path = tmp.path().join("x.pair.json");
@@ -4198,4 +4208,112 @@ fn completing_an_approval_merge_approves_it_and_stages_nothing() {
         };
         assert_eq!(input["content"], "one\ntheirs\nthree\n");
     });
+}
+
+/// A paste (bracketed or the clipboard chord) into a focused comment-box
+/// reply lands in the reply at the caret, never in the buffer behind it.
+#[test]
+fn paste_goes_into_the_focused_comment_reply() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "line\n").unwrap();
+    let mut app = App::new(dir.path().to_path_buf()).unwrap();
+    app.focus = Pane::Editor;
+    app.editor.comment_focus = Some(crate::widgets::editor::CommentFocus {
+        id: 1,
+        reply: String::from("ab"),
+        cursor: 1,
+    });
+    let before = app.editor.lines.clone();
+    app.handle_paste("X\nY");
+    let f = app.editor.comment_focus.as_ref().unwrap();
+    assert_eq!(f.reply, "aX Yb");
+    assert_eq!(f.cursor, 4);
+    assert_eq!(app.editor.lines, before, "the buffer is untouched");
+}
+
+/// Leaving the reply field (arrow keys, Esc, a click elsewhere) keeps the
+/// draft; focusing the box again brings it back.
+#[test]
+fn leaving_a_comment_reply_keeps_the_draft() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "l0\nl1\nl2\n").unwrap();
+    let mut app = App::new(dir.path().to_path_buf()).unwrap();
+    app.focus = Pane::Editor;
+    app.editor.comment_focus = Some(crate::widgets::editor::CommentFocus {
+        id: 4,
+        reply: String::from("half-typed"),
+        cursor: 10,
+    });
+    app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+        .unwrap();
+    assert!(app.editor.comment_focus.is_none());
+    assert_eq!(
+        app.editor.reply_drafts.get(&4).map(String::as_str),
+        Some("half-typed")
+    );
+    let f = app.editor.focus_for_comment(4);
+    assert_eq!(f.reply, "half-typed");
+    assert_eq!(f.cursor, 10);
+    assert!(app.editor.reply_drafts.is_empty());
+}
+
+/// Pasting into the Ask Navigator prompt (and any input prompt) fills the
+/// field; line breaks become spaces rather than gluing words together.
+#[test]
+fn paste_into_the_ask_prompt_keeps_words_apart() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "l0\n").unwrap();
+    let mut app = App::new(dir.path().to_path_buf()).unwrap();
+    app.open_input_prompt(crate::widgets::input_prompt::InputPrompt::new(
+        crate::widgets::input_prompt::InputPurpose::AskNavigator {
+            file: "a.txt".into(),
+            range: (0, 0),
+            selection: String::new(),
+        },
+        "Ask",
+        "What?",
+    ));
+    app.handle_paste("first line\nsecond");
+    assert_eq!(
+        app.input_prompt.as_ref().unwrap().value,
+        "first line second"
+    );
+}
+
+/// Delete, Home and End work in the comment-box reply field.
+#[test]
+fn comment_reply_field_handles_delete_home_end() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "l0\n").unwrap();
+    let mut app = App::new(dir.path().to_path_buf()).unwrap();
+    app.focus = Pane::Editor;
+    app.editor.comment_focus = Some(crate::widgets::editor::CommentFocus {
+        id: 1,
+        reply: String::from("abcd"),
+        cursor: 2,
+    });
+    let key = |app: &mut App, c| {
+        app.handle_key(KeyEvent::new(c, KeyModifiers::NONE))
+            .unwrap()
+    };
+    key(&mut app, KeyCode::Delete);
+    assert_eq!(app.editor.comment_focus.as_ref().unwrap().reply, "abd");
+    key(&mut app, KeyCode::Home);
+    assert_eq!(app.editor.comment_focus.as_ref().unwrap().cursor, 0);
+    key(&mut app, KeyCode::End);
+    assert_eq!(app.editor.comment_focus.as_ref().unwrap().cursor, 3);
+    key(&mut app, KeyCode::Delete);
+    assert_eq!(app.editor.comment_focus.as_ref().unwrap().reply, "abd");
+}
+
+/// A model that wraps its whole notes in one fence still saves clean notes.
+#[test]
+fn context_notes_lose_a_wrapping_fence() {
+    use crate::app::agents_collab::strip_wrapping_fence;
+    assert_eq!(
+        strip_wrapping_fence("```markdown\n## Goal\nx\n```"),
+        "## Goal\nx"
+    );
+    assert_eq!(strip_wrapping_fence("## Goal\nx"), "## Goal\nx");
+    assert_eq!(strip_wrapping_fence("a ```b``` c"), "a ```b``` c");
 }

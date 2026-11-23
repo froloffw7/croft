@@ -125,6 +125,69 @@ pub(crate) fn compose_ask_turn(
     text
 }
 
+/// Like [`compose_ask_turn`], but the model sees ONLY the selected lines, not
+/// the whole file: each line is numbered with its real 0-based file row, so
+/// EDIT/NOTE coordinates stay valid against the full buffer. Meant for local
+/// models and big files where the whole buffer will not fit or is slow.
+pub(crate) fn compose_ask_turn_selection(
+    file: &str,
+    range: (usize, usize),
+    instruction: &str,
+    content: &str,
+) -> String {
+    let (s, e) = range;
+    let body = content
+        .split('\n')
+        .enumerate()
+        .skip(s)
+        .take(e.saturating_sub(s) + 1)
+        .map(|(i, l)| format!("{i}|{l}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "Your partner invoked you on {file} at lines {s}-{e} (0-based; lines {}-{} in \
+         your partner's gutter) and asked about THIS SELECTION ONLY. The rest of the \
+         file is deliberately not shared; do not guess at it (read it with the collab \
+         tools only if you truly need more).\n\nTask: {instruction}\n\n\
+         --- SELECTED LINES OF {file} (each line prefixed with its 0-based FILE row \
+         and '|'; coordinates in EDIT/NOTE fences are file coordinates) ---\n{body}\n\
+         --- END SELECTED ---",
+        s + 1,
+        e + 1
+    )
+}
+
+/// An ask about a selection in a file OUTSIDE the workspace (a system
+/// header, a dependency). The seat has no session on such a file, so the turn
+/// is read-only: the selected rows ride along with their real row numbers and
+/// the model answers in plain prose, with no EDIT or NOTE fences.
+pub(crate) fn compose_external_selection_turn(
+    path: &str,
+    range: (usize, usize),
+    instruction: &str,
+    content: &str,
+) -> String {
+    let (s, e) = range;
+    let body = content
+        .split('\n')
+        .enumerate()
+        .skip(s)
+        .take(e.saturating_sub(s) + 1)
+        .map(|(i, l)| format!("{i}|{l}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "Your partner selected lines {s}-{e} (0-based; lines {}-{} in their gutter) of \
+         {path}, a file OUTSIDE the workspace. It is read-only for you and not shared \
+         as a buffer: answer in plain prose about the selection below. Do NOT emit \
+         EDIT or NOTE fences for this turn.\n\nTask: {instruction}\n\n\
+         --- SELECTED LINES OF {path} (each prefixed with its 0-based row and '|') ---\n\
+         {body}\n--- END SELECTED ---",
+        s + 1,
+        e + 1
+    )
+}
+
 /// Compose a yield turn: the driver handed the navigator the floor. Comment
 /// only — the host discards EDIT fences on this turn — with the diff since
 /// the navigator last saw the file, and the numbered buffer.

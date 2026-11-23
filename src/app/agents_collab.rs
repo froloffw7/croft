@@ -913,7 +913,8 @@ impl App {
             provider: crate::pair::Provider::from_record(
                 record.provider.as_deref(),
                 record.base_url.as_deref(),
-            ),
+            )
+            .with_context(record.context),
         };
         #[cfg(test)]
         let spawned = match &self.pair_spawn_override {
@@ -984,6 +985,24 @@ impl App {
                     let file = self.pair_last_noted_file.take();
                     let prose = std::mem::take(&mut self.pair_commentary_buf);
                     let origin = self.pair_turn_origin.take();
+                    let reply_note = self.pair_reply_note.take();
+                    if let Some(path) = self.pair_save_context.take() {
+                        if cancelled || failed.is_some() || prose.trim().is_empty() {
+                            self.status =
+                                format!("{name}: context not saved (turn did not finish)");
+                        } else {
+                            let text = strip_wrapping_fence(prose.trim());
+                            self.status = match std::fs::write(&path, format!("{text}\n")) {
+                                Ok(()) => format!(
+                                    "Saved context to {} (edit it freely; it is loaded when the navigator starts)",
+                                    path.display()
+                                ),
+                                Err(e) => format!("Saving context failed: {e}"),
+                            };
+                        }
+                        continue;
+                    }
+                    self.reply_waiting = None;
                     // Whatever the outcome, the fix turn is over: the row's
                     // spinner stops, and the LSP's next publish decides
                     // whether the row itself goes (#374).
@@ -1014,11 +1033,23 @@ impl App {
                                 (f, row)
                             })
                         });
-                        let landed = anchor.as_ref().and_then(|(f, row)| {
-                            self.pair_host
-                                .as_ref()
-                                .and_then(|h| h.add_note_now(f, *row, prose.trim()))
-                        });
+                        // A reply's answer continues the thread it answers.
+                        let landed_id = if let (Some(id), Some(h)) = (reply_note, &self.pair_host) {
+                            h.append_to_note(id, prose.trim());
+                            Some(id)
+                        } else {
+                            anchor.as_ref().and_then(|(f, row)| {
+                                self.pair_host
+                                    .as_ref()
+                                    .and_then(|h| h.add_note_now(f, *row, prose.trim()))
+                            })
+                        };
+                        // Scroll the answer into view: it lands below the
+                        // caret and sat off screen until the caret moved.
+                        if landed_id.is_some() {
+                            self.reveal_box = landed_id;
+                        }
+                        let landed = landed_id;
                         match (landed, anchor) {
                             (Some(_), Some((f, _))) => {
                                 notes += 1;
@@ -1065,6 +1096,7 @@ impl App {
             self.navigator_notes.clear();
             self.pair_commentary_buf.clear();
             self.pair_turn_origin = None;
+            self.reply_waiting = None;
             self.clear_problem_fix();
             // The turn counters die with the seat (see the unseat twin).
             self.pair_notes_this_turn = 0;
@@ -1106,14 +1138,29 @@ impl App {
             self.status = format!("{} is mid-turn; wait for it to finish", host.name());
             return;
         }
-        let Some(file) = self
+        let key = self
             .editor
             .path
             .as_ref()
-            .and_then(|p| collab_file_key(&self.tree.root, p))
-        else {
-            self.status = String::from("Ask Navigator: no active workspace file");
-            return;
+            .and_then(|p| collab_file_key(&self.tree.root, p));
+        let file = match key {
+            Some(f) => f,
+            // Outside the workspace (a system header, a dependency): only a
+            // selection can be asked about; it goes out read-only under its
+            // absolute path, which no workspace key can be.
+            None if !selection.is_empty() => match self.editor.path.as_ref() {
+                Some(p) => p.to_string_lossy().into_owned(),
+                None => {
+                    self.status = String::from("Ask Navigator: no active file");
+                    return;
+                }
+            },
+            None => {
+                self.status = String::from(
+                    "Ask Navigator: this file is outside the workspace; select a fragment to ask about it",
+                );
+                return;
+            }
         };
         let scope = if range.0 == range.1 {
             format!("line {}", range.0 + 1)
@@ -1259,6 +1306,7 @@ impl App {
             // CLI - with a model name claude does not even have.
             provider: current.as_ref().and_then(|r| r.provider.clone()),
             base_url: current.as_ref().and_then(|r| r.base_url.clone()),
+            context: None,
         };
         if let Some(dir) = self.pair_record_path.parent() {
             let _ = std::fs::create_dir_all(dir);
@@ -1278,6 +1326,36 @@ impl App {
 
     /// Palette: drop every navigator comment — the pilot's anchors, the
     /// per-file snapshots, and the boxes they feed.
+    /// `Navigator: Save Context`: ask the model for notes to continue the
+    /// work in a new session and write its answer to CONTEXT.md in the
+    /// workspace root, updating the file when one exists.
+    pub(super) fn save_navigator_context(&mut self) {
+        let Some(host) = &self.pair_host else {
+            self.status =
+                String::from("Navigator is not active (run croft pair in this workspace)");
+            return;
+        };
+        if host.is_busy() {
+            self.status = format!("{} is mid-turn; wait for it to finish", host.name());
+            return;
+        }
+        let path = self.tree.root.join(crate::pair::CONTEXT_FILE);
+        let existing = std::fs::read_to_string(&path).ok();
+        let body = crate::pair::save_context_instruction(existing.as_deref());
+        match host.send_plain_turn(body) {
+            Ok(()) => {
+                self.pair_save_context = Some(path);
+                self.pair_turn_origin = None;
+                self.status = format!(
+                    "Asked {} to write {}",
+                    host.name(),
+                    crate::pair::CONTEXT_FILE
+                );
+            }
+            Err(e) => self.status = format!("Save context failed: {e}"),
+        }
+    }
+
     pub(super) fn clear_navigator_notes(&mut self) {
         if let Some(host) = &self.pair_host {
             host.clear_notes();
@@ -3374,4 +3452,17 @@ pub(super) fn participant_row(
         id: p.id.to_string(),
         label: format!("{}  {}  ({})", p.name, size, role),
     }
+}
+
+/// A model sometimes wraps the whole reply in one Markdown fence; the file
+/// should hold the notes, not the fence.
+pub(super) fn strip_wrapping_fence(text: &str) -> &str {
+    let t = text.trim();
+    if let Some(rest) = t.strip_prefix("```")
+        && let Some(nl) = rest.find('\n')
+        && let Some(body) = rest[nl + 1..].strip_suffix("```")
+    {
+        return body.trim();
+    }
+    t
 }

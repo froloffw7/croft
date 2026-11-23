@@ -791,7 +791,32 @@ impl App {
                 };
                 let content = self.editor.lines.join("\n");
                 let name = host.name().to_string();
-                let result = host.send_ask_turn(&file, range, &selection, &value, &content);
+                if std::path::Path::new(&file).is_absolute() {
+                    // Outside the workspace: read-only selection ask, the
+                    // answer lands in OUTPUT.
+                    match host.send_external_selection_turn(&file, range, &value, &content) {
+                        Ok(()) => {
+                            self.close_input_prompt();
+                            self.status = format!("Asked {name} about {file}:{}", range.0 + 1);
+                            self.pair_turn_origin = None;
+                        }
+                        Err(e) => self.status = format!("Ask Navigator failed: {e}"),
+                    }
+                    return;
+                }
+                // A real selection scopes the turn to those lines (cheap for
+                // local models and big files); CROFT_PAIR_CONTEXT=buffer
+                // restores the whole-file context.
+                let selection_only = !selection.is_empty()
+                    && std::env::var("CROFT_PAIR_CONTEXT").as_deref() != Ok("buffer");
+                let result = host.send_ask_turn_scoped(
+                    &file,
+                    range,
+                    &selection,
+                    &value,
+                    &content,
+                    selection_only,
+                );
                 match result {
                     Ok(()) => {
                         self.close_input_prompt();
@@ -1321,6 +1346,29 @@ impl App {
             }
             return;
         }
+        // Cmd+V / Ctrl+V arriving as a key (no bracketed paste from the
+        // terminal): read the clipboard ourselves, as the finder does.
+        if super::key_input::is_clipboard_paste_key(key) {
+            if let Some(text) = self.clipboard_text()
+                && let Some(prompt) = self.input_prompt.as_mut()
+            {
+                for c in text.chars().map(|c| {
+                    if c == '\n' || c == '\r' || c == '\t' {
+                        ' '
+                    } else {
+                        c
+                    }
+                }) {
+                    if !c.is_control() {
+                        prompt.push_char(c);
+                    }
+                }
+            }
+            return;
+        }
+        let Some(prompt) = self.input_prompt.as_mut() else {
+            return;
+        };
         match (key.code, key.modifiers) {
             (KeyCode::Esc, _) => self.close_input_prompt(),
             (KeyCode::Enter, _) => self.submit_input_prompt(),

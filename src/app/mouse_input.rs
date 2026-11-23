@@ -3413,12 +3413,15 @@ impl App {
                             CommentHit::Ignore => self.ignore_comment_box(id),
                             CommentHit::Reply | CommentHit::Body => {
                                 let keep = self.editor.comment_focus.take().filter(|f| f.id == id);
-                                let mut focus =
-                                    keep.unwrap_or(crate::widgets::editor::CommentFocus {
-                                        id,
-                                        reply: String::new(),
-                                        cursor: 0,
-                                    });
+                                let mut focus = match keep {
+                                    Some(f) => f,
+                                    None => {
+                                        // Another box's draft is kept, this
+                                        // one's comes back.
+                                        self.editor.release_comment_focus();
+                                        self.editor.focus_for_comment(id)
+                                    }
+                                };
                                 if hit == CommentHit::Reply {
                                     let text_x = self.editor.last_inner.x
                                         + self.editor.last_gutter_width
@@ -3436,9 +3439,7 @@ impl App {
                         return;
                     }
                     // Any other editor press releases a focused reply field.
-                    if self.editor.comment_focus.is_some() {
-                        self.editor.comment_focus = None;
-                    }
+                    self.editor.release_comment_focus();
                     // Gutter play glyph: run the test fn defined on the
                     // clicked line (VS Code's run bead); Alt+click debugs it
                     // instead. Sits in the sign margin one cell left of the

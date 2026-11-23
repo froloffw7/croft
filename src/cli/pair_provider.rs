@@ -3,14 +3,45 @@
 
 use super::*;
 
+/// The caret name of the pair seat. An explicit `--name` wins; otherwise the
+/// recorded name is inherited (#1907), except that the two defaults follow the
+/// backend: a seat on a local endpoint is `local` (the claude CLI's `claude`
+/// would name the wrong party), and switching back to the claude CLI turns the
+/// default `local` back into `claude`. A name the user chose is never touched.
+pub(super) fn pair_seat_name(
+    explicit: Option<String>,
+    recorded: Option<&str>,
+    provider: Option<&str>,
+) -> String {
+    let local = crate::pair::is_local(provider);
+    let default = if local { "local" } else { "claude" };
+    match (explicit, recorded) {
+        (Some(name), _) => name,
+        (None, Some("claude")) | (None, Some("local")) | (None, None) => default.into(),
+        (None, Some(name)) => name.into(),
+    }
+}
+
+/// The recorded spelling of a pair provider: `local` for a local endpoint,
+/// whether it was given as `local` or as the older `ollama`.
+pub(super) fn canonical_provider(p: String) -> String {
+    if crate::pair::is_local(Some(&p)) {
+        String::from("local")
+    } else {
+        p
+    }
+}
+
 /// Resolve the pair provider flags as recorded: `--base-url` alone implies
-/// ollama, and ollama without an explicit endpoint gets the standard local
-/// port. A plain claude activation records neither.
+/// `local`, and `local` (or the older `ollama`) without an explicit endpoint
+/// gets the standard local port. A plain claude activation records neither.
 pub(super) fn resolve_pair_provider(
     provider: Option<String>,
     base_url: Option<String>,
 ) -> Result<(Option<String>, Option<String>)> {
-    let provider = provider.or_else(|| base_url.is_some().then(|| String::from("ollama")));
+    let provider = provider
+        .or_else(|| base_url.is_some().then(|| String::from("local")))
+        .map(canonical_provider);
     // Validate at activation time, when the user is watching: a malformed
     // endpoint otherwise surfaces hours later as an opaque failure on the
     // first turn. A trailing slash would build `...//v1/messages`, which
@@ -34,7 +65,7 @@ pub(super) fn resolve_pair_provider(
         })
         .transpose()?;
     let base_url = match provider.as_deref() {
-        Some("ollama") => base_url.or_else(|| Some(String::from("http://localhost:11434"))),
+        Some("local") => base_url.or_else(|| Some(String::from("http://localhost:11434"))),
         _ => base_url,
     };
     Ok((provider, base_url))

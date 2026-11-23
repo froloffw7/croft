@@ -20,6 +20,27 @@ available locally with no external dependency.
 
 Sessions started by an older croft under dtach keep reattaching through dtach until they end.
 
+### Project files the navigator reads
+
+Two optional, plain-text files in the workspace ride in the navigator's system prompt (after the
+built-in fence protocol, each cut at 24,000 characters), so you can edit what it is told:
+
+- `.croft/pair.md` — standing instructions for this project: house style, what to avoid, the
+  build and test commands.
+- `CONTEXT.md` — notes for continuing the work. **Command Palette → "Navigator: Save Context to
+  CONTEXT.md"** asks the model to write them (Goal, Decisions, State, Files, Open questions; under
+  ~60 lines). The model chooses what is worth keeping; when the file exists it is sent along and the
+  model updates it instead of starting over. Edit the file freely: it is read when the navigator
+  starts, so a new `croft pair` session begins with it.
+
+### Navigator memory
+
+`croft pair` keeps the navigator's conversation between runs, per workspace and seat name. A
+`local` model gets its last three exchanges back (stored under croft's state directory, in
+`pair/`); older ones are dropped because each carried a now-stale copy of the buffer. The `claude`
+provider resumes its own session, so the CLI's usual context management applies. Set
+`CROFT_PAIR_HISTORY=fresh` to discard it and start over, or `CROFT_PAIR_HISTORY=off` to disable it.
+
 ## Shared sessions
 
 Several people (or several of your own windows) can `croft attach` the same folder and share
@@ -156,7 +177,11 @@ keeps its own orange caret in the file — parked wherever you last engaged it, 
 it leaves, and riding its edits as they stream. Inside the editor:
 
 - **Ask it** about a line or a selection — right-click the gutter ("Ask Navigator"), right-click
-  a selection ("Ask Navigator About Selection"), or press `Cmd+K Q`. From the CAPTURES panel, `n` on a
+  a selection ("Ask Navigator About Selection"), or press `Cmd+K Q`. With a selection, only the selected lines (numbered by their real file rows) go to
+  the model, not the whole file — handy for local models and big files; set `CROFT_PAIR_CONTEXT=buffer`
+  to send the whole buffer as before. A selection in a file OUTSIDE the workspace (a system header, a
+  dependency) can be asked about too: it goes out read-only, the model answers in plain prose, and the
+  answer appears in the OUTPUT panel (there is no buffer to pin a comment box to). From the CAPTURES panel, `n` on a
   captured line asks about that line with the pane rows around it. From the PROBLEMS panel,
   right-click a diagnostic → **Fix with Navigator** (also the last row of the `Cmd+.` Quick Fix
   picker) sends it the diagnostic with the server's quick fixes as hints; the row wears a spinner
@@ -188,10 +213,25 @@ LM Studio, llama.cpp, vLLM — and your own open-weight model takes the seat: sa
 streaming, same cancel.
 
 ```sh
-croft pair --provider ollama --model qwen3-coder:30b          # Ollama on localhost:11434
+croft pair --provider local --model qwen3-coder:30b          # Ollama on localhost:11434
 croft pair --base-url http://box:8080 --model qwen3-coder:30b # any compatible server (implies ollama)
 ```
 
+A server that only speaks the OpenAI wire (FastFlowLM, which runs models on AMD NPUs, and others)
+needs nothing extra: when `/v1/messages` answers a plain 404 ("Not Found", no model named in the
+body), croft retries the turn on `/v1/chat/completions` and remembers that for the session.
+`CROFT_PAIR_API=openai` (or `anthropic`) pins the wire and skips the probe. Reasoning models'
+`reasoning_content` is ignored; only the answer is fenced.
+
+**Context window.** A local model has a fixed window (whatever the server was started with) and
+croft cannot read it from every server, so declare it: `croft pair --provider local --model <m>
+--context 131072` (kept in the pair record; later `croft pair` runs inherit it). croft then keeps
+the conversation inside it: it estimates tokens pessimistically (about 3 bytes per token), drops the
+oldest exchanges first (whole, newest turn kept), reports the trim and a "context is N% full" warning
+at 80% in the OUTPUT panel, and refuses a single turn that cannot fit even alone, telling you to ask
+about a smaller selection (Ask Navigator with a selection sends only those lines) or raise the
+limit. Room for the answer (up to 8192 tokens, a quarter of a small window) is always kept free.
+
 Local turns go straight to `/v1/messages` with a minimal payload (the claude CLI's ~213 KB
 tool-schema prefill is exactly what local servers choke on), and the badge names who is typing:
-`◆ claude (qwen3-coder:30b) seated`.
+`◆ local (qwen3-coder:30b) seated`.

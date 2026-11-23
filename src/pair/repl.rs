@@ -8,12 +8,21 @@ use super::*;
 pub fn run(cfg: PairConfig) -> Result<()> {
     let pilot = match &cfg.provider {
         Provider::Claude => seat_pilot(&cfg.socket, &cfg.name, claude_command(&cfg)?, None)?,
-        Provider::Local { base_url } => {
+        Provider::Local { base_url, context } => {
             let model = cfg
                 .model
                 .as_deref()
                 .context("a local provider needs --model (there is no CLI default)")?;
-            seat_local(&cfg.socket, &cfg.name, base_url, model, None)?
+            seat_local(
+                &cfg.socket,
+                Some(crate::pair::history_path(&cfg.workspace, &cfg.name)),
+                &crate::pair::project_prompt(&cfg.workspace),
+                &cfg.name,
+                base_url,
+                *context,
+                model,
+                None,
+            )?
         }
     };
     let stdin = std::io::stdin();

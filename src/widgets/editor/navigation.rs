@@ -726,8 +726,30 @@ impl Editor {
         }
         self.scroll = line.min(self.lines.len().saturating_sub(1));
         self.scroll_sub = row.saturating_sub(acc);
-        let last_visible = (self.scroll + viewport - 1).min(self.lines.len().saturating_sub(1));
-        let floor = self.caret_floor_row().min(last_visible);
+        // Comment boxes eat rows: the last line whose own text row is on
+        // screen comes earlier than `scroll + viewport - 1`, and a top that
+        // sits inside a box has not got its own text row on screen at all.
+        // Clamping the caret by line count alone left it below the fold, and
+        // the render then scrolled the view back down to fetch it, so a box
+        // could never be wheeled into view from below.
+        let last_visible = self.nonwrap_last_visible_line(viewport);
+        let first_visible = if self.scroll_sub > 0 {
+            (self.scroll + 1).min(last_visible)
+        } else {
+            self.scroll
+        };
+        let floor = self.caret_floor_row().max(first_visible).min(last_visible);
+        // A reply field whose box left the screen no longer holds the keys.
+        if let Some(focus) = &self.comment_focus {
+            let anchor = self
+                .comment_boxes
+                .iter()
+                .find(|b| b.id == focus.id)
+                .map(|b| b.line);
+            if anchor.is_none_or(|l| l < self.scroll || l > last_visible) {
+                self.comment_focus = None;
+            }
+        }
         if self.cursor_row < floor {
             self.cursor_row = floor;
         } else if self.cursor_row > last_visible {
@@ -736,6 +758,86 @@ impl Editor {
         self.cursor_col = self.cursor_col.min(self.line_char_len(self.cursor_row));
         self.end_caret_action();
         self.view_scrolled = true;
+    }
+
+    /// The last buffer line whose text row is on screen for the current
+    /// `(scroll, scroll_sub)` top, counting the comment-box rows between
+    /// lines.
+    fn nonwrap_last_visible_line(&self, viewport: usize) -> usize {
+        let bw = self.visible_text_width();
+        let last_line = self.lines.len().saturating_sub(1);
+        // Row of `line`'s text relative to the viewport top; the top line's
+        // own text row is `scroll_sub` rows above it.
+        let mut pos = -(self.scroll_sub as isize);
+        let mut last = self.scroll.min(last_line);
+        let mut line = self.scroll;
+        while line < self.lines.len() {
+            if pos >= viewport as isize {
+                break;
+            }
+            last = line;
+            pos += 1 + self.box_rows_between(line, line + 1, bw) as isize;
+            line += 1;
+        }
+        last
+}
+
+    /// Scroll the non-wrap view down just enough that comment box `id` is in
+    /// view (its anchor line stays visible, so the caret keeps its row). A
+    /// box that is already fully visible, or an unknown id, changes nothing.
+    /// Used when the navigator's answer lands below the viewport, which
+    /// otherwise stays unseen until the caret happens to move.
+    pub fn reveal_comment_box(&mut self, id: u64) {
+        if self.wrap_enabled() || self.lines.is_empty() {
+            return;
+        }
+        let Some(idx) = self.comment_boxes.iter().position(|b| b.id == id) else {
+            return;
+        };
+        let bw = self.visible_text_width();
+        let viewport = self.text_rows().saturating_sub(
+            self.sticky_lines
+                .len()
+                .min(self.text_rows().saturating_sub(1)),
+        );
+        if viewport == 0 {
+            return;
+        }
+        let line = self.comment_boxes[idx]
+            .line
+            .min(self.lines.len().saturating_sub(1));
+        let line_row = line + self.box_rows_between(0, line, bw);
+        let before: usize = (0..idx)
+            .filter(|&i| self.comment_boxes[i].line == self.comment_boxes[idx].line)
+            .map(|i| self.comment_box_height(i, bw))
+            .sum();
+        let end = line_row + 1 + before + self.comment_box_height(idx, bw);
+        let top = self.nonwrap_top_content_row();
+        if line_row >= top && end <= top + viewport {
+            return;
+        }
+        self.nonwrap_set_top(end.saturating_sub(viewport).min(line_row));
+    }
+
+    /// Release the reply field's focus, keeping a non-empty draft for when
+    /// the box is focused again.
+    pub fn release_comment_focus(&mut self) {
+        if let Some(f) = self.comment_focus.take()
+            && !f.reply.is_empty()
+        {
+            self.reply_drafts.insert(f.id, f.reply);
+        }
+    }
+
+    /// A focus on box `id` carrying its saved draft (empty when none), the
+    /// caret after the draft.
+    pub fn focus_for_comment(&mut self, id: u64) -> CommentFocus {
+        let reply = self.reply_drafts.remove(&id).unwrap_or_default();
+        CommentFocus {
+            id,
+            cursor: reply.chars().count(),
+            reply,
+        }
     }
 
     pub(super) fn scroll_view_to(&mut self, top: usize) {

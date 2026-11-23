@@ -250,7 +250,8 @@ pub enum CliCommand {
         /// e.g. qwen3-coder:30b).
         #[arg(long)]
         model: Option<String>,
-        /// The name this collaborator's caret wears on peers' screens.
+        /// The name this collaborator's caret wears on peers' screens
+        /// (default: "claude", or "local" for a local endpoint).
         #[arg(long)]
         name: Option<String>,
         /// A first task for the --repl driver to send once seated.
@@ -260,14 +261,20 @@ pub enum CliCommand {
         #[arg(requires = "repl", hide = true)]
         task: Option<String>,
         /// Backend that seats the pilot: "claude" (default, the claude CLI)
-        /// or "ollama" (a direct Anthropic-compatible local endpoint —
-        /// Ollama, LM Studio, llama.cpp, vLLM; requires --model).
-        #[arg(long, value_parser = ["claude", "ollama"])]
+        /// or "local" (a direct local endpoint, Anthropic- or OpenAI-style:
+        /// Ollama, LM Studio, llama.cpp, vLLM, FastFlowLM; requires --model;
+        /// "ollama" is the older spelling).
+        #[arg(long, value_parser = ["claude", "local", "ollama"])]
         provider: Option<String>,
         /// The local endpoint for --provider ollama (implies it); defaults
         /// to http://localhost:11434.
         #[arg(long)]
         base_url: Option<String>,
+        /// The local model's context window in tokens (what the server was
+        /// started with, e.g. 131072). croft trims the oldest part of the
+        /// conversation to stay inside it and refuses a turn that cannot fit.
+        #[arg(long, value_name = "TOKENS")]
+        context: Option<usize>,
         /// Deactivate the navigator for the workspace instead.
         #[arg(long, default_value_t = false)]
         off: bool,

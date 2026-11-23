@@ -853,6 +853,7 @@ fn parses_pair_subcommand() {
             task,
             provider: None,
             base_url: None,
+            context: None,
             off: false,
             repl: true,
         }) => {
@@ -874,6 +875,7 @@ fn parses_pair_subcommand() {
             task: None,
             provider: None,
             base_url: None,
+            context: None,
             off: false,
             repl: false,
         })
@@ -948,18 +950,41 @@ fn parse_pair_provider_ollama_with_base_url() {
     assert!(Cli::try_parse_from(["croft", "pair", "--provider", "openai"]).is_err());
 }
 
+/// The default caret name follows the backend; a chosen name is kept.
+#[test]
+fn the_default_seat_name_follows_the_backend() {
+    assert_eq!(pair_seat_name(None, None, None), "claude");
+    assert_eq!(pair_seat_name(None, None, Some("ollama")), "local");
+    // A claude record switched to a local endpoint, and back.
+    assert_eq!(
+        pair_seat_name(None, Some("claude"), Some("ollama")),
+        "local"
+    );
+    assert_eq!(pair_seat_name(None, Some("local"), None), "claude");
+    // Names the user chose survive a provider switch, and --name wins.
+    assert_eq!(pair_seat_name(None, Some("ada"), Some("ollama")), "ada");
+    assert_eq!(
+        pair_seat_name(Some("claude".into()), Some("local"), Some("ollama")),
+        "claude"
+    );
+}
+
 /// `--base-url` alone implies the ollama provider, and ollama without an
 /// explicit endpoint defaults to the standard local port. Plain claude
 /// activations record neither.
 #[test]
 fn base_url_implies_ollama() {
     let (p, b) = resolve_pair_provider(None, Some(String::from("http://x:1234"))).unwrap();
-    assert_eq!(p.as_deref(), Some("ollama"));
+    assert_eq!(p.as_deref(), Some("local"));
     assert_eq!(b.as_deref(), Some("http://x:1234"));
 
-    let (p, b) = resolve_pair_provider(Some(String::from("ollama")), None).unwrap();
-    assert_eq!(p.as_deref(), Some("ollama"));
-    assert_eq!(b.as_deref(), Some("http://localhost:11434"));
+    // `local` and the older `ollama` are the same provider, recorded as
+    // `local`.
+    for spelling in ["local", "ollama"] {
+        let (p, b) = resolve_pair_provider(Some(String::from(spelling)), None).unwrap();
+        assert_eq!(p.as_deref(), Some("local"), "{spelling}");
+        assert_eq!(b.as_deref(), Some("http://localhost:11434"));
+    }
 
     let (p, b) = resolve_pair_provider(None, None).unwrap();
     assert_eq!(p, None);

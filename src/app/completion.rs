@@ -949,7 +949,7 @@ impl App {
         }
         let local =
             crate::session::read_pair_record(&crate::session::pair_record_path(&self.tree.root))
-                .filter(|r| r.provider.as_deref() == Some("ollama"))
+                .filter(|r| crate::pair::is_local(r.provider.as_deref()))
                 .map(|r| {
                     (
                         r.base_url

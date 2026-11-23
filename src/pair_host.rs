@@ -14,8 +14,9 @@ use anyhow::{Context, Result};
 
 use crate::collab::position;
 use crate::pair::{
-    PairConfig, Pilot, Provider, claude_command, compose_ask_turn, compose_yield_turn,
-    lock_briefly, seat_local, seat_pilot, send_turn, write_user_turn,
+    PairConfig, Pilot, Provider, claude_command, compose_ask_turn, compose_ask_turn_selection,
+    compose_external_selection_turn, compose_yield_turn, lock_briefly, seat_local, seat_pilot,
+    send_turn, write_user_turn,
 };
 
 /// What the pilot surfaces to the App, drained by `poll` once per tick.
@@ -86,13 +87,22 @@ impl PairHost {
                 let cmd = claude_command(&cfg)?;
                 Self::spawn_cmd(&cfg.socket, &cfg.name, cfg.task.as_deref(), cmd)
             }
-            Provider::Local { base_url } => {
+            Provider::Local { base_url, context } => {
                 let model = cfg
                     .model
                     .as_deref()
                     .context("a local provider needs --model (there is no CLI default)")?;
                 let (tx, rx) = channel();
-                let pilot = seat_local(&cfg.socket, &cfg.name, base_url, model, Some(tx))?;
+                let pilot = seat_local(
+                    &cfg.socket,
+                    Some(crate::pair::history_path(&cfg.workspace, &cfg.name)),
+                    &crate::pair::project_prompt(&cfg.workspace),
+                    &cfg.name,
+                    base_url,
+                    *context,
+                    model,
+                    Some(tx),
+                )?;
                 let mut host = Self::seated(pilot, rx, &cfg.name, cfg.task.as_deref())?;
                 host.model_label = Some(model.to_string());
                 Ok(host)
@@ -269,6 +279,21 @@ impl PairHost {
         instruction: &str,
         content: &str,
     ) -> Result<()> {
+        self.send_ask_turn_scoped(file, range, selection, instruction, content, false)
+    }
+
+    /// [`Self::send_ask_turn`] with `selection_only`: the turn carries just
+    /// the selected lines (real file row numbers), not the whole buffer.
+    /// The host still stages the full `content`, so edits apply correctly.
+    pub fn send_ask_turn_scoped(
+        &self,
+        file: &str,
+        range: (usize, usize),
+        selection: &str,
+        instruction: &str,
+        content: &str,
+        selection_only: bool,
+    ) -> Result<()> {
         let p = self.pilot.as_ref().context("navigator pilot is gone")?;
         // A parked rollback is applied before a new turn may stage (see
         // `pending_rollback`); refusing beats staging over stale books.
@@ -292,8 +317,60 @@ impl PairHost {
             st.park_caret(file, range.0); // visible presence at the ask site
             staged
         };
-        let body = compose_ask_turn(file, range, selection, instruction, content);
+        let body = if selection_only && !selection.is_empty() {
+            compose_ask_turn_selection(file, range, instruction, content)
+        } else {
+            compose_ask_turn(file, range, selection, instruction, content)
+        };
         self.commit_or_unstage(write_user_turn(&p.state, &p.sink, body), &p.state, staged)
+    }
+
+    /// Ask about a selection in a file outside the workspace: a read-only,
+    /// comment-only turn (nothing is staged, no session file is requested).
+    /// The answer has no buffer to anchor to and lands in the OUTPUT channel.
+    pub fn send_external_selection_turn(
+        &self,
+        path: &str,
+        range: (usize, usize),
+        instruction: &str,
+        content: &str,
+    ) -> Result<()> {
+        let p = self.pilot.as_ref().context("navigator pilot is gone")?;
+        if !self.drain_rollback(|| lock_briefly(&p.state)) {
+            anyhow::bail!("the navigator is mid-turn; wait for it to finish");
+        }
+        {
+            let Some(mut st) = lock_briefly(&p.state) else {
+                anyhow::bail!("the navigator is mid-turn; wait for it to finish");
+            };
+            if st.turn_active() || self.turn_pending.load(std::sync::atomic::Ordering::Relaxed) {
+                anyhow::bail!("the navigator is mid-turn; wait for it to finish");
+            }
+            // Edits are host-gated off for this turn; the next staged turn
+            // resets the flag.
+            st.set_comment_only(true);
+        }
+        let body = compose_external_selection_turn(path, range, instruction, content);
+        write_user_turn(&p.state, &p.sink, body)
+    }
+
+    /// A comment-only turn that is not about any file (Save Context): the
+    /// caller captures the prose of the answer.
+    pub fn send_plain_turn(&self, body: String) -> Result<()> {
+        let p = self.pilot.as_ref().context("navigator pilot is gone")?;
+        if !self.drain_rollback(|| lock_briefly(&p.state)) {
+            anyhow::bail!("the navigator is mid-turn; wait for it to finish");
+        }
+        {
+            let Some(mut st) = lock_briefly(&p.state) else {
+                anyhow::bail!("the navigator is mid-turn; wait for it to finish");
+            };
+            if st.turn_active() || self.turn_pending.load(std::sync::atomic::Ordering::Relaxed) {
+                anyhow::bail!("the navigator is mid-turn; wait for it to finish");
+            }
+            st.set_comment_only(true);
+        }
+        write_user_turn(&p.state, &p.sink, body)
     }
 
     /// Yield turn: the driver hands the navigator the floor. Comment-only,

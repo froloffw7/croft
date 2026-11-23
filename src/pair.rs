@@ -23,7 +23,9 @@
 mod apply;
 mod caret;
 mod claude_cli;
+mod context;
 mod fence;
+mod history;
 pub(crate) mod local;
 mod notes;
 mod offsets;
@@ -40,6 +42,7 @@ pub(crate) use claude_cli::FAKE_CLAUDE;
 pub(crate) use claude_cli::claude_command;
 use claude_cli::*;
 use fence::*;
+pub(crate) use history::local_path as history_path;
 #[cfg(test)]
 pub(crate) use notes::inject_note;
 pub(crate) use notes::inject_note_now;
@@ -47,7 +50,9 @@ use notes::*;
 use offsets::*;
 pub use provider::PairConfig;
 pub use provider::Provider;
+pub use provider::is_local;
 use provider::*;
+pub(crate) use provider::{CONTEXT_FILE, project_prompt, save_context_instruction};
 pub use repl::run;
 #[cfg(test)]
 use repl::*;
@@ -57,12 +62,14 @@ pub(crate) use seat::seat_pilot;
 use seat::*;
 pub(crate) use state::StagedTurn;
 pub(crate) use state::lock_briefly;
-pub(crate) use turns::compose_ask_turn;
 pub(crate) use turns::compose_reply_turn;
 pub(crate) use turns::compose_yield_turn;
 pub(crate) use turns::send_turn;
 pub(crate) use turns::write_user_turn;
 use turns::*;
+pub(crate) use turns::{
+    compose_ask_turn, compose_ask_turn_selection, compose_external_selection_turn,
+};
 use voice::*;
 
 use std::io::{BufRead, Read as _, Write as _};

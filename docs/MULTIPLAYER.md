@@ -552,16 +552,20 @@ The navigator re-engages on its own as the driver works.
 
 ### Local models
 
-`--provider ollama` seats the same navigator on any local Anthropic-compatible
+`--provider local` seats the same navigator on any local Anthropic-compatible
 endpoint (Ollama, LM Studio, llama.cpp, vLLM):
 
 ```sh
-croft pair --provider ollama --model qwen3-coder:30b            # localhost:11434
+croft pair --provider local --model qwen3-coder:30b            # localhost:11434
 croft pair --base-url http://box:8080 --model qwen3-coder:30b   # implies ollama
 ```
 
 - **Request**: a minimal `/v1/messages` call: system prompt plus
   conversation, no tools. It streams a valid fence in seconds.
+- **OpenAI-wire servers**: a `/v1/messages` that answers a route-level 404
+  (FastFlowLM, others) is retried on `/v1/chat/completions` (same minimal
+  payload, `system` as the first message, `[DONE]`-terminated SSE) and
+  remembered for the session; `CROFT_PAIR_API=openai|anthropic` pins it.
 - **Why not a passthrough**: the claude CLI pointed at a local endpoint
   (`ANTHROPIC_BASE_URL`, or `ollama launch claude`) sends the full agent
   turn: ~107 tool schemas, adaptive thinking, beta extensions, ~213 KB.
@@ -579,7 +583,7 @@ croft pair --base-url http://box:8080 --model qwen3-coder:30b   # implies ollama
   response drains and applies nothing.
 - **Dead endpoint**: that turn fails (the status names the URL) and the seat
   stays; the next ask retries.
-- **Badge**: `◆ claude (qwen3-coder:30b) seated`.
+- **Badge**: `◆ local (qwen3-coder:30b) seated`.
 - **Auth**: keyed gateways read `ANTHROPIC_AUTH_TOKEN` from croft's
   environment. It is sent as `Authorization: Bearer` (Anthropic's convention
   for that variable) and mirrored into `x-api-key` for gateways of the other

@@ -1,0 +1,1 @@
+Input prompts (Ask Navigator and the other one-line prompts): Cmd/Ctrl+V now pastes the clipboard when the terminal sends it as a key, and pasted line breaks become spaces instead of gluing words together.

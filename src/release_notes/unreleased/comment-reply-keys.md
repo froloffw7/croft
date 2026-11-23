@@ -1,0 +1,1 @@
+Comment-box Reply field: Delete, Home and End work, the terminal caret sits in the field while typing (not in the buffer text), and the footer shows "waiting for the answer…" instead of the Reply hint until the navigator's answer lands.

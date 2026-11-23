@@ -97,8 +97,16 @@ pub(crate) fn claude_command(cfg: &PairConfig) -> Result<Command> {
         .args(["--allowedTools", ALLOWED_TOOLS])
         .arg("--strict-mcp-config")
         .args(["--mcp-config", &mcp_config.to_string()])
-        .args(["--append-system-prompt", &system_prompt(&cfg.provider)])
+        .args([
+            "--append-system-prompt",
+            &format!(
+                "{}{}",
+                system_prompt(&cfg.provider),
+                super::provider::project_prompt(&cfg.workspace)
+            ),
+        ])
         .current_dir(&cfg.workspace);
+    cmd.args(super::history::claude_args(&cfg.workspace, &cfg.name));
     if let Some(model) = &cfg.model {
         cmd.args(["--model", model]);
     }

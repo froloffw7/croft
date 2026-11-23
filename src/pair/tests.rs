@@ -25,7 +25,7 @@ fn ollama_live_smoke_drives_seat_local_end_to_end() {
         std::env::var("CROFT_SPIKE_OLLAMA_MODEL").unwrap_or_else(|_| "qwen3-coder:30b".into());
 
     let harness = OwnerHarness::start("def greet(name):\n    return \"hi \" + name\n");
-    let pilot = seat_local(&harness.socket, "pilot", &url, &model, None).unwrap();
+    let pilot = seat_local(&harness.socket, None, "", "pilot", &url, None, &model, None).unwrap();
     send_turn(
         &pilot.state,
         &pilot.sink,
@@ -87,6 +87,7 @@ fn turn_sink_claude_writes_stream_json_to_stdin() {
 fn local_provider_appends_line_range_guidance() {
     let prompt = system_prompt(&Provider::Local {
         base_url: String::from("http://localhost:11434"),
+        context: None,
     });
     assert!(prompt.starts_with(PAIR_SYSTEM_PROMPT));
     assert!(
@@ -291,6 +292,77 @@ fn serve_http_once(resp: String) -> (String, std::thread::JoinHandle<()>) {
     (base_url, server)
 }
 
+/// A multi-request HTTP stub for a server that speaks only the OpenAI wire:
+/// `/v1/messages` is a route-level 404, `/v1/chat/completions` streams
+/// `deltas` in OpenAI SSE and ends with `[DONE]`. Serves `connections`
+/// requests, recording each request line's path.
+fn serve_openai_only(
+    deltas: Vec<&'static str>,
+    connections: usize,
+) -> (
+    String,
+    std::sync::Arc<Mutex<Vec<String>>>,
+    std::thread::JoinHandle<()>,
+) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let paths = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let seen = paths.clone();
+    let mut sse = String::new();
+    for d in deltas {
+        let ev = json!({ "choices": [{ "index": 0, "delta": { "content": d } }] });
+        sse.push_str(&format!("data: {ev}\n\n"));
+    }
+    let fin = json!({ "choices": [{ "index": 0, "delta": {}, "finish_reason": "stop" }] });
+    sse.push_str(&format!("data: {fin}\n\ndata: [DONE]\n\n"));
+    let server = std::thread::spawn(move || {
+        for _ in 0..connections {
+            let (mut sock, _) = listener.accept().unwrap();
+            let mut req = Vec::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                let n = sock.read(&mut buf).unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                req.extend_from_slice(&buf[..n]);
+                let text = String::from_utf8_lossy(&req).to_ascii_lowercase();
+                if let Some(head_end) = text.find("\r\n\r\n") {
+                    let len = text[..head_end]
+                        .lines()
+                        .find_map(|l| l.strip_prefix("content-length:"))
+                        .and_then(|v| v.trim().parse::<usize>().ok())
+                        .unwrap_or(0);
+                    if req.len() >= head_end + 4 + len {
+                        break;
+                    }
+                }
+            }
+            let text = String::from_utf8_lossy(&req).into_owned();
+            let path = text
+                .lines()
+                .next()
+                .and_then(|l| l.split_whitespace().nth(1))
+                .unwrap_or("")
+                .to_string();
+            seen.lock().unwrap().push(path.clone());
+            let resp = if path == "/v1/chat/completions" {
+                format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\
+                     connection: close\r\n\r\n{sse}"
+                )
+            } else {
+                String::from(
+                    "HTTP/1.1 404 Not Found\r\ncontent-type: application/json\r\n\
+                     connection: close\r\n\r\n{\"error\":\"Not Found\"}",
+                )
+            };
+            let _ = sock.write_all(resp.as_bytes());
+        }
+    });
+    (base_url, paths, server)
+}
+
 /// A guest PairState over the harness relay plus the same pump thread
 /// the seated pilot runs (bootstraps only land when someone polls).
 fn pumped_state(
@@ -335,6 +407,7 @@ fn ui_reads_answer_instantly_while_the_pilot_mutex_is_held() {
         task: None,
         provider: Provider::Local {
             base_url: String::from("http://127.0.0.1:9"),
+            context: None,
         },
     })
     .unwrap();
@@ -1397,7 +1470,17 @@ fn seat_local_drives_a_turn_end_to_end() {
         " edit",
         "\n<<<END>>>\nDone.\n",
     ]);
-    let pilot = seat_local(&harness.socket, "pilot", &base_url, "test-model", None).unwrap();
+    let pilot = seat_local(
+        &harness.socket,
+        None,
+        "",
+        "pilot",
+        &base_url,
+        None,
+        "test-model",
+        None,
+    )
+    .unwrap();
     assert!(!pilot.reader_finished(), "a local seat never loses a child");
 
     send_turn(&pilot.state, &pilot.sink, "fix demo.txt").unwrap();
@@ -1438,6 +1521,7 @@ fn pair_host_spawns_local_backend_without_a_child() {
         task: None,
         provider: Provider::Local {
             base_url: String::from("http://127.0.0.1:9"),
+            context: None,
         },
     };
     let err = match crate::pair_host::PairHost::spawn(no_model) {
@@ -1460,7 +1544,10 @@ fn pair_host_spawns_local_backend_without_a_child() {
         name: String::from("claude"),
         model: Some(String::from("test-model")),
         task: None,
-        provider: Provider::Local { base_url },
+        provider: Provider::Local {
+            base_url,
+            context: None,
+        },
     })
     .unwrap();
     assert!(!host.is_busy());
@@ -1497,6 +1584,7 @@ fn local_navigator_badge_names_the_model() {
         task: None,
         provider: Provider::Local {
             base_url: String::from("http://127.0.0.1:9"),
+            context: None,
         },
     })
     .unwrap();
@@ -2502,6 +2590,17 @@ fn compose_ask_turn_numbers_content_and_includes_selection() {
     assert!(one.contains("2|c"));
 }
 
+/// A selection-scoped ask carries only the selected rows, numbered by their
+/// real file row, and never the rest of the file.
+#[test]
+fn selection_ask_turn_omits_rest_of_file() {
+    let t = compose_ask_turn_selection("a.rs", (2, 3), "explain", "l0\nl1\nl2\nl3\nl4");
+    assert!(t.contains("2|l2") && t.contains("3|l3"));
+    assert!(!t.contains("l0") && !t.contains("l4"));
+    assert!(t.contains("lines 3-4 in your partner's gutter"));
+    assert!(t.contains("explain"));
+}
+
 /// #1966: the gutter numbers lines from 1, so every line a turn names
 /// carries that number beside its 0-based row, and the bare 0-based row
 /// never stands alone where the model would quote it to its partner.
@@ -2560,6 +2659,7 @@ fn turns_name_the_gutter_line_beside_the_row() {
 fn system_prompt_numbers_lines_only_by_the_gutter() {
     let prompt = system_prompt(&Provider::Local {
         base_url: String::new(),
+        context: None,
     });
     for text in prompt.lines() {
         for (at, _) in text.match_indices("line") {
@@ -2881,4 +2981,199 @@ fn compose_turn_always_names_target_file() {
     let noted = with_pending_note(Some("stream was cancelled".into()), "task".into());
     assert!(noted.starts_with("stream was cancelled"));
     assert!(noted.contains("task"));
+}
+
+/// An endpoint with no `/v1/messages` route (FastFlowLM) is switched to the
+/// OpenAI wire on the spot: the 404 is probed once, the fenced edit streams
+/// through `/v1/chat/completions`, and the next turn skips the probe.
+#[test]
+fn an_openai_only_endpoint_is_reached_through_chat_completions() {
+    let harness = OwnerHarness::start("hello world");
+    let (state, stop, pump) = pumped_state(&harness);
+    let (base_url, paths, server) = serve_openai_only(
+        vec![
+            "<<<EDIT demo.txt:0:6-0:11>",
+            ">>\n",
+            "openai",
+            "\n<<<END>>>\n",
+        ],
+        3,
+    );
+    let (turn_tx, turn_rx) = std::sync::mpsc::channel();
+    let mut messages = vec![json!({ "role": "user", "content": "fix demo.txt" })];
+    local::stream_turn(
+        &base_url,
+        "test-model",
+        PAIR_SYSTEM_PROMPT,
+        &mut messages,
+        &state,
+        &turn_tx,
+    );
+    harness.wait_until("the OpenAI-wire edit to converge", |h| {
+        h.doc().as_deref() == Some("hello openai")
+    });
+    let end = turn_rx.try_recv().expect("turn ended");
+    assert!(!end.is_error, "{}", end.text);
+    assert_eq!(messages.len(), 2, "assistant reply appended");
+    // A second turn goes straight to the OpenAI route.
+    messages.push(json!({ "role": "user", "content": "again" }));
+    local::stream_turn(
+        &base_url,
+        "test-model",
+        PAIR_SYSTEM_PROMPT,
+        &mut messages,
+        &state,
+        &turn_tx,
+    );
+    server.join().unwrap();
+    assert_eq!(
+        *paths.lock().unwrap(),
+        vec![
+            "/v1/messages",
+            "/v1/chat/completions",
+            "/v1/chat/completions"
+        ]
+    );
+    stop.store(true, Ordering::Relaxed);
+    pump.join().unwrap();
+}
+
+/// `local` and the older `ollama` both seat a local endpoint; anything else
+/// is the claude CLI.
+#[test]
+fn local_and_ollama_both_name_a_local_endpoint() {
+    for name in ["local", "ollama"] {
+        assert_eq!(
+            Provider::from_record(Some(name), Some("http://h:1")),
+            Provider::Local {
+                base_url: "http://h:1".into(),
+                context: None,
+            },
+            "{name}"
+        );
+        assert!(crate::pair::is_local(Some(name)));
+    }
+    assert_eq!(
+        Provider::from_record(Some("claude"), None),
+        Provider::Claude
+    );
+    assert!(!crate::pair::is_local(None));
+}
+
+/// History: trimming keeps the tail starting on a user message; saved local
+/// messages round-trip; the claude flags are `--session-id` first and
+/// `--resume` once the CLI has the transcript.
+#[test]
+fn pair_history_trims_roundtrips_and_picks_claude_flags() {
+    use super::history::*;
+    use serde_json::json;
+    let msgs: Vec<_> = (0..10)
+        .map(|i| json!({ "role": if i % 2 == 0 { "user" } else { "assistant" }, "content": i }))
+        .collect();
+    let t = trim(msgs.clone());
+    assert!(t.len() <= KEEP_MESSAGES);
+    assert_eq!(t[0]["role"], "user");
+    assert_eq!(t.last().unwrap()["content"], 9);
+
+    let dir = tempfile::tempdir().unwrap();
+    let f = dir.path().join("pair/x.json");
+    save_local(&f, &msgs);
+    assert_eq!(load_local(&f), t);
+
+    let sess = dir.path().join("s/x.session");
+    let cfg = dir.path().join("claude");
+    let first = claude_args_in(&sess, &cfg, Mode::On);
+    assert_eq!(first[0], "--session-id");
+    let id = first[1].clone();
+    // The CLI has not written a transcript yet: still a new session, new id.
+    assert_eq!(claude_args_in(&sess, &cfg, Mode::On)[0], "--session-id");
+    let id2 = std::fs::read_to_string(&sess).unwrap();
+    std::fs::create_dir_all(cfg.join("projects/p")).unwrap();
+    std::fs::write(cfg.join(format!("projects/p/{id2}.jsonl")), "{}").unwrap();
+    assert_eq!(
+        claude_args_in(&sess, &cfg, Mode::On),
+        vec!["--resume".to_string(), id2.clone()]
+    );
+    assert_ne!(id, id2);
+    // fresh discards; off adds nothing.
+    assert_eq!(claude_args_in(&sess, &cfg, Mode::Fresh)[0], "--session-id");
+    assert!(claude_args_in(&sess, &cfg, Mode::Off).is_empty());
+}
+
+/// Context accounting: nothing happens under the limit; over it the oldest
+/// exchanges go first, whole, keeping the newest turn; a turn that cannot fit
+/// alone is reported, not sent.
+#[test]
+fn context_fit_trims_oldest_exchanges_and_refuses_oversized_turns() {
+    use super::context::*;
+    use serde_json::json;
+    let big = "x".repeat(30_000); // ~10k tokens
+    let mk = |role: &str, text: &str| json!({ "role": role, "content": text });
+    let mut m = vec![
+        mk("user", &big),
+        mk("assistant", "ok"),
+        mk("user", &big),
+        mk("assistant", "ok"),
+        mk("user", "now"),
+    ];
+    assert!(matches!(
+        fit("sys", &mut m.clone(), 100_000),
+        Fit::Ok { .. }
+    ));
+    // 24k window: reserve is a quarter (6k) -> 18k budget: one big turn fits.
+    let r = fit("sys", &mut m, 24_000);
+    assert!(matches!(r, Fit::Trimmed { .. }), "{r:?}");
+    assert_eq!(m.last().unwrap()["content"], "now");
+    assert_eq!(m[0]["role"], "user");
+    assert!(estimate("sys", &m) <= 18_000);
+    // A single turn bigger than the whole window is refused, and kept.
+    let mut one = vec![mk("user", &"y".repeat(300_000))];
+    assert!(matches!(fit("sys", &mut one, 24_000), Fit::TooBig { .. }));
+    assert_eq!(one.len(), 1);
+    assert!(too_big_message(100_000, 24_000).contains("--context"));
+}
+
+/// An ask about a file outside the workspace is read-only prose over the
+/// selected rows only.
+#[test]
+fn external_selection_turn_is_read_only_and_scoped() {
+    let t =
+        compose_external_selection_turn("/usr/include/x.h", (1, 2), "what is this", "a\nb\nc\nd");
+    assert!(t.contains("OUTSIDE the workspace"));
+    assert!(t.contains("1|b") && t.contains("2|c"));
+    assert!(!t.contains("0|a") && !t.contains("3|d"));
+    assert!(t.contains("Do NOT emit EDIT or NOTE"));
+}
+
+/// The workspace's `.croft/pair.md` and `CONTEXT.md` ride in the system
+/// prompt after the protocol; absent or empty files add nothing.
+#[test]
+fn project_prompt_reads_the_editable_files() {
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(project_prompt(dir.path()), "");
+    std::fs::create_dir_all(dir.path().join(".croft")).unwrap();
+    std::fs::write(dir.path().join(".croft/pair.md"), "Prefer small diffs.\n").unwrap();
+    std::fs::write(dir.path().join("CONTEXT.md"), "  \n").unwrap();
+    let p = project_prompt(dir.path());
+    assert!(p.contains("PROJECT INSTRUCTIONS") && p.contains("Prefer small diffs."));
+    assert!(
+        !p.contains("SAVED CONTEXT"),
+        "a blank CONTEXT.md adds nothing"
+    );
+    std::fs::write(dir.path().join("CONTEXT.md"), "## Goal\nport to vulkan\n").unwrap();
+    let p = project_prompt(dir.path());
+    assert!(p.contains("SAVED CONTEXT") && p.contains("port to vulkan"));
+    // A huge file is cut, not sent whole in every request.
+    std::fs::write(dir.path().join("CONTEXT.md"), "z".repeat(100_000)).unwrap();
+    assert!(project_prompt(dir.path()).len() < 60_000);
+}
+
+/// The save instruction names the sections and, when a file exists, asks for
+/// an update of it.
+#[test]
+fn save_context_instruction_updates_an_existing_file() {
+    let fresh = save_context_instruction(None);
+    assert!(fresh.contains("## Decisions") && !fresh.contains("CURRENT CONTEXT.md"));
+    let upd = save_context_instruction(Some("old notes"));
+    assert!(upd.contains("UPDATE it") && upd.contains("old notes"));
 }

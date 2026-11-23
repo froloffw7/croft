@@ -1,0 +1,1 @@
+feat(pair): the local-endpoint provider is spelled `local` (`croft pair --provider local`, `"provider": "local"` in pair.json); the older `ollama` is still read and accepted, and is recorded as `local`.

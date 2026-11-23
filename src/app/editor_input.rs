@@ -2313,7 +2313,15 @@ impl App {
         // query, which makes the "open + paste a filename" path that the
         // VS Code Quick Open is meant to support unusable.
         if let Some(prompt) = self.input_prompt.as_mut() {
-            for c in s.chars() {
+            // Line breaks become spaces: dropping them glued the last word
+            // of one line to the first of the next.
+            for c in s.chars().map(|c| {
+                if c == '\n' || c == '\r' || c == '\t' {
+                    ' '
+                } else {
+                    c
+                }
+            }) {
                 if !c.is_control() {
                     prompt.push_char(c);
                 }
@@ -2366,6 +2374,13 @@ impl App {
                 let text: String = s.chars().filter(|c| !c.is_control()).collect();
                 prompt.edit(|t, at| crate::widgets::line_edit::insert_at(t, at, &text));
             }
+            return false;
+        }
+        // A focused comment-box reply field owns the paste while the editor
+        // is focused: it is an input line, and the text must not reach the
+        // buffer behind it.
+        if self.focus == Pane::Editor && self.editor.comment_focus.is_some() {
+            self.comment_reply_insert(s);
             return false;
         }
         // The in-file find bar is a pane-scoped widget, not a modal: it only

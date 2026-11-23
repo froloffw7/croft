@@ -80,6 +80,11 @@ impl PairState {
         self.last_seen.insert(file.to_string(), content.to_string())
     }
 
+    /// Gate edits for the next turn without staging a file (a read-only ask).
+    pub(crate) fn set_comment_only(&mut self, on: bool) {
+        self.comment_only = on;
+    }
+
     /// [`Self::begin_turn`] plus everything needed to undo it: the caller
     /// stages the look BEFORE the send, and a failed send must not keep it
     /// (`last_seen` is the yield-diff baseline — a retry would diff the

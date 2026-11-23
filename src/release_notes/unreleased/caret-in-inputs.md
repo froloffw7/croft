@@ -1,0 +1,1 @@
+One caret per input: the Ask Navigator / one-line input prompts and the comment-box Reply field now use the terminal's own caret instead of a painted block, and the editor's caret no longer keeps blinking behind a prompt.
