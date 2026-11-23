@@ -200,4 +200,4 @@ body), croft retries the turn on `/v1/chat/completions` and remembers that for t
 
 Local turns go straight to `/v1/messages` with a minimal payload (the claude CLI's ~213 KB
 tool-schema prefill is exactly what local servers choke on), and the badge names who is typing:
-`◆ claude (qwen3-coder:30b) seated`.
+`◆ local (qwen3-coder:30b) seated`.

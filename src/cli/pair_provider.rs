@@ -3,6 +3,25 @@
 
 use super::*;
 
+/// The caret name of the pair seat. An explicit `--name` wins; otherwise the
+/// recorded name is inherited (#1907), except that the two defaults follow the
+/// backend: a seat on a local endpoint is `local` (the claude CLI's `claude`
+/// would name the wrong party), and switching back to the claude CLI turns the
+/// default `local` back into `claude`. A name the user chose is never touched.
+pub(super) fn pair_seat_name(
+    explicit: Option<String>,
+    recorded: Option<&str>,
+    provider: Option<&str>,
+) -> String {
+    let local = provider == Some("ollama");
+    let default = if local { "local" } else { "claude" };
+    match (explicit, recorded) {
+        (Some(name), _) => name,
+        (None, Some("claude")) | (None, Some("local")) | (None, None) => default.into(),
+        (None, Some(name)) => name.into(),
+    }
+}
+
 /// Resolve the pair provider flags as recorded: `--base-url` alone implies
 /// ollama, and ollama without an explicit endpoint gets the standard local
 /// port. A plain claude activation records neither.

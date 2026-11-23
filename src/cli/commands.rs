@@ -250,7 +250,8 @@ pub enum CliCommand {
         /// e.g. qwen3-coder:30b).
         #[arg(long)]
         model: Option<String>,
-        /// The name this collaborator's caret wears on peers' screens.
+        /// The name this collaborator's caret wears on peers' screens
+        /// (default: "claude", or "local" for a local endpoint).
         #[arg(long)]
         name: Option<String>,
         /// A first task for the --repl driver to send once seated.
