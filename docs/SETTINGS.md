@@ -199,6 +199,56 @@ A `.editorconfig` `insert_final_newline` or `trim_trailing_whitespace`
 wins over the setting for its files, whether it turns the clean-up on or
 off. All three appear in **Preferences: Open Settings (UI)**.
 
+## Language server arguments
+
+`lsp.<server>.args` adds command-line arguments to a language server, after
+the ones croft starts it with. They apply the next time the server starts
+(the Restart Language Server command does it at once) and only from your own
+`config.json`, `config.synced.json` or `config.local.json`: a repository's
+layers cannot choose what a server is run with.
+
+```json
+{ "lsp": { "clangd": { "args": ["--background-index", "--query-driver=/usr/bin/*-g++"] } } }
+```
+
+clangd formats with the style in the project's `.clang-format`; for the files
+that have none, `--fallback-style=LLVM` (or `Google`, `Mozilla`, `WebKit`,
+`Microsoft`, `GNU`, or `file:<path>`) picks one.
+
+clangd has clang-format built in, so formatting needs no separate
+`clang-format` install. A `.clang-format` at the project root, found from the
+file upward, looks like this (every
+[option](https://clang.llvm.org/docs/ClangFormatStyleOptions.html) goes in it):
+
+```yaml
+---
+Language: Cpp
+BasedOnStyle: LLVM
+IndentWidth: 4
+UseTab: Never
+ColumnLimit: 100
+BreakBeforeBraces: Attach
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: Never
+PointerAlignment: Left
+AccessModifierOffset: -4
+IndentCaseLabels: true
+SortIncludes: CaseSensitive
+IncludeBlocks: Regroup
+IncludeCategories:
+  - Regex: '^<.*\.h>'
+    Priority: 1
+  - Regex: '^<.*>'
+    Priority: 2
+  - Regex: '.*'
+    Priority: 3
+...
+```
+
+`ColumnLimit: 0` turns line wrapping off, and `SortIncludes: Never` leaves
+`#include` lines alone. `clang-format --dump-config` (if installed) prints the
+style a project ends up with.
+
 ## Project exclusions
 
 `files_exclude` and `search_exclude` are lists of globs, matched against

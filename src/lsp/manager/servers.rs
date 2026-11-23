@@ -518,7 +518,13 @@ impl WorkerState {
             // its servers, and the `rustup` that resolves rust-analyzer,
             // while that frame is still being drawn.
             crate::startup_gate::wait_async().await;
-            let configs: Vec<ServerConfig> = self.registry.for_language(lang).to_vec();
+            let configs: Vec<ServerConfig> = self
+                .registry
+                .for_language(lang)
+                .iter()
+                .cloned()
+                .map(ServerConfig::with_user_args)
+                .collect();
             // Spawn every server for this root concurrently rather than awaiting
             // each in turn. The worker loop processes commands one at a time, so
             // a sequential spawn chain made the OpenDoc command (and the

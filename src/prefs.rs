@@ -211,6 +211,15 @@ pub const LANGUAGE_KEYS: &[&str] = &[
 
 /// The on-disk preferences document. New fields must default so an older
 /// config still parses; `#[serde(default)]` covers that.
+/// What the user sets for one language server (`lsp.<server>` in
+/// `config.json`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LspServerPrefs {
+    /// Extra command-line arguments, after croft's own.
+    #[serde(default)]
+    pub args: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct Prefs {
     /// Active color theme, stored by its stable [`Theme::id`].
@@ -427,6 +436,13 @@ pub struct Prefs {
     /// a folder's match hides everything inside it.
     #[serde(default)]
     pub files_exclude: Vec<String>,
+    /// Per language server settings, by server name (`"clangd"`, `"gopls"`):
+    /// `"lsp": { "clangd": { "args": ["--background-index"] } }`. `args` are
+    /// added after the arguments croft starts the server with, the next time
+    /// the server starts. User layers only: a repository cannot choose what a
+    /// server is run with.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub lsp: std::collections::BTreeMap<String, LspServerPrefs>,
     /// Globs kept out of Search, Replace All and Go to File, on top of
     /// `files_exclude` (VS Code's `search.exclude`, #1345).
     #[serde(default)]
