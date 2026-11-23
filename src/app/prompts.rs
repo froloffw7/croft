@@ -64,17 +64,7 @@ impl App {
     pub(super) fn render_prompt(&self, frame: &mut ratatui::Frame) {
         let Some(p) = &self.prompt else { return };
         let area = frame.area();
-        let width = area.width.saturating_sub(8).clamp(40, 80).min(area.width);
-        let height = if p.error.is_some() { 6 } else { 5 };
-        let x = (area.width.saturating_sub(width)) / 2 + area.x;
-        let y = (area.height.saturating_sub(height)) / 2 + area.y;
-        let rect = Rect {
-            x,
-            y,
-            width,
-            height,
-        };
-        let rect = rect.intersection(area);
+        let rect = prompt_rect(area, p.error.is_some());
         let grad = self.popup_gradient();
         // A `surfaces` theme: the title in the strong ink on the card (no
         // chip), the caret and the prompt mark in the accent (the field has
