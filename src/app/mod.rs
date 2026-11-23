@@ -2960,6 +2960,9 @@ pub struct App {
     /// VS Code's `editor.formatOnType` (#254): typing a server trigger
     /// character runs onTypeFormatting at the spot. Off by default.
     format_on_type: bool,
+    /// `column_select_mode`: which chords select a column, expand the
+    /// selection and copy a line.
+    pub(super) column_select_mode: crate::prefs::ColumnSelectMode,
     /// In-flight on-type request: (id, the edit_seq it was computed
     /// against, the tab's path). The reply applies only while that same
     /// tab is active and its buffer has not moved since — `edit_seq` is
@@ -5014,6 +5017,7 @@ impl App {
             format_request_seq: None,
             format_request_selection: false,
             format_on_type: loaded_prefs.format_on_type,
+            column_select_mode: loaded_prefs.column_select_mode,
             on_type_request: None,
             code_action_request_id: None,
             code_action_pending_resolve: false,

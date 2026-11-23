@@ -1490,6 +1490,69 @@ fn column_select_keys_make_a_box_that_typing_fills() {
     assert_eq!(&app.editor.lines[..3], ["Ypha = 1", "Yta  = 2", "Ymma = 3"]);
 }
 
+/// `column_select_mode: "shift_alt"` (#1560) gives Shift+Alt+arrows to Column
+/// Select, and moves Expand / Shrink Selection to Ctrl+Shift+Alt+Right/Left
+/// and Copy Line to Ctrl+Shift+Up/Down, the keys it traded them for.
+#[test]
+fn shift_alt_mode_selects_columns_on_shift_alt_and_moves_the_other_chords() {
+    use crate::prefs::ColumnSelectMode;
+    let tmp = tempfile::tempdir().unwrap();
+    let mut app = app_with_open_file(tmp.path(), "s.py", COLUMN_PY);
+    app.column_select_mode = ColumnSelectMode::ShiftAlt;
+    app.editor.cursor_row = 0;
+    app.editor.cursor_col = 0;
+    for code in [KeyCode::Down, KeyCode::Down, KeyCode::Right, KeyCode::Right] {
+        app.handle_key(column_chord(code, KeyModifiers::NONE))
+            .unwrap();
+    }
+    assert_eq!(app.editor.carets.len(), 2, "Shift+Alt makes the box");
+    type_keys(&mut app, "Y");
+    assert_eq!(&app.editor.lines[..3], ["Ypha = 1", "Yta  = 2", "Ymma = 3"]);
+
+    // Ctrl+Shift+Alt Up/Down still make a box; Left/Right expand instead.
+    let mut app = app_with_open_file(tmp.path(), "s.py", COLUMN_PY);
+    app.column_select_mode = ColumnSelectMode::ShiftAlt;
+    app.editor.cursor_row = 0;
+    app.editor.cursor_col = 1;
+    app.handle_key(column_chord(KeyCode::Down, KeyModifiers::CONTROL))
+        .unwrap();
+    assert_eq!(app.editor.cursor_row, 1, "Down moved the box head a row");
+    app.handle_key(column_chord(KeyCode::Right, KeyModifiers::CONTROL))
+        .unwrap();
+    assert!(
+        app.editor.carets.len() < 2,
+        "Right expands the selection here, it does not grow a box"
+    );
+
+    // Copy Line: Ctrl+Shift+Down copies, Shift+Alt+Down no longer does.
+    let mut app = app_with_open_file(tmp.path(), "c.py", "a\nb\n");
+    app.column_select_mode = ColumnSelectMode::ShiftAlt;
+    app.editor.cursor_row = 0;
+    app.handle_key(key(
+        KeyCode::Down,
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    ))
+    .unwrap();
+    assert_eq!(&app.editor.lines[..3], ["a", "a", "b"]);
+}
+
+/// The default `vscode` mode keeps Shift+Alt+Down copying the line, so the
+/// column keys are Ctrl+Shift+Alt only.
+#[test]
+fn the_default_mode_leaves_shift_alt_arrows_to_copy_line_and_expand() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut app = app_with_open_file(tmp.path(), "c.py", "a\nb\n");
+    assert_eq!(
+        app.column_select_mode,
+        crate::prefs::ColumnSelectMode::VsCode
+    );
+    app.editor.cursor_row = 0;
+    app.handle_key(column_chord(KeyCode::Down, KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(&app.editor.lines[..3], ["a", "a", "b"]);
+    assert!(app.editor.carets.is_empty(), "not a column move");
+}
+
 /// #1560: macOS's Cmd+Shift+Opt arrows do the same.
 #[test]
 fn cmd_shift_opt_arrows_make_the_same_box() {

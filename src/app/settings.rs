@@ -1347,6 +1347,7 @@ impl App {
         self.default_formatter = p.default_formatter.clone();
         self.language_formatters = p.language_formatters.clone();
         self.format_on_type = p.format_on_type;
+        self.column_select_mode = p.column_select_mode;
         let old_languages = std::mem::replace(&mut self.language_prefs, p.languages.clone());
         self.auto_save = p.auto_save;
         self.auto_save_on_focus_change = p.auto_save_on_focus_change;
