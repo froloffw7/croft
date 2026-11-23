@@ -1869,7 +1869,8 @@ pub struct App {
     overwrite_mode: bool,
     /// Whether the terminal's caret was last set to the overwrite block, so
     /// the style escape is sent only when the wanted shape changes.
-    caret_block_sent: bool,
+    /// The caret style last sent to the terminal: (block, blinking).
+    caret_style_sent: (bool, bool),
     editor_click: ClickTracker,
     tree_click: ClickTracker,
     terminal_click: ClickTracker,
@@ -2701,6 +2702,8 @@ pub struct App {
     /// where the status bar drew the announcement this frame (the cursor's
     /// resting place when no text has focus).
     screen_reader: bool,
+    /// `software_cursor_blink`: croft blinks the caret itself.
+    software_cursor_blink: bool,
     screen_reader_command: Option<String>,
     announcer: crate::a11y::Announcer,
     announce_pos: Option<(u16, u16)>,
@@ -4486,7 +4489,7 @@ impl App {
             git,
             cursor_blink: CursorBlink::new(),
             overwrite_mode: false,
-            caret_block_sent: false,
+            caret_style_sent: (false, false),
             editor_click: ClickTracker::default(),
             tree_click: ClickTracker::default(),
             terminal_click: ClickTracker::default(),
@@ -4738,6 +4741,7 @@ impl App {
             code_lens_enabled: true,
             function_breakpoints: Vec::new(),
             screen_reader: loaded_prefs.screen_reader,
+            software_cursor_blink: loaded_prefs.software_cursor_blink,
             screen_reader_command: loaded_prefs.screen_reader_command.clone(),
             announcer: crate::a11y::Announcer::default(),
             announce_pos: None,
@@ -6263,8 +6267,8 @@ pub fn run(
     crate::startup_trace::mark("host terminal answered");
     let mut out = stdout();
     // Alt screen + mouse + bracketed paste + SteadyBar cursor (thin vertical
-    // line, no hardware blink: the blink is done in software so it works even
-    // when the host terminal's own "Blinking cursor" preference is off). The
+    // line; the first draw's `sync_caret_style` makes it a blinking bar that
+    // the terminal blinks, unless `software_cursor_blink` is set). The
     // shared takeover block keeps this list identical to the dtach-reattach
     // re-assert; add new modes in takeover_mode_seq, not here.
     {
@@ -6929,7 +6933,7 @@ fn main_loop(app: &mut App, terminal: &mut CroftTerminal) -> Result<()> {
                             let _ = out.flush();
                             // The re-assert set the steady bar; resend the
                             // overwrite block on the next draw if wanted.
-                            app.caret_block_sent = false;
+                            app.caret_style_sent = (false, false);
                         }
                     }
                     _ => {}
