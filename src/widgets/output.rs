@@ -12,7 +12,7 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Clear, Paragraph, Widget},
+    widgets::{Block, Borders, Clear, Paragraph, Widget},
 };
 
 use crate::output::{OutputLevel, OutputLine};
@@ -555,7 +555,17 @@ impl OutputPanel {
             .map_or(self.theme.editor_bg(), |s| s.raised());
         buf.set_style(area, Style::default().bg(fill));
         if pad == 1 {
-            crate::widgets::surface::paint_overlay_frame(buf, area, self.theme);
+            if self.theme.framed_overlays() {
+                crate::widgets::surface::paint_overlay_frame(buf, area, self.theme);
+            } else {
+                // A theme without the gradient keeps the plain accent border
+                // every other popup draws (`gradient = false`).
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(crate::widgets::hover::popup_border_type())
+                    .border_style(Style::default().fg(self.theme.ui(Color::Rgb(0x4e, 0x9a, 0xff))))
+                    .render(area, buf);
+            }
         }
         if overflow {
             let track = Rect {
@@ -591,10 +601,12 @@ impl OutputPanel {
             let hovered =
                 crate::widgets::hover::row_hover_bg(r, self.hover_pointer, self.theme).is_some();
             if hovered || selected {
-                buf.set_style(
-                    r,
-                    Style::default().bg(crate::gradient::rgb_color(crate::gradient::POPUP_SEL_BG)),
-                );
+                let band = if self.theme.framed_overlays() {
+                    crate::gradient::rgb_color(crate::gradient::POPUP_SEL_BG)
+                } else {
+                    self.theme.ui(Color::Rgb(0x09, 0x67, 0xb8))
+                };
+                buf.set_style(r, Style::default().bg(band));
             }
             let fg = if selected {
                 accent
@@ -740,6 +752,30 @@ mod tests {
         // The second name: the first is the selected channel's row.
         let row = p.dropdown_items[1].0;
         assert_eq!(buf[(row.x, row.y)].bg, loch.surfaces().unwrap().raised());
+    }
+
+    /// A theme with `gradient = false` (Croft Dark Blue) draws the dropdown
+    /// with the plain accent border and selection band every other popup
+    /// uses, not the orange-to-green gradient box of the brand theme.
+    #[test]
+    fn a_theme_without_the_gradient_draws_the_dropdown_with_a_plain_border() {
+        let mut p = OutputPanel::new();
+        p.theme = Theme::DARK_BLUE;
+        p.channels = vec!["Git".into(), "ruff".into()];
+        p.dropdown_open = true;
+        let area = Rect::new(0, 0, 40, 10);
+        let mut buf = Buffer::empty(area);
+        (&mut p).render(area, &mut buf);
+        // Top-left corner and the cell after it: one flat colour, no ramp.
+        let accent = p.theme.ui(Color::Rgb(0x4e, 0x9a, 0xff));
+        assert_eq!(buf[(1, 1)].fg, accent);
+        assert_eq!(buf[(5, 1)].fg, accent);
+        assert_eq!(buf[(1, 5 - 1)].fg, accent, "bottom corner, same colour");
+        let band = p.dropdown_items[0].0;
+        assert_ne!(
+            buf[(band.x, band.y)].bg,
+            crate::gradient::rgb_color(crate::gradient::POPUP_SEL_BG)
+        );
     }
 
     /// #846: the list was sized one row per channel and the box's border was

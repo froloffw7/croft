@@ -1435,6 +1435,7 @@ impl App {
         self.editor.blame_enabled = self.inline_blame_enabled;
         self.indent_guides_enabled = !p.disable_indent_guides;
         self.home_walks_rows = p.home_walks_wrapped_rows;
+        apply_hover_prefs(p);
         self.bracket_colors_enabled = !p.disable_bracket_colors;
         self.whitespace_mode =
             crate::widgets::editor::WhitespaceMode::from_pref(&p.render_whitespace);

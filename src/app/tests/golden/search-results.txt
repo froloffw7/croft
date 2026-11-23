@@ -7,7 +7,7 @@ settled after: 1 frame
 caret: row 3 col 15
 --- symbols
 00|    ▏▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▕  main.rs ✕                                                                     |
-01|   ▏SEARCH                      ▕ src ›  main.rs                                                                    |
+01|   ▏SEARCH                      ▕ src ›  main.rs                                                                    |
 02|    ▏                              ▕▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔|
 03|▎  ▏ ▏ greet         Aa ab .*  ▕    1  //! A tiny greeter.                                                  ━ ⠭⠭⠁   |
 04|    ▏▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▕    2                                                                         ⢻⣿⡟⠃  |
@@ -52,8 +52,8 @@ r00 c112 icon U+EBF3
 r00 c115 icon U+EBF2
 r00 c118 icon U+EBEB
 r01 c002 icon U+EAF0
-r01 c031 icon U+EB37
-r01 c034 icon U+EABF
+r01 c030 icon U+EB37
+r01 c033 icon U+EABF
 r01 c043 icon U+E7A8
 r03 c002 icon U+EA6D
 r03 c005 icon U+EAB6
@@ -110,10 +110,11 @@ r01 c002-002 fg=#7d8786 bg=#0e1011
 r01 c003-003 fg=reset bg=#0e1011
 r01 c004-004 fg=#23282a bg=#0e1011
 r01 c005-010 fg=#f2f3f3 bg=#0e1011
-r01 c011-030 fg=reset bg=#0e1011
-r01 c031-031 fg=#7d8786 bg=#0e1011
-r01 c032-033 fg=reset bg=#0e1011
-r01 c034-034 fg=#7d8786 bg=#0e1011
+r01 c011-029 fg=reset bg=#0e1011
+r01 c030-030 fg=#7d8786 bg=#0e1011
+r01 c031-032 fg=reset bg=#0e1011
+r01 c033-033 fg=#7d8786 bg=#0e1011
+r01 c034-034 fg=reset bg=#0e1011
 r01 c035-035 fg=#23282a bg=#0e1011
 r01 c036-036 fg=reset bg=#000000
 r01 c037-039 fg=#7d8786 bg=#000000

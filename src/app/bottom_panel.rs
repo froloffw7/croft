@@ -1109,10 +1109,20 @@ impl App {
                     .fg(active_fg)
                     .bg(strip_bg)
                     .add_modifier(active_mods)
-            } else if crate::widgets::hover::row_hover_bg(*rect, pointer, self.theme).is_some() {
-                Style::default().fg(hover_fg).bg(strip_bg)
+            } else if tones.is_some() {
+                // Croft Loch: a hovered title lifts to body text.
+                let hot = crate::widgets::hover::row_hover_bg(*rect, pointer, self.theme).is_some();
+                Style::default()
+                    .fg(if hot { hover_fg } else { inactive_fg })
+                    .bg(strip_bg)
             } else {
-                Style::default().fg(inactive_fg).bg(strip_bg)
+                // The same highlight every heading gets (`hover_heading`).
+                crate::widgets::hover::heading_style(
+                    self.theme,
+                    Style::default().fg(inactive_fg).bg(strip_bg),
+                    crate::widgets::hover::text_hover_fg(self.theme),
+                    crate::widgets::hover::contains(*rect, pointer),
+                )
             };
             if rect.x < right {
                 buf.set_stringn(
