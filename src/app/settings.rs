@@ -1325,6 +1325,7 @@ impl App {
         self.fleet_groups = p.fleet_groups.clone();
         self.code_scanning = p.code_scanning;
         self.multiline_paste_warning = p.terminal_multiline_paste_warning;
+        self.pointer_shape_names = p.pointer_shape_names;
         let was_excluded = std::mem::replace(
             &mut self.remote_offer_excluded,
             p.remote_offer_excluded_hosts.clone(),
