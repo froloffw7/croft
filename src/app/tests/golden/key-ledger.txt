@@ -290,6 +290,7 @@ editor | s | tabs=*● main.rs text=15L#4b2ef75d caret=4:9
 editor | shift+backtab | tabs=*● main.rs text=15L#11abec9e caret=4:4
 editor | shift+cmd+\ | caret=8:0
 editor | shift+cmd+t | focus=panel
+editor | shift+delete | -
 editor | shift+down | caret=5:8 sel=4:8-5:8
 editor | shift+end | caret=4:26 sel=4:8-4:26
 editor | shift+f11 | -
@@ -562,6 +563,7 @@ selection | s | tabs=*● main.rs text=15L#00c81b13 caret=4:9 sel=-
 selection | shift+backtab | tabs=*● main.rs text=15L#11abec9e caret=4:9 sel=4:4-4:9
 selection | shift+cmd+\ | caret=8:0 sel=-
 selection | shift+cmd+t | focus=panel
+selection | shift+delete | tabs=*● main.rs text=15L#bb0bf786 caret=4:8 sel=- status="Cut 5 chars to clipboard" clip="total"
 selection | shift+down | caret=5:13 sel=4:8-5:13
 selection | shift+end | caret=4:26 sel=4:8-4:26
 selection | shift+f11 | -
@@ -833,6 +835,7 @@ explorer | s | -
 explorer | shift+backtab | -
 explorer | shift+cmd+\ | -
 explorer | shift+cmd+t | focus=panel
+explorer | shift+delete | +input("Move 'main.rs' to Trash?" "" @0)
 explorer | shift+down | -
 explorer | shift+end | tree=./+,.vscode/,docs/,main.rs > main.rs marked=.,.vscode,docs,main.rs
 explorer | shift+f11 | -
@@ -1105,6 +1108,7 @@ terminal | s | typed=0:"s"
 terminal | shift+backtab | typed=0:"\u{1b}[Z"
 terminal | shift+cmd+\ | typed=0:"\\"
 terminal | shift+cmd+t | -
+terminal | shift+delete | typed=0:"\u{1b}[3;2~"
 terminal | shift+down | typed=0:"\u{1b}[1;2B"
 terminal | shift+end | -
 terminal | shift+f11 | -
@@ -1377,6 +1381,7 @@ search | s | search="totals" @Query:6 hits=0@0
 search | shift+backtab | -
 search | shift+cmd+\ | status="Search: unhandled Cmd+\\"
 search | shift+cmd+t | focus=panel search="total" hits=4@0
+search | shift+delete | -
 search | shift+down | search="total" @Query:5 hits=4@1
 search | shift+end | -
 search | shift+f11 | -
@@ -1649,6 +1654,7 @@ scm | s | scm="Ship its"@8 +focus StagedModified:docs/notes.md Untracked:todo.tx
 scm | shift+backtab | -
 scm | shift+cmd+\ | -
 scm | shift+cmd+t | focus=panel scm="Ship it"@7 StagedModified:docs/notes.md Untracked:todo.txt
+scm | shift+delete | -
 scm | shift+down | scm="Ship it"@7 +focus +list sel=0 multi=0 StagedModified:docs/notes.md Untracked:todo.txt
 scm | shift+end | -
 scm | shift+f11 | -
@@ -1924,6 +1930,7 @@ palette | s | ~palette("s" @1 > "File: Save")
 palette | shift+backtab | -
 palette | shift+cmd+\ | -
 palette | shift+cmd+t | -
+palette | shift+delete | -
 palette | shift+down | ~palette("" @0 > "Move Line Down")
 palette | shift+end | -
 palette | shift+f11 | -
@@ -2199,6 +2206,7 @@ confirm | s | tabs=*main.rs files=27L#afbd942b +quit -unsaved
 confirm | shift+backtab | -
 confirm | shift+cmd+\ | -
 confirm | shift+cmd+t | -
+confirm | shift+delete | -
 confirm | shift+down | -
 confirm | shift+end | -
 confirm | shift+f11 | -
