@@ -948,6 +948,25 @@ fn parse_pair_provider_ollama_with_base_url() {
     assert!(Cli::try_parse_from(["croft", "pair", "--provider", "openai"]).is_err());
 }
 
+/// The default caret name follows the backend; a chosen name is kept.
+#[test]
+fn the_default_seat_name_follows_the_backend() {
+    assert_eq!(pair_seat_name(None, None, None), "claude");
+    assert_eq!(pair_seat_name(None, None, Some("ollama")), "local");
+    // A claude record switched to a local endpoint, and back.
+    assert_eq!(
+        pair_seat_name(None, Some("claude"), Some("ollama")),
+        "local"
+    );
+    assert_eq!(pair_seat_name(None, Some("local"), None), "claude");
+    // Names the user chose survive a provider switch, and --name wins.
+    assert_eq!(pair_seat_name(None, Some("ada"), Some("ollama")), "ada");
+    assert_eq!(
+        pair_seat_name(Some("claude".into()), Some("local"), Some("ollama")),
+        "claude"
+    );
+}
+
 /// `--base-url` alone implies the ollama provider, and ollama without an
 /// explicit endpoint defaults to the standard local port. Plain claude
 /// activations record neither.
