@@ -349,9 +349,6 @@ impl Cli {
                 // The caret name belongs to the seat, not to a backend, so
                 // it is inherited even across a provider switch; only an
                 // explicit --name changes it (#1907).
-                let name = name
-                    .or_else(|| current.as_ref().map(|r| r.name.clone()))
-                    .unwrap_or_else(|| "claude".into());
                 let recorded = current.as_ref().and_then(|r| r.provider.clone());
                 // An explicit provider SWITCH starts that backend fresh:
                 // inheriting the other backend's endpoint or model would
@@ -375,6 +372,11 @@ impl Cli {
                 });
                 let provider = provider.or(recorded);
                 let (provider, base_url) = resolve_pair_provider(provider, base_url)?;
+                let name = pair_seat_name(
+                    name,
+                    current.as_ref().map(|r| r.name.as_str()),
+                    provider.as_deref(),
+                );
                 if off {
                     crate::session::write_pair_record(
                         &record_path,
