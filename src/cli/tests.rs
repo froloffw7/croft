@@ -973,12 +973,16 @@ fn the_default_seat_name_follows_the_backend() {
 #[test]
 fn base_url_implies_ollama() {
     let (p, b) = resolve_pair_provider(None, Some(String::from("http://x:1234"))).unwrap();
-    assert_eq!(p.as_deref(), Some("ollama"));
+    assert_eq!(p.as_deref(), Some("local"));
     assert_eq!(b.as_deref(), Some("http://x:1234"));
 
-    let (p, b) = resolve_pair_provider(Some(String::from("ollama")), None).unwrap();
-    assert_eq!(p.as_deref(), Some("ollama"));
-    assert_eq!(b.as_deref(), Some("http://localhost:11434"));
+    // `local` and the older `ollama` are the same provider, recorded as
+    // `local`.
+    for spelling in ["local", "ollama"] {
+        let (p, b) = resolve_pair_provider(Some(String::from(spelling)), None).unwrap();
+        assert_eq!(p.as_deref(), Some("local"), "{spelling}");
+        assert_eq!(b.as_deref(), Some("http://localhost:11434"));
+    }
 
     let (p, b) = resolve_pair_provider(None, None).unwrap();
     assert_eq!(p, None);

@@ -168,7 +168,7 @@ pub(crate) struct PairRecord {
     #[serde(default)]
     pub(crate) task: Option<String>,
     /// Which backend seats the pilot: None or "claude" = the claude CLI;
-    /// "ollama" = a local Anthropic-compatible endpoint (absent on 0.1.635
+    /// "local" (older: "ollama") = a local endpoint (absent on 0.1.635
     /// records, which are all claude).
     #[serde(default)]
     pub(crate) provider: Option<String>,
