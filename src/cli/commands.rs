@@ -261,9 +261,10 @@ pub enum CliCommand {
         #[arg(requires = "repl", hide = true)]
         task: Option<String>,
         /// Backend that seats the pilot: "claude" (default, the claude CLI)
-        /// or "ollama" (a direct Anthropic-compatible local endpoint —
-        /// Ollama, LM Studio, llama.cpp, vLLM; requires --model).
-        #[arg(long, value_parser = ["claude", "ollama"])]
+        /// or "local" (a direct local endpoint, Anthropic- or OpenAI-style:
+        /// Ollama, LM Studio, llama.cpp, vLLM, FastFlowLM; requires --model;
+        /// "ollama" is the older spelling).
+        #[arg(long, value_parser = ["claude", "local", "ollama"])]
         provider: Option<String>,
         /// The local endpoint for --provider ollama (implies it); defaults
         /// to http://localhost:11434.

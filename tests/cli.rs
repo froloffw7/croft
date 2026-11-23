@@ -309,7 +309,7 @@ fn pair_off_and_reactivation_keep_the_recorded_backend() {
     run(&["pair"]);
     let r = read();
     assert!(r.contains("\"enabled\":true"), "{r}");
-    assert!(r.contains("\"provider\":\"ollama\""), "{r}");
+    assert!(r.contains("\"provider\":\"local\""), "{r}");
     assert!(r.contains("http://localhost:9999"), "{r}");
     assert!(r.contains("qwen3-coder:30b"), "{r}");
     // An explicit provider SWITCH starts fresh: the other backend's

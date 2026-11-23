@@ -162,7 +162,7 @@ src/
 │   ├── caret.rs          the navigator's caret: parking it at a row until the file is live, and this seat's site ids
 │   ├── claude_cli.rs     the claude CLI: its sandbox, finding it on a GUI PATH, its launch command, its stream-json events, and the tests' fake claude
 │   ├── fence.rs          the fence machine: the `<<<EDIT>>>` / `<<<NOTE>>>` markers, the events it resolves from streamed text, and its header parsers
-│   ├── local.rs          the navigator's local-model transport: one Anthropic-compatible `/v1/messages` streaming call per turn (Ollama, LM Studio, llama.cpp, vLLM), deliberately not the claude CLI; selected by `croft pair --provider ollama [--base-url <url>] --model <m>`
+│   ├── local.rs          the navigator's local-model transport: one Anthropic-compatible `/v1/messages` streaming call per turn (Ollama, LM Studio, llama.cpp, vLLM), deliberately not the claude CLI; selected by `croft pair --provider local [--base-url <url>] --model <m>`
 │   ├── notes.rs          the navigator's anchored notes: listing, dropping and replying to them, and landing one from the app side
 │   ├── offsets.rs        byte offsets into the replica text: a fence range or a note row as offsets, kept true through remote edits
 │   ├── proactive.rs      the proactive-look detector (pure text-in/row-out): tree-sitter judges that the driver completed a new construct since the navigator's last look; `App::tick_proactive_navigator` owns the gates and hands the seat a comment-only yield turn
@@ -990,7 +990,7 @@ The resident navigator's in-process host. The App spawns the pilot itself, the w
 
 **Teardown.** Dropping the host reverts, hangs up, and grace-kills the claude child. A local seat has no child: its turn queue closes and the worker drains out.
 
-**Backend.** It comes from the record's provider — claude by default, `ollama` meaning pair/local.rs — and the idle `◆` badge names the local model via `title()`.
+**Backend.** It comes from the record's provider — claude by default, `local` (older `ollama`) meaning pair/local.rs — and the idle `◆` badge names the local model via `title()`.
 
 ### marketplace.rs
 
@@ -1581,7 +1581,7 @@ A headless collab guest exposed as an MCP server on stdio, behind the hidden `cr
 
 ### pair/local.rs
 
-The navigator's local-model transport: one minimal Anthropic-compatible `/v1/messages` streaming call per turn, against Ollama, LM Studio, llama.cpp or vLLM. Selected with `croft pair --provider ollama [--base-url <url>] --model <m>`.
+The navigator's local-model transport: one minimal Anthropic-compatible `/v1/messages` streaming call per turn, against Ollama, LM Studio, llama.cpp or vLLM. Selected with `croft pair --provider local [--base-url <url>] --model <m>`.
 
 **Deliberately not the claude CLI.** The CLI's roughly `213 KB` tool-schema prefill `500s` local servers regardless of flags, so this transport talks to the endpoint directly instead.
 

@@ -67,12 +67,18 @@ pub enum Provider {
     Local { base_url: String },
 }
 
+/// Whether a pair record's provider names a local endpoint: `local`, or the
+/// older `ollama` spelling.
+pub fn is_local(provider: Option<&str>) -> bool {
+    matches!(provider, Some("local" | "ollama"))
+}
+
 impl Provider {
     /// Map a pair record's stringly provider to the transport it names.
     /// Absent or unrecognized = Claude (every 0.1.635 record is claude).
     pub fn from_record(provider: Option<&str>, base_url: Option<&str>) -> Self {
         match provider {
-            Some("ollama") => Provider::Local {
+            Some("local" | "ollama") => Provider::Local {
                 base_url: base_url.unwrap_or("http://localhost:11434").to_string(),
             },
             _ => Provider::Claude,

@@ -188,7 +188,7 @@ LM Studio, llama.cpp, vLLM — and your own open-weight model takes the seat: sa
 streaming, same cancel.
 
 ```sh
-croft pair --provider ollama --model qwen3-coder:30b          # Ollama on localhost:11434
+croft pair --provider local --model qwen3-coder:30b          # Ollama on localhost:11434
 croft pair --base-url http://box:8080 --model qwen3-coder:30b # any compatible server (implies ollama)
 ```
 
