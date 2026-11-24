@@ -205,6 +205,7 @@ impl App {
             return;
         };
         let content = self.editor.lines.join("\n");
+        let since = host.note_watermark();
         match host.send_reply_turn(&file, row, &note_body, &reply, &content) {
             Ok(()) => {
                 // Only after the send: a failed send keeps the draft for a
@@ -216,6 +217,7 @@ impl App {
                 self.navigator_notes
                     .insert(file.clone(), host.notes_snapshot(&file));
                 self.pair_reply_note = Some(focus.id);
+                self.pair_reply_since = since;
                 self.reveal_box = Some(focus.id);
                 // The footer says so while the answer is on its way.
                 self.reply_waiting = Some(focus.id);

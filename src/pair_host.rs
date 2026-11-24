@@ -440,6 +440,30 @@ impl PairHost {
         crate::pair::inject_note_now(&p.state, file, row, body)
     }
 
+    /// See [`crate::pair::PairState::note_watermark`].
+    pub fn note_watermark(&self) -> u64 {
+        let Some(p) = &self.pilot else {
+            return u64::MAX;
+        };
+        lock_briefly(&p.state).map_or(u64::MAX, |st| st.note_watermark())
+    }
+
+    /// Fold the notes made since `since` into thread `target`; the folded
+    /// bodies come back so the caller does not repeat them.
+    pub fn fold_notes_into(&self, target: u64, since: u64) -> Vec<String> {
+        let Some(p) = &self.pilot else {
+            return Vec::new();
+        };
+        lock_briefly(&p.state).map_or_else(Vec::new, |mut st| st.fold_notes_into(target, since))
+    }
+
+    /// An existing note with exactly this text, so a turn's prose that the
+    /// model also left through its note tool does not open a twin box.
+    pub fn note_with_body(&self, file: &str, body: &str) -> Option<u64> {
+        let p = self.pilot.as_ref()?;
+        lock_briefly(&p.state)?.note_with_body(file, body)
+    }
+
     /// Drop exactly one note (the box's Ignore button).
     pub fn remove_note(&self, id: u64) {
         // Bounded lock (see lock_briefly): an Ignore that still cannot

@@ -3708,6 +3708,12 @@ pub struct App {
     /// The comment box a reply turn answers: the navigator's prose is
     /// appended to it (one thread) rather than opening a second box.
     pair_reply_note: Option<u64>,
+    /// The note-id watermark when the reply went out: notes the model makes
+    /// after it belong to the thread answered.
+    pair_reply_since: u64,
+    /// The question just asked of the navigator, so its answer's box opens
+    /// with it.
+    pair_ask_text: Option<String>,
     /// Where the answer of a Save Context turn is written (CONTEXT.md in the
     /// workspace); its prose is captured instead of anchored as a comment.
     pair_save_context: Option<std::path::PathBuf>,
@@ -5036,6 +5042,8 @@ impl App {
             pair_commentary_buf: String::new(),
             pair_turn_origin: None,
             pair_reply_note: None,
+            pair_reply_since: u64::MAX,
+            pair_ask_text: None,
             pair_save_context: None,
             reveal_box: None,
             reply_waiting: None,

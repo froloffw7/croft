@@ -40,6 +40,42 @@ impl PairState {
         }
     }
 
+    /// The id the next note will get: notes with an id at or above a value
+    /// read earlier were created after it.
+    pub(crate) fn note_watermark(&self) -> u64 {
+        self.next_note_id
+    }
+
+    /// Fold every note created since `since` (other than `target`) into
+    /// `target`: a model that answers a reply through its note tool would
+    /// otherwise open a second box beside the thread it was asked in. Returns
+    /// the folded bodies, in order.
+    pub(crate) fn fold_notes_into(&mut self, target: u64, since: u64) -> Vec<String> {
+        let mut folded = Vec::new();
+        self.notes.retain(|n| {
+            if n.id >= since && n.id != target {
+                folded.push(n.body.clone());
+                false
+            } else {
+                true
+            }
+        });
+        if let Some(n) = self.notes.iter_mut().find(|n| n.id == target) {
+            for body in &folded {
+                n.body.push('\n');
+                n.body.push_str(body);
+            }
+        }
+        folded
+    }
+
+    /// An existing note on `file` whose text is exactly `body`.
+    pub(crate) fn note_with_body(&self, file: &str, body: &str) -> Option<u64> {
+        self.notes_in(file)
+            .find(|n| n.body.trim() == body.trim())
+            .map(|n| n.id)
+    }
+
     /// The next note id (monotonic within the seat).
     pub(super) fn take_note_id(&mut self) -> u64 {
         let id = self.next_note_id;
