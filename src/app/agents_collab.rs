@@ -986,6 +986,7 @@ impl App {
                     let prose = std::mem::take(&mut self.pair_commentary_buf);
                     let origin = self.pair_turn_origin.take();
                     let reply_note = self.pair_reply_note.take();
+                    let ask_text = self.pair_ask_text.take();
                     if let Some(path) = self.pair_save_context.take() {
                         if cancelled || failed.is_some() || prose.trim().is_empty() {
                             self.status =
@@ -1035,13 +1036,30 @@ impl App {
                         });
                         // A reply's answer continues the thread it answers.
                         let landed_id = if let (Some(id), Some(h)) = (reply_note, &self.pair_host) {
-                            h.append_to_note(id, prose.trim());
+                            // A model that answered through its note tool
+                            // made boxes of its own: they join the thread.
+                            let folded = h.fold_notes_into(id, self.pair_reply_since);
+                            if !folded.iter().any(|b| b.trim() == prose.trim()) {
+                                h.append_to_note(id, prose.trim());
+                            }
                             Some(id)
                         } else {
                             anchor.as_ref().and_then(|(f, row)| {
-                                self.pair_host
-                                    .as_ref()
-                                    .and_then(|h| h.add_note_now(f, *row, prose.trim()))
+                                self.pair_host.as_ref().and_then(|h| {
+                                    // The same words already left through the
+                                    // note tool: one box, not two.
+                                    h.note_with_body(f, prose.trim()).or_else(|| {
+                                        // An ask's box opens with the question,
+                                        // so the box says what it answers.
+                                        let body = match ask_text.as_deref() {
+                                            Some(q) if !q.is_empty() => {
+                                                format!("you: {q}\n{}", prose.trim())
+                                            }
+                                            _ => prose.trim().to_string(),
+                                        };
+                                        h.add_note_now(f, *row, &body)
+                                    })
+                                })
                             })
                         };
                         // Scroll the answer into view: it lands below the

@@ -823,6 +823,7 @@ impl App {
                         self.status = format!("Asked {name} about {file}:{}", range.0 + 1);
                         // Anchor the turn's prose commentary where it was asked.
                         self.pair_turn_origin = Some((file, range.0));
+                        self.pair_ask_text = Some(value.trim().to_string());
                     }
                     Err(e) => self.status = format!("Ask Navigator failed: {e}"),
                 }

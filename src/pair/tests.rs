@@ -2342,6 +2342,40 @@ fn host_adds_appends_and_removes_notes_by_id() {
     drop(host);
 }
 
+/// An answer the model left through its note tool joins the thread it was
+/// asked in, and a prose twin of a tool note opens no second box.
+#[test]
+fn reply_notes_fold_into_their_thread_and_twins_are_found() {
+    if !is_on_path("python3") {
+        eprintln!("SKIPPED: python3 not on PATH");
+        return;
+    }
+    let harness = OwnerHarness::start("hello world\nsecond line");
+    let script = harness._dir.path().join("fake_claude.py");
+    std::fs::write(&script, FAKE_CLAUDE).unwrap();
+    let log = harness._dir.path().join("stdin.log");
+    let mut cmd = Command::new("python3");
+    cmd.arg(&script).arg(&log).arg("notes");
+    let host = crate::pair_host::PairHost::spawn_cmd(&harness.socket, "nav", None, cmd).unwrap();
+
+    let thread = host.add_note("demo.txt", 0, "question").unwrap();
+    assert_eq!(host.note_with_body("demo.txt", " question\n"), Some(thread));
+    assert_eq!(host.note_with_body("demo.txt", "other"), None);
+
+    let since = host.note_watermark();
+    let answer = host.add_note("demo.txt", 0, "the answer").unwrap();
+    assert!(answer >= since);
+    let folded = host.fold_notes_into(thread, since);
+    assert_eq!(folded, vec!["the answer".to_string()]);
+    let expected = vec![(thread, 0, "question\nthe answer".to_string())];
+    assert_eq!(
+        settle(&expected, || host.notes_snapshot("demo.txt")),
+        expected,
+        "one box, with the answer inside"
+    );
+    drop(host);
+}
+
 /// Boxes persist until the driver ignores them: a new turn on the same
 /// file must NOT wipe its existing notes (the old supersession rule is
 /// gone — under the box model it would close every open conversation on
