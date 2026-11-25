@@ -464,7 +464,24 @@ impl PairHost {
         lock_briefly(&p.state)?.note_with_body(file, body)
     }
 
-    /// Drop exactly one note (the box's Ignore button).
+    /// Ask the model to forget the exchange behind a comment box. Only the
+    /// local provider owns its conversation; the Claude CLI keeps its own.
+    pub fn forget_exchange(&self, note_body: &str) -> Result<()> {
+        let p = self.pilot.as_ref().context("navigator pilot is gone")?;
+        match &p.sink {
+            crate::pair::TurnSink::Local(tx) => {
+                anyhow::ensure!(
+                    tx.send(format!("{}{note_body}", crate::pair::FORGET_PREFIX))
+                        .is_ok(),
+                    "the local turn worker is gone"
+                );
+                Ok(())
+            }
+            _ => anyhow::bail!("only a local model's conversation can be edited"),
+        }
+    }
+
+    /// Drop exactly one note (the box's Hide button).
     pub fn remove_note(&self, id: u64) {
         // Bounded lock (see lock_briefly): an Ignore that still cannot
         // get the mutex is skipped; the box stays and the next press works.

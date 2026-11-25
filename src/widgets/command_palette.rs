@@ -1610,7 +1610,7 @@ impl Command {
             Command::SaveNavigatorContext => "Navigator: Save Context to CONTEXT.md",
             Command::ToggleProactiveNavigator => "Navigator: Toggle Proactive Comments",
             Command::NextComment => "Navigator: Next Comment",
-            Command::IgnoreComment => "Navigator: Ignore Comment",
+            Command::IgnoreComment => "Navigator: Hide Comment",
         }
     }
 

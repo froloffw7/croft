@@ -8,8 +8,10 @@ use super::*;
 /// legible on every dark background.
 pub(crate) const NAVIGATOR_ACCENT: Color = Color::Rgb(0xff, 0x9d, 0x2f);
 
-/// Columns of the comment-box footer tail ` ✕ Ignore ╯`.
-pub(super) const IGNORE_TAIL_COLS: usize = 11;
+/// Columns of the comment-box footer tail ` ⌫ Forget  ✕ Hide ╯`.
+pub(super) const IGNORE_TAIL_COLS: usize = 19;
+/// Columns of the ` ✕ Hide ╯` part of that tail (the rest is Forget).
+const HIDE_TAIL_COLS: usize = 9;
 
 /// One comment box: the AI pair programmer's voice, anchored below a buffer
 /// line. Rendered as an unnumbered block (title, body, reply field + Ignore
@@ -35,8 +37,11 @@ pub enum CommentHit {
     Body,
     /// The footer's reply field: focus and place the caret.
     Reply,
-    /// The footer's ✕ Ignore button: dismiss the box.
+    /// The footer's ✕ Hide button: dismiss the box.
     Ignore,
+    /// The footer's ⌫ Forget button: drop the box's exchange from the
+    /// model's context.
+    Forget,
 }
 
 /// The reply draft in the focused box's footer field. While set, typing goes
@@ -218,7 +223,7 @@ impl Editor {
 
     /// Paint one row of a comment box: blank unnumbered gutter, then the
     /// block chrome. Rows: 0 = title (author), middle = body, last = footer
-    /// (reply field left, ✕ Ignore right).
+    /// (reply field left, ⌫ Forget and ✕ Hide right).
     #[allow(clippy::too_many_arguments)]
     pub(super) fn paint_comment_box_row(
         &self,
@@ -287,7 +292,7 @@ impl Editor {
             spans.push(Span::styled(" \u{2502}", accent));
             Line::from(spans)
         } else {
-            // Footer: `╰ ❯ <reply>            ✕ Ignore ╯`
+            // Footer: `╰ ❯ <reply>      ⌫ Forget  ✕ Hide ╯`
             let focus = self.comment_focus.as_ref().filter(|f| f.id == b.id);
             let field_w = w.saturating_sub(4 + IGNORE_TAIL_COLS);
             // Window the draft around the caret: a reply longer than the
@@ -327,10 +332,14 @@ impl Editor {
             // Ignore is destructive (it closes the thread): red, so it reads
             // as the odd one out beside the accent-coloured chrome.
             spans.push(Span::styled(
-                " \u{2715} Ignore ",
+                " \u{232b} Forget ",
                 Style::default()
                     .fg(Color::Red)
                     .bg(self.theme.sticky_scroll_bg()),
+            ));
+            spans.push(Span::styled(
+                " \u{2715} Hide ",
+                dim,
             ));
             spans.push(Span::styled("\u{256f}", accent));
             Line::from(spans)
@@ -367,8 +376,11 @@ impl Editor {
         if box_row + 1 == self.comment_box_height(box_idx, w) {
             // Footer: the ` ✕ Ignore ╯` tail owns its cells.
             let rel = (col.saturating_sub(text_x)) as usize;
-            if rel + IGNORE_TAIL_COLS >= w && rel < w {
+            if rel + HIDE_TAIL_COLS >= w && rel < w {
                 return Some((b.id, CommentHit::Ignore));
+            }
+            if rel + IGNORE_TAIL_COLS >= w && rel < w {
+                return Some((b.id, CommentHit::Forget));
             }
             return Some((b.id, CommentHit::Reply));
         }

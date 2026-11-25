@@ -190,10 +190,12 @@ it leaves, and riding its edits as they stream. Inside the editor:
 - **Yield it the turn** with `Cmd+K Y`: it reviews the active file *comment-only* — everything
   it says appears as **comment boxes** in the file, unnumbered blocks between the lines they
   belong to (never part of the buffer, never saved). Each box carries a reply field and an
-  **Ignore** button: type back and press `Enter` to continue the conversation in place, or
-  dismiss it and keep working. A reply is your turn: ask for the change a box proposes
+  **Hide** button: type back and press `Enter` to continue the conversation in place, or
+  hide it and keep working (the model still remembers the exchange). **Forget** also drops the
+  box's exchange from a local model's conversation, so a long-running chat stays within its
+  context; it needs a local provider, since the Claude CLI keeps its own history. A reply is your turn: ask for the change a box proposes
   ("correct this") and the edit streams in, exactly as for `Cmd+K Q`. `F4` hops to the next
-  box, `Shift+F4` ignores one. Any edit it attempts on a yielded turn is discarded by the
+  box, `Shift+F4` hides one. Any edit it attempts on a yielded turn is discarded by the
   host, not just discouraged.
 - **Cancel a stream mid-run**: click the orange `■` stop button in the gutter or press
   `Cmd+K X` — the streamed text is reverted and the conversation stays alive for your next
