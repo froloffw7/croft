@@ -3413,13 +3413,14 @@ impl App {
                         self.collab_cancel_stream();
                         return;
                     }
-                    // Comment-box surfaces: ✕ Ignore dismisses the box; the
+                    // Comment-box surfaces: ✕ Hide dismisses the box, ⌫ Forget also drops its exchange from the model's context; the
                     // footer's reply field (or the body) focuses it, placing
                     // the caret where the click landed in the field.
                     if let Some((id, hit)) = self.editor.comment_box_hit(m.column, m.row) {
                         use crate::widgets::editor::CommentHit;
                         match hit {
                             CommentHit::Ignore => self.ignore_comment_box(id),
+                            CommentHit::Forget => self.forget_comment_box(id),
                             CommentHit::Reply | CommentHit::Body => {
                                 let keep = self.editor.comment_focus.take().filter(|f| f.id == id);
                                 let mut focus = match keep {

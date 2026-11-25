@@ -3094,6 +3094,32 @@ fn local_and_ollama_both_name_a_local_endpoint() {
     assert!(!crate::pair::is_local(None));
 }
 
+/// A box's Forget drops each answer found in its text with the turn that
+/// prompted it, and leaves the rest of the conversation alone.
+#[test]
+fn forgetting_a_box_removes_its_answers_and_their_prompts() {
+    use super::history::forget_exchange;
+    use serde_json::json;
+    let mut msgs = vec![
+        json!({ "role": "user", "content": "ask about foo" }),
+        json!({ "role": "assistant", "content": "foo does X" }),
+        json!({ "role": "user", "content": "ask about bar" }),
+        json!({ "role": "assistant", "content": "bar does Y" }),
+        json!({ "role": "user", "content": "reply on foo" }),
+        json!({ "role": "assistant", "content": "More on foo." }),
+    ];
+    let gone = forget_exchange(&mut msgs, "you: ask about foo\nfoo does X\nyou: reply on foo\nMore on foo.");
+    assert_eq!(gone, 4);
+    assert_eq!(
+        msgs,
+        vec![
+            json!({ "role": "user", "content": "ask about bar" }),
+            json!({ "role": "assistant", "content": "bar does Y" }),
+        ]
+    );
+    assert_eq!(forget_exchange(&mut msgs, "something else"), 0);
+}
+
 /// History: trimming keeps the tail starting on a user message; saved local
 /// messages round-trip; the claude flags are `--session-id` first and
 /// `--resume` once the CLI has the transcript.

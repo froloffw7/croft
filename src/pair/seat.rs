@@ -288,6 +288,22 @@ pub(crate) fn seat_local(
                 context::fit(&system, &mut messages, limit);
             }
             while let Ok(body) = turns_rx.recv() {
+                if let Some(note) = body.strip_prefix(history::FORGET_PREFIX) {
+                    let gone = history::forget_exchange(&mut messages, note);
+                    if let Some(h) = &history {
+                        history::save_local(h, &messages);
+                    }
+                    diag(
+                        &state,
+                        crate::output::OutputLevel::Info,
+                        &if gone == 0 {
+                            String::from("[pair] forget: nothing in the conversation matches that box")
+                        } else {
+                            format!("[pair] forgot {gone} message(s) from the conversation")
+                        },
+                    );
+                    continue;
+                }
                 messages.push(json!({ "role": "user", "content": body }));
                 if let Some(limit) = context {
                     match context::fit(&system, &mut messages, limit) {

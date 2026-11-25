@@ -123,7 +123,7 @@ Per platform:
 | `Cmd+K` `Y` | Navigator: yield the turn: it reviews the active file with comments only (orange `◆` in the gutter, and the Navigator OUTPUT channel) |
 | PROBLEMS row right-click → **Fix with Navigator** (also the last row of the `Cmd+.` Quick Fix picker when the caret sits on a diagnostic, and the palette's **Problems: Fix With Navigator**) | Navigator: fix that diagnostic; its edit streams into the buffer. `Cmd+K X` cancels and reverts it |
 | `F4` | Focus the active file's next navigator comment box (wraps) |
-| `Shift+F4` | Ignore the focused navigator comment box (or the next one from the caret) |
+| `Shift+F4` | Hide the focused navigator comment box (or the next one from the caret) |
 | (box focused) type / `Backspace` / `←` `→` | Edit the box's reply draft |
 | (box focused) `Enter` | Send the reply to the navigator |
 | (box focused) `Esc` | Leave the box and return to the buffer |

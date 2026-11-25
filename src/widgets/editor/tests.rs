@@ -4936,7 +4936,8 @@ fn comment_box_renders_unnumbered_rows_between_lines() {
     // Box: title (author), body, footer (reply + Ignore) at y=2..=4.
     assert!(row_text(2).contains("navigator"), "title names the author");
     assert!(row_text(3).contains("tighten this"), "body renders");
-    assert!(row_text(4).contains("Ignore"), "footer has the button");
+    assert!(row_text(4).contains("Hide"), "footer has the button");
+    assert!(row_text(4).contains("Forget"), "footer has the forget button");
     let gutter = e.last_gutter_width;
     for y in 2..=4u16 {
         let g: String = (0..gutter)
@@ -5013,10 +5014,17 @@ fn comment_box_hit_finds_reply_ignore_and_body() {
     // Find the ✕ on the footer row rather than hard-coding geometry.
     let ignore_x = (0..area.width)
         .find(|&x| buf[(x, 4)].symbol() == "\u{2715}")
-        .expect("the footer renders the ✕ Ignore button");
+        .expect("the footer renders the ✕ Hide button");
     assert_eq!(
         e.comment_box_hit(ignore_x, 4),
         Some((7, CommentHit::Ignore))
+    );
+    let forget_x = (0..area.width)
+        .find(|&x| buf[(x, 4)].symbol() == "\u{232b}")
+        .expect("the footer renders the ⌫ Forget button");
+    assert_eq!(
+        e.comment_box_hit(forget_x, 4),
+        Some((7, CommentHit::Forget))
     );
     let text_x = e.last_inner.x + e.last_gutter_width + 1;
     assert_eq!(
@@ -5145,7 +5153,7 @@ fn nonwrap_scrolling_reaches_a_tall_comment_boxes_footer() {
     let mut buf = ratatui::buffer::Buffer::empty(area);
     (&mut e as &mut Editor).render(area, &mut buf);
     assert!(
-        screen(&buf).contains("Ignore"),
+        screen(&buf).contains("Hide"),
         "scrolling must reach the box footer; got:\n{}",
         screen(&buf)
     );
@@ -22638,7 +22646,7 @@ fn wheeling_up_reaches_a_tall_comment_box_above_the_caret() {
 
 /// Ignore is red, and the `you:` label of an echoed reply gets its own colour.
 #[test]
-fn comment_box_colours_ignore_and_you_label() {
+fn comment_box_colours_forget_hide_and_you_label() {
     use ratatui::style::Color;
     let mut e = editor_with("first\nsecond");
     e.comment_boxes = vec![CommentBox {
@@ -22661,8 +22669,11 @@ fn comment_box_colours_ignore_and_you_label() {
     // Rows: 2 title, 3 "answer", 4 "you: thanks", 5 footer.
     let x = find('y', 4).expect("you: label");
     assert_eq!(buf[(x, 4)].style().fg, Some(Color::Cyan));
-    let x = find('I', 5).expect("Ignore");
+    // Forget drops context for good: red. Hide only closes the box: dim.
+    let x = find('F', 5).expect("Forget");
     assert_eq!(buf[(x, 5)].style().fg, Some(Color::Red));
+    let x = find('H', 5).expect("Hide");
+    assert_eq!(buf[(x, 5)].style().fg, Some(Color::DarkGray));
 }
 
 /// An answer that lands below the viewport is scrolled into view without

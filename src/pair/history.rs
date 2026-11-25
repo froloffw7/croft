@@ -72,6 +72,37 @@ pub(crate) fn trim(mut msgs: Vec<Value>) -> Vec<Value> {
     msgs
 }
 
+/// Marks a message on the turn queue as "forget this exchange" instead of a
+/// user turn (the NULs cannot start a real prompt).
+pub(crate) const FORGET_PREFIX: &str = "\u{0}forget\u{0}";
+
+/// Drop from the conversation every answer whose text sits in `note_body`
+/// (a comment box's running text), with the user turn that prompted it.
+/// Returns how many messages went. Replies appended to the box (`you: ..`)
+/// are covered through their answers: each answer takes its own prompt along.
+pub(crate) fn forget_exchange(msgs: &mut Vec<Value>, note_body: &str) -> usize {
+    let before = msgs.len();
+    let mut i = 0;
+    while i < msgs.len() {
+        let is_answer = msgs[i].get("role").and_then(Value::as_str) == Some("assistant")
+            && msgs[i]
+                .get("content")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .is_some_and(|t| !t.is_empty() && note_body.contains(t));
+        if is_answer {
+            msgs.remove(i);
+            if i > 0 && msgs[i - 1].get("role").and_then(Value::as_str) == Some("user") {
+                msgs.remove(i - 1);
+                i -= 1;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    before - msgs.len()
+}
+
 pub(crate) fn load_local(path: &Path) -> Vec<Value> {
     match mode() {
         Mode::Off => return Vec::new(),

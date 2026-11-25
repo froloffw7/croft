@@ -683,6 +683,29 @@ impl App {
     /// Dismiss one comment box: drop the note from the pilot's state and
     /// from the local snapshot (the next poll would resurrect it otherwise
     /// only if the pilot still had it).
+    /// The box's ⌫ Forget: drop the exchange behind it from the model's
+    /// conversation, then hide the box. Only a navigator note on a local
+    /// model qualifies (a Claude CLI session keeps its own history).
+    pub(super) fn forget_comment_box(&mut self, id: u64) {
+        let body = self.navigator_notes.values().find_map(|notes| {
+            notes
+                .iter()
+                .find(|(nid, ..)| *nid == id)
+                .map(|(_, _, b)| b.clone())
+        });
+        let (Some(body), Some(host)) = (body, &self.pair_host) else {
+            self.status = String::from("Forget applies to the navigator's comment boxes");
+            return;
+        };
+        match host.forget_exchange(&body) {
+            Ok(()) => {
+                self.ignore_comment_box(id);
+                self.status = String::from("Forgot that exchange (the box is hidden too)");
+            }
+            Err(e) => self.status = format!("Cannot forget: {e}"),
+        }
+    }
+
     pub(super) fn ignore_comment_box(&mut self, id: u64) {
         // A note's ✕ resolves it (and a resolved note's reopens it): notes
         // are shared, so dismissing one is a decision for everyone.
@@ -697,7 +720,7 @@ impl App {
             notes.retain(|(nid, ..)| *nid != id);
         }
         // Review boxes share this footer and this hit-test, so without
-        // retaining here the button would report "Comment ignored" and the
+        // retaining here the button would report "Comment hidden" and the
         // box would return on the very next frame (#366).
         //
         // Matching on the id alone is safe because the two sources cannot
@@ -722,7 +745,7 @@ impl App {
         {
             self.editor.comment_focus = None;
         }
-        self.status = String::from("Comment ignored");
+        self.status = String::from("Comment hidden");
     }
 
     /// Shift+F4 / palette: ignore the focused box, or the next one from the
