@@ -405,7 +405,32 @@ impl App {
         {
             self.nav.record(left);
         }
+        #[cfg(test)]
+        self.assert_one_view_per_tab();
         result
+    }
+
+    /// Fail when any tab, in any group, has more than one view slot filled
+    /// ([`Editor::views_filled`]). Test builds run it after every key, click
+    /// and paste, so every test that drives the app through them checks it,
+    /// not only the tests written about viewers.
+    #[cfg(test)]
+    pub(super) fn assert_one_view_per_tab(&self) {
+        for group in self.editor_layout.all_groups(&self.editor) {
+            for tab in &group.editors {
+                let views = tab.views_filled();
+                assert!(
+                    views.len() <= 1,
+                    "{} shows {} views at once: {}",
+                    tab.path.as_deref().map_or_else(
+                        || String::from("an untitled tab"),
+                        |p| p.display().to_string()
+                    ),
+                    views.len(),
+                    views.join(", ")
+                );
+            }
+        }
     }
 
     /// Which editor group has focus, as the split's leaf count and the
@@ -505,7 +530,7 @@ impl App {
     /// it, like the rest of its view state.
     pub(super) fn goto_last_edit_location(&mut self) {
         let mut best: Option<(std::time::Instant, NavLoc)> = None;
-        let groups = std::iter::once(&self.editor).chain(self.editor_layout.inactive_groups());
+        let groups = self.editor_layout.all_groups(&self.editor);
         for group in groups {
             for ed in &group.editors {
                 let (Some(at), Some((row, col)), Some(path)) =
@@ -786,15 +811,11 @@ impl App {
         let Some(dfs) = target else {
             return false;
         };
-        // Same depth-first order as inactive_groups_mut, minus the active
-        // leaf — see collect_inactive_mut.
+        // inactive_groups_mut walks the leaves in depth-first order, minus
+        // the active one.
         let active = self.editor_layout.active_dfs_index();
         let inactive_idx = if dfs > active { dfs - 1 } else { dfs };
-        if let Some(group) = self
-            .editor_layout
-            .inactive_groups_mut()
-            .get_mut(inactive_idx)
-        {
+        if let Some(group) = self.editor_layout.inactive_groups_mut().nth(inactive_idx) {
             // A PDF page step is a synchronous rasterise, so a background
             // split's PDF coalesces a wheel burst exactly like the focused one
             // (see wheel_pdf_page), stamped after the render.
@@ -1000,7 +1021,7 @@ impl App {
     /// Every path some symbol tab shows, once each.
     pub(super) fn symbol_view_paths(&self) -> Vec<PathBuf> {
         let mut paths: Vec<PathBuf> = Vec::new();
-        for group in std::iter::once(&self.editor).chain(self.editor_layout.inactive_groups()) {
+        for group in self.editor_layout.all_groups(&self.editor) {
             for ed in &group.editors {
                 if ed.symbol_view.is_some()
                     && let Some(p) = ed.path.as_ref()
@@ -1034,7 +1055,6 @@ impl App {
             .chain(
                 self.editor_layout
                     .inactive_groups_mut()
-                    .into_iter()
                     .flat_map(|g| g.editors.iter_mut().map(|ed| (false, ed))),
             )
             .filter(|(_, ed)| ed.path.as_deref() == Some(path) && !ed.has_non_text_view())
@@ -1175,8 +1195,8 @@ impl App {
         };
         let any_gone = !gone_here.is_empty() || gone_inactive.iter().any(|g| !g.is_empty());
         let whole_file_tabs: Vec<PathBuf> = if any_gone {
-            std::iter::once(&self.editor)
-                .chain(self.editor_layout.inactive_groups())
+            self.editor_layout
+                .all_groups(&self.editor)
                 .flat_map(|g| g.editors.iter())
                 .filter(|e| e.symbol_view.is_none() && !e.has_non_text_view())
                 .filter_map(|e| e.path.clone())
@@ -1189,12 +1209,7 @@ impl App {
             .into_iter()
             .filter(|&i| !keep(&mut self.editor.editors[i], &whole_file_open))
             .collect();
-        for (g, group) in self
-            .editor_layout
-            .inactive_groups_mut()
-            .into_iter()
-            .enumerate()
-        {
+        for (g, group) in self.editor_layout.inactive_groups_mut().enumerate() {
             gone_inactive[g].retain(|&i| !keep(&mut group.editors[i], &whole_file_open));
         }
         notes.extend(kept_notes);
@@ -1206,16 +1221,10 @@ impl App {
         let pre_blank: Vec<bool> = self
             .editor_layout
             .inactive_groups()
-            .iter()
             .map(|g| g.is_blank_initial())
             .collect();
         let mut doomed = Vec::new();
-        for (g, group) in self
-            .editor_layout
-            .inactive_groups_mut()
-            .into_iter()
-            .enumerate()
-        {
+        for (g, group) in self.editor_layout.inactive_groups_mut().enumerate() {
             for &i in gone_inactive[g].iter().rev() {
                 group.close_tab(i);
             }
@@ -1349,8 +1358,8 @@ impl App {
     /// which a tab's copy of a file's marks counts.
     pub(super) fn editors_in_bookmark_order(&self) -> impl Iterator<Item = &Editor> + '_ {
         std::iter::once(&*self.editor).chain(
-            std::iter::once(&self.editor)
-                .chain(self.editor_layout.inactive_groups())
+            self.editor_layout
+                .all_groups(&self.editor)
                 .flat_map(|g| g.editors.iter()),
         )
     }
@@ -1398,10 +1407,11 @@ impl App {
     /// to the tabs that show it again. Run every tick, before anything
     /// reads the marks. Returns whether a tab took marks back.
     pub(crate) fn settle_bookmarks(&mut self) -> bool {
-        let mut released = self.editor.take_released_bookmarks();
-        for group in self.editor_layout.inactive_groups_mut() {
-            released.extend(group.take_released_bookmarks());
-        }
+        let released: Vec<_> = self
+            .editor_layout
+            .all_groups_mut(&mut self.editor)
+            .flat_map(|g| g.take_released_bookmarks())
+            .collect();
         for marks in released {
             for (path, set) in marks {
                 if !self
@@ -1416,8 +1426,7 @@ impl App {
             return false;
         }
         let mut taken = Vec::new();
-        let groups =
-            std::iter::once(&mut self.editor).chain(self.editor_layout.inactive_groups_mut());
+        let groups = self.editor_layout.all_groups_mut(&mut self.editor);
         for group in groups {
             // A diff, image or sheet tab's rows are not the file's lines.
             for ed in group.editors.iter_mut().filter(|e| !e.has_non_text_view()) {
@@ -1447,13 +1456,12 @@ impl App {
         }
         self.closed_bookmarks
             .retain(|path, _| !marks.contains_key(path));
-        for ed in self.editor.editors.iter_mut() {
+        for ed in self
+            .editor_layout
+            .all_groups_mut(&mut self.editor)
+            .flat_map(|g| g.editors.iter_mut())
+        {
             ed.restore_bookmarks(marks);
-        }
-        for group in self.editor_layout.inactive_groups_mut() {
-            for ed in group.editors.iter_mut() {
-                ed.restore_bookmarks(marks);
-            }
         }
     }
 
@@ -1527,7 +1535,6 @@ impl App {
         let in_splits = self
             .editor_layout
             .inactive_groups_mut()
-            .into_iter()
             .flat_map(|g| g.editors.iter_mut());
         for ed in before.iter_mut().chain(after.iter_mut()).chain(in_splits) {
             if ed.path.as_deref() == Some(path) {
@@ -1748,16 +1755,10 @@ impl App {
         let pre_blank: Vec<bool> = self
             .editor_layout
             .inactive_groups()
-            .iter()
             .map(|g| g.is_blank_initial())
             .collect();
         let mut doomed = Vec::new();
-        for (i, group) in self
-            .editor_layout
-            .inactive_groups_mut()
-            .into_iter()
-            .enumerate()
-        {
+        for (i, group) in self.editor_layout.inactive_groups_mut().enumerate() {
             let mut closed_here = false;
             while let Some(idx) = group.find_any_tab_with_path(path) {
                 group.close_tab(idx);
@@ -1779,12 +1780,7 @@ impl App {
     pub(super) fn close_clean_tabs_under_everywhere(&mut self, dir: &Path) {
         self.editor.close_clean_tabs_under(dir);
         let mut doomed = Vec::new();
-        for (i, group) in self
-            .editor_layout
-            .inactive_groups_mut()
-            .into_iter()
-            .enumerate()
-        {
+        for (i, group) in self.editor_layout.inactive_groups_mut().enumerate() {
             let touched = group
                 .editors
                 .iter()
@@ -1898,7 +1894,7 @@ impl App {
     /// away then. The closed tabs are recorded for Reopen Closed Editor, the
     /// focused group's last so they are the first to come back.
     pub(super) fn close_all_tabs(&mut self) {
-        let groups = self.editor_layout.inactive_groups().into_iter();
+        let groups = self.editor_layout.inactive_groups();
         let (records, unsaved) =
             bulk_close_records(groups.flat_map(|g| &g.editors).chain(&self.editor.editors));
         self.push_closed_tabs(records);
@@ -1906,12 +1902,7 @@ impl App {
         if self.editor_layout.is_split() {
             let mut emptied = Vec::new();
             let mut any_kept = !self.editor.is_blank_initial();
-            for (g, group) in self
-                .editor_layout
-                .inactive_groups_mut()
-                .into_iter()
-                .enumerate()
-            {
+            for (g, group) in self.editor_layout.inactive_groups_mut().enumerate() {
                 removed += group.close_all();
                 if group.is_blank_initial() {
                     emptied.push(g);
