@@ -25,6 +25,7 @@ Per platform:
 | `Ctrl+q` | Quit (not from a focused terminal, where the key goes to its app). Unsaved changes prompt: `S` / `Enter` save all, `D` discard, `Esc` / `N` cancel |
 | `F1` | Open the shortcuts modal; `/` or `Ctrl+F` inside it filters the list |
 | `F6` | Cycle focus across panes (tree → editor → terminal → tree) |
+| `Shift+F10` / the `Menu` key | Show Context Menu (`View: Show Context Menu`): open the right-click menu of what has the keys, just below it, as in VS Code. The text at the caret in the editor, the selected Explorer row, the picked COMMITS row, the active terminal pane, the selected capture, or the first problem shown. The menu then takes its own keys: arrows, `Enter`, `Esc`. The `Menu` key reaches croft only in a terminal that reports it on the kitty keyboard protocol; `Shift+F10` works everywhere. Command id: `show_context_menu` |
 | `Shift+F8` | Screencast Mode (`Developer: Toggle Screencast Mode`): show each key, the command it ran, and clicks. Password and shell input are never shown |
 | `Ctrl+b` / `Cmd+b` | Toggle the primary side bar (left pane) |
 | `Opt+Ctrl+b` / `Opt+Cmd+b` | Toggle the secondary side bar (the active file's Outline) |
@@ -115,6 +116,8 @@ Per platform:
 | `Cmd+K` `Cmd+T` | Open the Color Theme picker |
 | `Cmd+K` `G` | Remote: accept the status bar's offer to open a workspace on the host a pane has `ssh`'d into; `Esc` dismisses it. Settings: `disable_remote_offer`, `remote_offer_excluded_hosts` |
 | `Cmd+K` `Shift+L` | Agent: New Worktree Lane: creates a worktree on `agent/<slug>`, adds it as a workspace folder and opens a pane there, running the `lane_agent` setting's agent. Close: "Agent: Close Worktree Lane" |
+| `Cmd+K` `Shift+C` | Git: Show Commit Actions: the Commit button's `▾` menu, driven by the keyboard. In the terminal `Cmd+K` `Shift+C` keeps copying the last command's output |
+| `Cmd+K` `Shift+A` | Git: Show Source Control Actions: Source Control's `⋯` menu, driven by the keyboard (see [Source Control sidebar](#source-control-sidebar)) |
 | `Cmd+K` `A` | Session: Participants: who is attached to this persistent session. `Enter` on a row grants/revokes write control or disconnects them |
 | `Cmd+K` `Shift+Q` | Session: Detach: leave a persistent session (`croft attach`, `croft remote`) while it keeps running |
 | `Cmd+K` `X` | Collab: Cancel AI Stream: stop a `croft pair` collaborator's stream into a shared file and revert its text (same as the gutter's orange `■`) |
@@ -128,6 +131,10 @@ Per platform:
 | (box focused) `Enter` | Send the reply to the navigator |
 | (box focused) `Esc` | Leave the box and return to the buffer |
 | `Cmd+K` `→` | Close the tabs to the right of the active one; unsaved tabs stay open |
+| `Cmd+K` `Cmd+\` / `Cmd+K` `Opt+↓` / `Cmd+K` `Opt+←` | Split the editor up / down / left: the active file in a new group on that side. `Cmd+K` `Opt+↑` and `Cmd+K` `Opt+→` split up and right too, as `Cmd+Opt+←` / `→` focus the group on that side |
+| `Cmd+K` `Shift+Cmd+\` | Split in Group: a second view of the active file beside it, in the same group |
+| `Cmd+K` `Shift+←` / `Cmd+K` `Shift+→` / `Cmd+K` `Shift+↑` / `Cmd+K` `Shift+↓` | Move the active tab into the group on that side, opening a group there if there is none |
+| `Cmd+K` `Shift+M` | Move the minimap to the editor's other edge |
 | `Cmd+K` `S` | Select the active file as the compare anchor |
 | `Cmd+K` `C` | Diff the active file against the compare anchor |
 | `Cmd+K` `W` | Close all editor tabs in every split, keeping pinned and unsaved tabs. `Cmd+K` `Shift+W` reopens them |
@@ -312,6 +319,12 @@ Every choice except the side-bar / panel visibility persists across launches in 
 | Output: Select Channel… | palette only | Pick an OUTPUT channel and show it |
 | View: Close Other Editors in Group | `Cmd`+`K` `Shift`+`X` | The tab menu's **Close Others**: close every other tab of the focused group except pinned tabs; other splits are untouched |
 | View: Close Editors to the Right in Group / View: Close Saved Editors in Group / View: Close All Editors | `Cmd`+`K` `→` / `Cmd`+`K` `U` / `Cmd`+`K` `W` | The tab menu's **Close to the Right**, **Close Saved** and **Close All** on the active tab (Close All covers every split) |
+| View: Split Editor Up / View: Split Editor Down / View: Split Editor Left | `Cmd`+`K` `Cmd`+`\` / `Cmd`+`K` `Opt`+`↓` / `Cmd`+`K` `Opt`+`←` | The tab menu's **Split Up**, **Split Down** and **Split Left** (under **Split & Move**) on the active tab |
+| View: Split Editor in Group | `Cmd`+`K` `Shift`+`Cmd`+`\` | The tab menu's **Split in Group** on the active tab |
+| View: Move Editor into Group Above / Group Below / Left Group / Right Group | `Cmd`+`K` `Shift`+`↑` / `Shift`+`↓` / `Shift`+`←` / `Shift`+`→` | The tab menu's **Move Above**, **Move Below**, **Move Left** and **Move Right**: the active tab into the group on that side, or a new group there |
+| View: Copy Editor into New Window / View: Move Editor into New Window | `Cmd`+`K` `O` / `Cmd`+`K` `Shift`+`O` | The tab menu's **Copy into New Window** / **Move into New Window** on the active tab (macOS only) |
+| File: Reveal Active File in Explorer View | `Cmd`+`K` `E` | The tab menu's **Reveal in Explorer View** on the active tab |
+| View: Toggle Minimap Side | `Cmd`+`K` `Shift`+`M` | The minimap menu's **Side** rows: the strip to the editor's other edge |
 | View: Pin Editor / View: Unpin Editor | `Cmd`+`K` `P` | The tab menu's **Pin** / **Unpin** on the active tab; the palette lists only the one that applies |
 | View: Keep Editor | `Cmd`+`K` `Shift`+`P` | The tab menu's **Keep Open**: the preview tab stays when the next file opens (also found as "keep open") |
 
@@ -475,8 +488,11 @@ Not supported yet: transforms such as `${TM_FILENAME/(.*)\\..+$/$1/}`, a picker 
 | `Home` / `End` | Start / end of the caret's line in the commit message; with `Ctrl`, the start / end of the whole message |
 | `Enter` | Commit with the message: only the staged changes when anything is staged, otherwise every tracked change. Commit & Push (`Ctrl`+`Enter`) and Commit & Sync follow the same rule |
 | Click ✓ Commit | Same as `Enter` |
+| `Tab` / `Shift`+`Tab` | Step between Source Control's REPOSITORIES (shown while several open folders are repositories), message box, change list and COMMITS, in that order (an empty change list is skipped). In REPOSITORIES: `Up` / `Down` and `Home` / `End` move, `Enter` or `Space` shows that repository, as a click on its row does. In COMMITS: `Up` / `Down`, `Home` / `End` and `PageUp` / `PageDown` pick a commit, `Enter` opens its changes, `Left` / `Right` collapse and expand the section. `R` in REPOSITORIES, the change list or COMMITS refreshes (Command Palette "Git: Refresh") |
+| `Tab` / `Shift`+`Tab` in a folder with no repository | Step between the card's buttons (Initialize Repository, or one Open per repository found in a subfolder) and REPOSITORIES; `Up` / `Down` move between the buttons too. `Enter` or `Space` presses the one with the keys, `R` refreshes. Command Palette "Git: Initialize Repository" is the card's Initialize |
 | `Tab`, or `Down` on the message's last line | Move to the change list: `Up` / `Down` select, `Enter` opens the diff, `Space` or `S` stages, `U` unstages, `Backspace`, `Delete` or `D` discards (confirms first), `Tab` returns |
 | Command Palette "Git: Commit" / "Git: Push" / "Git: Pull" / "Git: Sync" / "Git: Checkout to…" / "Git: Stash" | The Commit button's and the menus' actions, each bindable in `keybindings.json` |
+| Command Palette "Git: Open Changes" / "Git: Stage Changes" / "Git: Unstage Changes" / "Git: Discard Changes" | Open the diff of, stage, unstage or discard (confirms first) the open file, or a diff tab's file. In the change list they act on the selected row and their keys are the list's own `Enter`, `S`, `U` and `D`. A file with changes in both sections unstages its staged part and stages, opens or discards its unstaged part |
 | Click a change row | Open that file's diff against HEAD in a read-only editor tab, reused on the next click. With unsaved edits, hunk actions ask for a save first |
 | `S` in a diff tab | Stage the change hunk under the cursor (click a row or `F7` to pick it), or only the selected lines when a selection spans rows |
 | `U` in a diff tab | Unstage the change hunk under the cursor, or only the selected lines when a selection spans rows |
@@ -495,8 +511,10 @@ Not supported yet: transforms such as `${TM_FILENAME/(.*)\\..+$/$1/}`, a picker 
 | Click `↶` on a selected unstaged row | Discard that file (confirms first; deletes untracked files) |
 | Click `−` on a selected staged row | Unstage that file |
 | Click the branch name | Checkout / Create Branch picker: type to filter, `Enter` to switch, or a new name and `Enter` to create it. A remote branch checks out as a local tracking branch |
-| Click the `▾` caret next to Commit | Quick actions menu: Commit & Push, Push, Pull, Sync (Pull, Push), Checkout / Create Branch, Stash, Pop Stash, View Staged Changes, View Changes vs previous, View Changes vs `<default>` |
+| Click the `▾` caret next to Commit | Quick actions menu: Commit & Push, Push, Pull, Sync (Pull, Push), Checkout / Create Branch, Stash, Pop Stash, View Staged Changes, View Changes vs previous, View Changes vs `<default>`. A click outside it closes it and still lands where it falls; `Esc` closes it |
+| `Cmd+K` `Shift+C` (Command Palette "Git: Show Commit Actions") | Open the same quick actions menu from anywhere but the terminal, Source Control coming up first: `Up` / `Down` move, `Enter` runs the row, `Esc` closes |
 | Click the `⋯` icon in the header | Open the full Source Control actions menu with fly-out submenus (listed below the table); `Esc` closes |
+| `Cmd+K` `Shift+A` (Command Palette "Git: Show Source Control Actions") | Open the same `⋯` menu from anywhere, Source Control coming up first: `Up` / `Down` move, `Enter` or `→` opens a fly-out, `←` leaves it, `Enter` runs the row, `Esc` closes. After a click on `⋯`, the first key shows the highlight |
 | Right-click a row in COMMITS | The commit's actions: Cherry-Pick, Revert, Checkout (Detached), Create Branch Here, Create Tag Here, Reset Current Branch to Here (Soft / Mixed / Hard), Copy Commit Hash, Copy Commit Message |
 | Discard All Changes | Revert every tracked file to HEAD after a `Y`/`N` confirm (untracked files are kept) |
 | Click the header refresh icon | Force an immediate git re-scan |
@@ -1008,10 +1026,10 @@ Set `"disable_save_before_debug": true` (or VS Code's `"debug.saveBeforeStart": 
 | `Shift+F9` | Add or edit a conditional breakpoint on the cursor's line |
 | `Shift+Alt+F9` | Add or edit a logpoint on the cursor's line (amber diamond; prints instead of pausing) |
 | `Alt+F9` | Toggle break on raised (not just uncaught) exceptions |
-| `F10` | Step over |
+| `F10` | Step over (`Shift+F10` is Show Context Menu, as in VS Code) |
 | `F11` / `Shift+F11` | Step into / out (palette: "Debug: Step Into" / "Debug: Step Out"). Command ids: `step_into` / `step_out` |
 
-With the **terminal pane** focused and no debug session live, a bare `F5` / `F9` / `F10` / `F11` goes to the app running in the shell. Modified chords keep their debug meaning everywhere.
+With the **terminal pane** focused and no debug session live, a bare `F5` / `F9` / `F10` / `F11` goes to the app running in the shell. Modified chords keep their croft meaning everywhere.
 
 The updater's chord is `Ctrl+Shift+F9` (`Cmd+Shift+F9` too); you can also click the status bar's "Update ready" or rebuild pill, or run "Help: Update croft (Relaunch or Rebuild)" from the Command Palette.
 
@@ -1028,6 +1046,17 @@ Right-click the editor **gutter** for a breakpoint menu on that line: **Add Brea
 When paused, the Run and Debug panel shows the **call stack** (click a frame to inspect it), an expandable **variables** tree, and a **debug console** with a `❯` **REPL prompt** that evaluates expressions in the selected frame.
 
 The console is mirrored to the OUTPUT panel's **Debug Console** channel, where it can be searched and copied. Hovering a variable in the editor shows its current value.
+
+The panel's rows take the keys too, as VS Code's VARIABLES, WATCH and CALL STACK lists do:
+
+| Key | Action |
+|-----|--------|
+| `Tab` / `Shift+Tab` (at the `❯` prompt) | Move the keys to the first / last row. `Tab`, `Shift+Tab`, `Esc` or a click on the prompt hand them back, and typing on a row goes to the prompt |
+| `↑` / `↓`, `Home` / `End`, `PageUp` / `PageDown` | Move between rows; section headers are skipped |
+| `→` / `←` | Expand / collapse a variable or scope; `←` elsewhere steps to the row it sits under |
+| `Enter` / `Space` | What a click on the row does: inspect a frame, expand a variable, jump to a breakpoint, add a watch |
+| `Delete` (`Cmd+Backspace` on a Mac) | Stop watching a WATCH row, or remove a BREAKPOINTS row. Plain `Backspace` edits the prompt, as typing does |
+| `Shift+F10` / Menu key | The row's right-click menu: Copy Value, Copy as Expression, Add to Watch, Remove Expression, Copy Call Stack |
 
 * Program output keeps its colours (pytest `--color=yes`, chalk, coloured logging) and long lines wrap to the panel's width. The OUTPUT channel shows it at full width, without colour codes.
 

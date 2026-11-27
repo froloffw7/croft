@@ -698,6 +698,8 @@ impl App {
         // the primary side bar.
         self.render_secondary_side_bar(frame, secondary_area);
 
+        // Whether Source Control is on screen this frame, for its `⋯` menu.
+        let mut scm_drawn = false;
         if let Some(area) = side_area {
             // Croft Loch's side bar is one chrome surface: the views and the
             // Explorer's stacked sections paint on it.
@@ -732,6 +734,7 @@ impl App {
                 SidebarView::Explorer => self.render_explorer_sections(frame, usable_area),
                 SidebarView::Search => frame.render_widget(&mut self.search, usable_area),
                 SidebarView::SourceControl => {
+                    scm_drawn = true;
                     // The COMMITS graph section docks under the change list,
                     // capped at half the strip (like the Explorer sub-views).
                     // Hidden entirely while the repo empty-state hero shows.
@@ -754,6 +757,8 @@ impl App {
                             height: graph_h,
                             ..usable_area
                         };
+                        self.commit_graph.has_keys = self.source_control.keys
+                            == crate::widgets::source_control::KeyStop::Commits;
                         frame.render_widget(&mut self.commit_graph, graph_area);
                     } else {
                         self.commit_graph.last_area = Rect::default();
@@ -1605,6 +1610,13 @@ impl App {
                 t.last_area = Rect::default();
                 t.redacted_on_screen = 0;
             }
+            // The panel's other views likewise: their rows would take the
+            // clicks, hover and right-clicks of the editor that now fills
+            // their cells (#2740).
+            self.problems.last_area = Rect::default();
+            self.output.last_area = Rect::default();
+            self.ports.last_area = Rect::default();
+            self.captures.last_area = Rect::default();
         }
 
         if let Some(s) = self.theme.surfaces() {
@@ -2400,8 +2412,13 @@ impl App {
         self.render_port_toast(frame);
         self.render_update_toast(frame);
         self.render_zen_hint(frame);
+        // Source Control's menus hang from the view's `⋯` pill and the
+        // Commit button's `▾`: with the view or what they hang from off
+        // screen they close, so they never take keys unseen.
+        if !scm_drawn || self.scm_menu_layout().is_none() {
+            self.close_scm_menus();
+        }
         self.render_context_menu(frame);
-        self.render_commit_dropdown(frame);
         self.render_prompt(frame);
         self.render_local_open_confirm(frame);
         self.render_discard_confirm(frame);
@@ -2428,7 +2445,6 @@ impl App {
         self.render_zoxide_jump(frame);
         self.render_command_history_popup(frame);
         self.render_branch_picker(frame);
-        self.render_scm_menu(frame);
         // Below the input prompt: Enter on a number or text setting opens
         // the prompt over the editor, and drawn after it the editor hid it.
         self.render_settings_editor(frame);
@@ -3215,10 +3231,47 @@ impl App {
     }
 
     /// The Source Control sidebar for screen reader mode (#1295): how many
-    /// changes, and the selected one as `path, what happened to it`.
+    /// changes, and the selected one as `path, what happened to it`. While
+    /// COMMITS has the keys (#871) it reads COMMITS instead: how many
+    /// commits, and the picked one, which Enter opens.
     pub(super) fn source_control_a11y(&self) -> (String, Option<String>) {
         use crate::git::ChangeKind;
+        use crate::widgets::source_control::KeyStop;
         let name = crate::i18n::tr("Source Control").into_owned();
+        let sc = &self.source_control;
+        if sc.keys == KeyStop::Repositories {
+            let focus = format!(
+                "{name}, Repositories, {}",
+                a11y_count(sc.repositories.len(), "repository", "repositories")
+            );
+            let item = sc.repo_under_cursor().map(|r| {
+                let branch = r.branch.as_deref().unwrap_or("no branch");
+                let changes = a11y_count(r.changes, "change", "changes");
+                let shown = if r.active { ", selected" } else { "" };
+                format!("{}, {branch}, {changes}{shown}", r.label)
+            });
+            return (focus, item);
+        }
+        if sc.keys == KeyStop::Card {
+            let item = sc
+                .keyed_card_label()
+                .map(|label| format!("{label}, button"));
+            return (format!("{name}, {}", sc.card_title()), item);
+        }
+        if sc.keys == KeyStop::Commits {
+            let graph = &self.commit_graph;
+            if graph.collapsed {
+                return (format!("{name}, Commits, collapsed"), None);
+            }
+            let focus = format!(
+                "{name}, Commits, {}",
+                a11y_count(graph.commit_count(), "commit", "commits")
+            );
+            let item = graph
+                .selected_commit()
+                .map(|c| format!("{}, by {}, {}", c.summary, c.author, c.short_hash));
+            return (focus, item);
+        }
         let entries = &self.source_control.entries;
         if entries.is_empty() {
             return (name, None);

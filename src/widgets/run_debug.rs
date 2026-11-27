@@ -1,3 +1,4 @@
+use crate::widgets::drawn_rows::follow;
 use ratatui::{
     buffer::Buffer,
     layout::{Alignment, Rect},
@@ -29,6 +30,8 @@ const DBG_LOC: Color = Color::Rgb(0x6b, 0x76, 0x89); // file:line / dim console
 const DBG_PILL_BG: Color = Color::Rgb(0x0e, 0x7e, 0x76); // status pill
 const DBG_PILL_FG: Color = Color::Rgb(0xdf, 0xfd, 0xf7);
 const DBG_FRAME_SEL_FG: Color = Color::Rgb(0xff, 0xff, 0xff);
+/// The keyboard's row (#2748): Source Control's list selection colour.
+const DBG_CURSOR_BG: Color = Color::Rgb(0x26, 0x4f, 0x78);
 const DBG_FIELD_BG: Color = Color::Rgb(0x0d, 0x11, 0x17); // REPL input field fill
 const DBG_PLACEHOLDER: Color = Color::Rgb(0x4b, 0x55, 0x63); // ghost hint text
 
@@ -347,8 +350,14 @@ pub enum DebugRowKind {
     /// The trailing "+ Add Expression" affordance row of the WATCH section.
     WatchAdd,
     /// A breakpoint (#250): `index` into [`RunDebugPanel::breakpoints`].
-    /// Clicking the row jumps to it; the `✕` removes it.
-    Breakpoint { index: usize },
+    /// Clicking the row jumps to it; the `✕` removes it. `path` and `line`
+    /// (1-based) say which breakpoint it is, so the keyboard's row follows
+    /// it when one above it goes (#2748).
+    Breakpoint {
+        index: usize,
+        path: PathBuf,
+        line: usize,
+    },
 }
 
 /// One breakpoint as the BREAKPOINTS list shows it (#250), filled by the app
@@ -365,12 +374,119 @@ pub struct BreakpointItem {
     pub detail: Option<String>,
 }
 
+/// What names a breakpoint for a click: its file and 1-based line.
+type BreakpointKey = (PathBuf, usize);
+
 /// One rendered line of the paused-state debug tree. The app builds these from
 /// the session; the panel renders them and maps clicks back to them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DebugRow {
     pub indent: u8,
     pub kind: DebugRowKind,
+}
+
+/// What makes a row the same row across a rebuild (#2748): what it shows,
+/// not where. A variable has no id of its own (every leaf's reference is
+/// 0), so its name, expression and depth stand for it; its parents and its
+/// place among same-keyed siblings ([`row_chain`]) tell apart the rest.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RowKey<'a> {
+    Header(&'a str),
+    Frame(i64),
+    Thread(i64),
+    Scope(&'a str, usize),
+    Variable(&'a str, Option<&'a str>, u8),
+    Watch(&'a str),
+    WatchAdd,
+    Breakpoint(&'a std::path::Path, usize),
+}
+
+fn row_key(row: &DebugRow) -> RowKey<'_> {
+    use DebugRowKind as K;
+    match &row.kind {
+        K::Header { title } => RowKey::Header(title),
+        K::Frame { id, .. } => RowKey::Frame(*id),
+        K::Thread { id, .. } => RowKey::Thread(*id),
+        K::Scope { name, index, .. } => RowKey::Scope(name, *index),
+        K::Variable {
+            name,
+            evaluate_name,
+            ..
+        } => RowKey::Variable(name, evaluate_name.as_deref(), row.indent),
+        K::Watch { expression, .. } => RowKey::Watch(expression),
+        K::WatchAdd => RowKey::WatchAdd,
+        K::Breakpoint { path, line, .. } => RowKey::Breakpoint(path, *line),
+    }
+}
+
+/// Each row's parent (#2748): the closest row above it with less indent,
+/// `None` for a section header. One pass, so a rebuild of a long list of
+/// variables stays linear.
+fn row_parents(rows: &[DebugRow]) -> Vec<Option<usize>> {
+    let mut open: Vec<usize> = Vec::new();
+    rows.iter()
+        .enumerate()
+        .map(|(i, row)| {
+            while open.last().is_some_and(|&j| rows[j].indent >= row.indent) {
+                open.pop();
+            }
+            let parent = if row.indent == 0 {
+                None
+            } else {
+                open.last().copied()
+            };
+            open.push(i);
+            parent
+        })
+        .collect()
+}
+
+/// Row `at` as the steps down to it from its section header (#2748): each
+/// step is a row's [`RowKey`] and how many earlier siblings share that
+/// key. VS Code ids its variables the same way: the parent's id, the name,
+/// and a count of same-named siblings before it. So two same-named fields
+/// under different objects differ by their parents, and an adapter's two
+/// same-named siblings by their count, at every depth.
+fn row_chain<'a>(
+    rows: &'a [DebugRow],
+    parents: &[Option<usize>],
+    at: usize,
+) -> Vec<(RowKey<'a>, usize)> {
+    let mut chain = Vec::new();
+    let mut here = Some(at);
+    while let Some(y) = here {
+        let key = row_key(&rows[y]);
+        let from = parents[y].map_or(0, |p| p + 1);
+        let twin = (from..y)
+            .filter(|&j| parents[j] == parents[y] && row_key(&rows[j]) == key)
+            .count();
+        chain.push((key, twin));
+        here = parents[y];
+    }
+    chain.reverse();
+    chain
+}
+
+/// The row `chain` names in `rows` (#2748), found top-down: each step looks
+/// only among the children of the row the step before found, and stops at
+/// its match, so a rebuild of a long variable list stays linear.
+fn find_chain(
+    rows: &[DebugRow],
+    parents: &[Option<usize>],
+    chain: &[(RowKey<'_>, usize)],
+) -> Option<usize> {
+    let mut found: Option<usize> = None;
+    for &(key, twin) in chain {
+        let parent = found;
+        let from = parent.map_or(0, |p| p + 1);
+        found = Some(
+            (from..rows.len())
+                .take_while(|&i| parent.is_none_or(|p| rows[i].indent > rows[p].indent))
+                .filter(|&i| parents[i] == parent && row_key(&rows[i]) == key)
+                .nth(twin)?,
+        );
+    }
+    found
 }
 
 pub struct RunDebugPanel {
@@ -405,15 +521,19 @@ pub struct RunDebugPanel {
     /// variables) and sets `debug_active`; the panel then renders the tree
     /// instead of the empty-state Run button.
     pub debug_active: bool,
-    /// Remove-`✕` hit cells for Watch rows painted this frame:
-    /// `(y, x, nth watch row)`. Cleared at every tree render.
-    watch_remove_rects: Vec<(u16, u16, usize)>,
+    /// Remove-`✕` hit cells for Watch rows painted this frame: `(y, x,
+    /// index into the app's expressions, expression)`. Cleared at every tree
+    /// render. A click follows the expression (#2753): a remove read before
+    /// the next frame may have moved it up.
+    watch_remove_rects: Vec<(u16, u16, usize, String)>,
     /// Every breakpoint, for the BREAKPOINTS list (#250).
     pub breakpoints: Vec<BreakpointItem>,
-    /// Painted breakpoint rows this frame: `(y, index)`, and their remove
-    /// `✕` cells `(y, x, index)`. Cleared at every render.
-    breakpoint_row_rects: Vec<(u16, usize)>,
-    breakpoint_remove_rects: Vec<(u16, u16, usize)>,
+    /// Painted breakpoint rows this frame: `(y, index, file and line)`, and
+    /// their remove `✕` cells `(y, x, index, file and line)`. Cleared at
+    /// every render. A click follows the breakpoint it was drawn for
+    /// (#2753), as it does the watch.
+    breakpoint_row_rects: Vec<(u16, usize, BreakpointKey)>,
+    breakpoint_remove_rects: Vec<(u16, u16, usize, BreakpointKey)>,
     pub debug_status: String,
     /// Whether the live session is paused (set by the app with the rows),
     /// which decides Continue vs Pause and whether the steps act (#1545).
@@ -423,15 +543,31 @@ pub struct RunDebugPanel {
     debug_control_rects: Vec<(u16, u16, DebugControl)>,
     pub debug_rows: Vec<DebugRow>,
     pub debug_scroll: usize,
+    /// The row the keyboard is on (#2748), an index into `debug_rows`, or
+    /// `None` while the expression prompt has the keys. Never a section
+    /// header: [`Self::settle_row_cursor`] keeps it off them.
+    pub row_cursor: Option<usize>,
     /// Screen y of the first rendered debug row and how many rows were drawn,
     /// recorded each frame so a click can be mapped to a row index.
     pub last_debug_row_y0: u16,
     pub last_debug_rows_shown: usize,
+    /// The scroll those rows were drawn with (#2751). A click is matched
+    /// against it: the screen shows it until the next frame, while a key or
+    /// wheel step read in the same burst has already moved `debug_scroll`.
+    pub last_debug_scroll: usize,
+    /// The rows those were, when a rebuild has replaced them since (#2751):
+    /// a click read before the next frame follows the row it was drawn on to
+    /// where the rebuild put it, as the keyboard does, since a click on a
+    /// scope or a watch's remove button in the same burst may have moved it.
+    replaced_debug_rows: Option<Vec<DebugRow>>,
     /// Tail of the debug console (program output + REPL echoes/results), set by
     /// the app each refresh; rendered below the variables tree.
     pub console_tail: Vec<crate::ansi_text::AnsiLine>,
     /// Current REPL input line, rendered as a `❯` prompt at the panel bottom.
     pub repl_input: String,
+    /// The `❯` prompt's row painted this frame (#2748): a click there gives
+    /// the prompt the keys back from the rows. Default when none was drawn.
+    pub last_prompt_area: Rect,
     /// Top-left cell of the OSC-1337 icon overlay block. The post-draw
     /// flush in `App` reads this to emit the rasterised debug-alt PNG
     /// above the headline. `None` when the panel hasn't been laid out,
@@ -475,10 +611,14 @@ impl RunDebugPanel {
             debug_control_rects: Vec::new(),
             debug_rows: Vec::new(),
             debug_scroll: 0,
+            row_cursor: None,
             last_debug_row_y0: 0,
             last_debug_rows_shown: 0,
+            last_debug_scroll: 0,
+            replaced_debug_rows: None,
             console_tail: Vec::new(),
             repl_input: String::new(),
+            last_prompt_area: Rect::default(),
             last_icon_cell: None,
             feedback: None,
             feedback_is_error: false,
@@ -487,14 +627,15 @@ impl RunDebugPanel {
         }
     }
 
-    /// Map a click to the watch row whose remove `✕` sits at `(x, y)` —
-    /// returns the index into the ORDER the Watch rows were rendered in,
-    /// which the app maps back to its expression list.
-    pub fn watch_remove_at(&self, x: u16, y: u16) -> Option<usize> {
-        self.watch_remove_rects
+    /// Map a click to the watch whose remove `✕` the last frame drew at
+    /// `(x, y)`: its index in `watches`, the app's expressions as they are
+    /// now, or `None` once it is gone (#2753).
+    pub fn watch_remove_at(&self, x: u16, y: u16, watches: &[String]) -> Option<usize> {
+        let (_, _, at, expression) = self
+            .watch_remove_rects
             .iter()
-            .find(|&&(ry, rx, _)| ry == y && (x == rx || x == rx + 1))
-            .map(|&(_, _, idx)| idx)
+            .find(|&&(ry, rx, ..)| ry == y && (x == rx || x == rx + 1))?;
+        follow(*at, expression, watches.len(), |i, e| watches[i] == *e)
     }
 
     /// The debug toolbar button painted at `(x, y)`, if it acts in the
@@ -514,19 +655,27 @@ impl RunDebugPanel {
     }
 
     /// Map a click to a painted breakpoint (#250): the index into
-    /// `breakpoints`, and whether it landed on the remove `✕`.
+    /// `breakpoints` of the one the last frame drew there, where it is now
+    /// (#2753), and whether it landed on the remove `✕`. `None` once that
+    /// breakpoint is gone.
     pub fn breakpoint_at(&self, x: u16, y: u16) -> Option<(usize, bool)> {
-        if let Some(&(_, _, i)) = self
+        let now = |at: usize, (path, line): &BreakpointKey| {
+            follow(at, &(path, *line), self.breakpoints.len(), |i, &(p, l)| {
+                self.breakpoints[i].path == *p && self.breakpoints[i].line == l
+            })
+        };
+        if let Some((_, _, at, key)) = self
             .breakpoint_remove_rects
             .iter()
-            .find(|&&(ry, rx, _)| ry == y && (x == rx || x == rx + 1))
+            .find(|&&(ry, rx, ..)| ry == y && (x == rx || x == rx + 1))
         {
-            return Some((i, true));
+            return now(*at, key).map(|i| (i, true));
         }
-        self.breakpoint_row_rects
+        let (_, at, key) = self
+            .breakpoint_row_rects
             .iter()
-            .find(|&&(ry, _)| ry == y)
-            .map(|&(_, i)| (i, false))
+            .find(|&&(ry, ..)| ry == y)?;
+        now(*at, key).map(|i| (i, false))
     }
 
     /// Paint one breakpoint on row `y` between `x0` and `right`, recording
@@ -564,7 +713,8 @@ impl RunDebugPanel {
                     .add_modifier(Modifier::ITALIC),
             );
         }
-        self.breakpoint_row_rects.push((y, index));
+        let key = (bp.path.clone(), bp.line);
+        self.breakpoint_row_rects.push((y, index, key.clone()));
         if right > x0 + 2 {
             let rx = right - 2;
             put(
@@ -575,7 +725,7 @@ impl RunDebugPanel {
                 "\u{2715}",
                 Style::default().fg(self.theme.ui(DBG_TYPE)),
             );
-            self.breakpoint_remove_rects.push((y, rx, index));
+            self.breakpoint_remove_rects.push((y, rx, index, key));
         }
     }
 
@@ -586,11 +736,148 @@ impl RunDebugPanel {
             return None;
         }
         let offset = (y - self.last_debug_row_y0) as usize;
-        if offset < self.last_debug_rows_shown {
-            Some(self.debug_scroll + offset)
-        } else {
-            None
+        if offset >= self.last_debug_rows_shown {
+            return None;
         }
+        let at = self.last_debug_scroll + offset;
+        let Some(drawn) = &self.replaced_debug_rows else {
+            return (at < self.debug_rows.len()).then_some(at);
+        };
+        if at >= drawn.len() {
+            return None;
+        }
+        let chain = row_chain(drawn, &row_parents(drawn), at);
+        find_chain(&self.debug_rows, &row_parents(&self.debug_rows), &chain)
+    }
+
+    /// Whether the keyboard cursor can rest on row `idx`: any row but a
+    /// section header (#2748).
+    fn takes_cursor(&self, idx: usize) -> bool {
+        self.debug_rows
+            .get(idx)
+            .is_some_and(|row| !matches!(row.kind, DebugRowKind::Header { .. }))
+    }
+
+    /// The nearest row the cursor can rest on from `from` on, looking down
+    /// (or up), `from` itself included.
+    fn cursor_row_from(&self, from: usize, down: bool) -> Option<usize> {
+        if down {
+            (from..self.debug_rows.len()).find(|&i| self.takes_cursor(i))
+        } else {
+            (0..=from.min(self.debug_rows.len().saturating_sub(1)))
+                .rev()
+                .find(|&i| self.takes_cursor(i))
+        }
+    }
+
+    /// Give the rows the keys (#2748): the cursor on the first row, or the
+    /// last with `last`. False, and the prompt keeps the keys, when no row
+    /// can take the cursor.
+    pub fn enter_rows(&mut self, last: bool) -> bool {
+        let row = if last {
+            self.debug_rows
+                .len()
+                .checked_sub(1)
+                .and_then(|end| self.cursor_row_from(end, false))
+        } else {
+            self.cursor_row_from(0, true)
+        };
+        self.row_cursor = row;
+        self.scroll_row_cursor_into_view();
+        row.is_some()
+    }
+
+    /// Whether a click at `(x, y)` landed on the `❯` prompt (#2748).
+    pub fn prompt_at(&self, x: u16, y: u16) -> bool {
+        self.debug_active && crate::widgets::hover::contains(self.last_prompt_area, Some((x, y)))
+    }
+
+    /// Put the row cursor on row `idx`, a row a click landed on, when the
+    /// cursor can rest there: mouse and keyboard agree on the row, as in VS
+    /// Code's lists.
+    pub fn put_row_cursor(&mut self, idx: usize) {
+        if self.takes_cursor(idx) {
+            self.row_cursor = Some(idx);
+        }
+    }
+
+    /// Move the row cursor `by` rows, down for a positive count, past the
+    /// headers, stopping at the first and last rows.
+    pub fn move_row_cursor(&mut self, by: isize) {
+        let Some(at) = self.row_cursor else {
+            return;
+        };
+        let target = at
+            .saturating_add_signed(by)
+            .min(self.debug_rows.len().saturating_sub(1));
+        let down = by > 0;
+        self.row_cursor = self
+            .cursor_row_from(target, down)
+            .or_else(|| self.cursor_row_from(target, !down))
+            .or(Some(at));
+        self.scroll_row_cursor_into_view();
+    }
+
+    /// How many rows one PageUp / PageDown moves: the rows drawn last frame.
+    pub fn row_page(&self) -> isize {
+        self.last_debug_rows_shown.max(1) as isize
+    }
+
+    /// Scroll so the cursor row is among the rows drawn.
+    pub fn scroll_row_cursor_into_view(&mut self) {
+        let Some(at) = self.row_cursor else {
+            return;
+        };
+        let shown = self.last_debug_rows_shown.max(1);
+        if at < self.debug_scroll {
+            self.debug_scroll = at;
+        } else if at >= self.debug_scroll + shown {
+            self.debug_scroll = at + 1 - shown;
+        }
+    }
+
+    /// Swap in rebuilt rows (#2748), the keyboard staying on the row it was
+    /// on: the same frame, thread, variable, watch or breakpoint, wherever
+    /// the rebuild moved it ([`row_chain`]). Rows come and go above it
+    /// (another thread's frames, a variable opened), so the index alone
+    /// would land on an unrelated row for the next Enter or Delete. When
+    /// its row is gone, the prompt has the keys again. A click read before
+    /// the next frame follows the row it was drawn on the same way
+    /// ([`Self::debug_row_at`]).
+    pub fn replace_rows(&mut self, rows: Vec<DebugRow>) {
+        let old = std::mem::replace(&mut self.debug_rows, rows);
+        self.row_cursor = self.row_cursor.filter(|&at| at < old.len()).and_then(|at| {
+            let chain = row_chain(&old, &row_parents(&old), at);
+            find_chain(&self.debug_rows, &row_parents(&self.debug_rows), &chain)
+        });
+        self.settle_row_cursor();
+        // The first rows replaced since the frame are the ones on screen.
+        self.replaced_debug_rows.get_or_insert(old);
+    }
+
+    /// After the rows are rebuilt (#2748): a cursor past the end, or on a
+    /// row that became a header, moves to the nearest row that takes it,
+    /// and with no such row the prompt has the keys again.
+    pub fn settle_row_cursor(&mut self) {
+        if !self.debug_active {
+            self.row_cursor = None;
+            return;
+        }
+        let Some(at) = self.row_cursor else {
+            return;
+        };
+        let at = at.min(self.debug_rows.len().saturating_sub(1));
+        self.row_cursor = self
+            .cursor_row_from(at, false)
+            .or_else(|| self.cursor_row_from(at, true));
+        self.scroll_row_cursor_into_view();
+    }
+
+    /// The screen row the cursor row was drawn on last frame, if it was.
+    pub fn row_cursor_y(&self) -> Option<u16> {
+        let at = self.row_cursor?;
+        let offset = at.checked_sub(self.debug_scroll)?;
+        (offset < self.last_debug_rows_shown).then(|| self.last_debug_row_y0 + offset as u16)
     }
 
     pub fn set_active_file(&mut self, path: Option<PathBuf>) {
@@ -751,6 +1038,8 @@ impl RunDebugPanel {
         let rows_bottom = bottom.saturating_sub(input_h + console_h);
         let rows_area_h = rows_bottom.saturating_sub(y) as usize;
         self.last_debug_row_y0 = y;
+        self.last_debug_scroll = self.debug_scroll;
+        self.replaced_debug_rows = None;
 
         let mut shown = 0usize;
         // Breakpoint rows paint after the loop: `put_breakpoint` needs
@@ -993,10 +1282,11 @@ impl RunDebugPanel {
                             "\u{2715}",
                             Style::default().fg(self.theme.ui(DBG_TYPE)),
                         );
-                        self.watch_remove_rects.push((row_y, rx, *index));
+                        self.watch_remove_rects
+                            .push((row_y, rx, *index, expression.clone()));
                     }
                 }
-                DebugRowKind::Breakpoint { index } => {
+                DebugRowKind::Breakpoint { index, .. } => {
                     let indent = (row.indent as u16) * 2;
                     breakpoint_rows.push((*index, inner.x + indent, row_y, right));
                 }
@@ -1020,10 +1310,31 @@ impl RunDebugPanel {
             self.put_breakpoint(buf, index, x, row_y, right);
         }
         self.last_debug_rows_shown = shown;
+        // The keyboard's row (#2748), lit as Source Control lights its list's
+        // while the panel has focus.
+        if self.focused
+            && let Some(cursor_y) = self.row_cursor_y()
+        {
+            buf.set_style(
+                Rect {
+                    x: inner.x,
+                    y: cursor_y,
+                    width: inner.width,
+                    height: 1,
+                },
+                Style::default().bg(self.theme.ui(DBG_CURSOR_BG)),
+            );
+        }
 
         // Bottom-up: the input field is the last row, the "DEBUG CONSOLE" label
         // the row above it, and any console output sits above that.
         let field_y = bottom - 1;
+        self.last_prompt_area = Rect {
+            x: inner.x,
+            y: field_y,
+            width: inner.width,
+            height: 1,
+        };
         let label_y = bottom - 2;
 
         // Console: program output + REPL echoes, above the label.
@@ -1082,16 +1393,16 @@ impl RunDebugPanel {
                 bg,
             ),
         );
+        // The block cursor marks the insertion point while the prompt has
+        // the keys; while a row has them (#2748) the field shows none.
+        let caret = if self.row_cursor.is_none() {
+            Style::default().bg(self.theme.ui(DBG_ACCENT))
+        } else {
+            with_bg(Style::default(), bg)
+        };
         if self.repl_input.is_empty() {
             // Block cursor at the insertion point, then the ghost placeholder.
-            let after_cursor = put(
-                buf,
-                caret_end,
-                field_y,
-                right,
-                " ",
-                Style::default().bg(self.theme.ui(DBG_ACCENT)),
-            );
+            let after_cursor = put(buf, caret_end, field_y, right, " ", caret);
             put(
                 buf,
                 after_cursor,
@@ -1114,14 +1425,7 @@ impl RunDebugPanel {
                 &self.repl_input,
                 with_bg(Style::default().fg(self.theme.ui(DBG_NAME)), bg),
             );
-            put(
-                buf,
-                input_end,
-                field_y,
-                right,
-                " ",
-                Style::default().bg(self.theme.ui(DBG_ACCENT)),
-            );
+            put(buf, input_end, field_y, right, " ", caret);
         }
     }
 
@@ -1431,8 +1735,263 @@ impl Widget for &mut RunDebugPanel {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
     use crate::ansi_text::AnsiLine;
+
+    /// #2748: a rebuild that adds or drops rows above the keyboard's row
+    /// keeps the keyboard on that row, and one that drops the row itself
+    /// hands the keys back to the prompt, so the next Enter or Delete never
+    /// lands on an unrelated row.
+    #[test]
+    fn the_row_cursor_follows_its_row_across_a_rebuild() {
+        let row = |indent, kind| DebugRow { indent, kind };
+        let thread = |id, selected| DebugRowKind::Thread {
+            id,
+            name: format!("t{id}"),
+            selected,
+        };
+        let frame = |id| DebugRowKind::Frame {
+            id,
+            selected: false,
+            name: format!("f{id}"),
+            location: String::from("s.py:1"),
+        };
+        let header = || DebugRowKind::Header {
+            title: String::from("CALL STACK"),
+        };
+        let mut panel = RunDebugPanel::new();
+        panel.debug_active = true;
+        panel.debug_rows = vec![
+            row(0, header()),
+            row(1, thread(1, true)),
+            row(2, frame(11)),
+            row(2, frame(12)),
+            row(2, frame(13)),
+            row(1, thread(2, false)),
+            row(1, DebugRowKind::WatchAdd),
+        ];
+        panel.row_cursor = Some(5);
+        // Thread 2 picked: thread 1's frames go, thread 2's come.
+        panel.replace_rows(vec![
+            row(0, header()),
+            row(1, thread(1, false)),
+            row(1, thread(2, true)),
+            row(2, frame(21)),
+            row(1, DebugRowKind::WatchAdd),
+        ]);
+        assert_eq!(panel.row_cursor, Some(2), "still on thread 2");
+        // A stop with new frames: the cursor's frame is gone.
+        panel.row_cursor = Some(3);
+        panel.replace_rows(vec![
+            row(0, header()),
+            row(1, thread(2, true)),
+            row(2, frame(31)),
+            row(1, DebugRowKind::WatchAdd),
+        ]);
+        assert_eq!(
+            panel.row_cursor, None,
+            "its frame is gone: the prompt has the keys"
+        );
+    }
+
+    /// #2748: two fields named alike under different objects are different
+    /// rows. A rebuild (the panel rebuilds on every poll) keeps the
+    /// keyboard on the second, not the first that shares its name.
+    #[test]
+    fn same_named_fields_under_different_parents_stay_apart() {
+        let variable = |indent, name: &str, reference| DebugRow {
+            indent,
+            kind: DebugRowKind::Variable {
+                reference,
+                expandable: reference != 0,
+                expanded: reference != 0,
+                name: name.into(),
+                value: String::from("1"),
+                type_name: String::from("int"),
+                evaluate_name: None,
+            },
+        };
+        let rows = || {
+            vec![
+                DebugRow {
+                    indent: 0,
+                    kind: DebugRowKind::Header {
+                        title: String::from("VARIABLES"),
+                    },
+                },
+                variable(2, "first", 7),
+                variable(3, "value", 0),
+                variable(2, "second", 8),
+                variable(3, "value", 0),
+            ]
+        };
+        let mut panel = RunDebugPanel::new();
+        panel.debug_active = true;
+        panel.debug_rows = rows();
+        panel.row_cursor = Some(4);
+        panel.replace_rows(rows());
+        assert_eq!(panel.row_cursor, Some(4), "still second's `value`");
+    }
+
+    /// #2748: a breakpoint row is its breakpoint, not its place in the list.
+    /// One removed above it leaves the keyboard on the same breakpoint, and
+    /// when its own breakpoint goes the prompt has the keys again.
+    #[test]
+    fn the_row_cursor_follows_its_breakpoint() {
+        let header = DebugRow {
+            indent: 0,
+            kind: DebugRowKind::Header {
+                title: String::from("BREAKPOINTS"),
+            },
+        };
+        let breakpoints = |lines: &[usize]| {
+            let mut rows = vec![header.clone()];
+            rows.extend(lines.iter().enumerate().map(|(index, &line)| DebugRow {
+                indent: 1,
+                kind: DebugRowKind::Breakpoint {
+                    index,
+                    path: PathBuf::from("/w/s.py"),
+                    line,
+                },
+            }));
+            rows
+        };
+        let mut panel = RunDebugPanel::new();
+        panel.debug_active = true;
+        panel.debug_rows = breakpoints(&[3, 7, 9]);
+        panel.row_cursor = Some(2);
+        panel.replace_rows(breakpoints(&[7, 9]));
+        assert_eq!(panel.row_cursor, Some(1), "still line 7, now first");
+        panel.replace_rows(breakpoints(&[9]));
+        assert_eq!(
+            panel.row_cursor, None,
+            "line 7 is gone: the prompt has the keys"
+        );
+    }
+
+    /// #2748: an adapter can list two siblings with the same name and no
+    /// expression of their own. The keyboard on the second stays on the
+    /// second, told apart by order as VS Code's variable ids are.
+    #[test]
+    fn the_row_cursor_stays_on_the_second_of_two_twins() {
+        let rows = || {
+            let variable = |name: &str| DebugRow {
+                indent: 2,
+                kind: DebugRowKind::Variable {
+                    reference: 0,
+                    expandable: false,
+                    expanded: false,
+                    name: name.into(),
+                    value: String::from("1"),
+                    type_name: String::from("int"),
+                    evaluate_name: None,
+                },
+            };
+            vec![
+                DebugRow {
+                    indent: 0,
+                    kind: DebugRowKind::Header {
+                        title: String::from("VARIABLES"),
+                    },
+                },
+                DebugRow {
+                    indent: 1,
+                    kind: DebugRowKind::Scope {
+                        name: String::from("Locals"),
+                        index: 0,
+                        open: None,
+                    },
+                },
+                variable("x"),
+                variable("x"),
+                variable("y"),
+            ]
+        };
+        let mut panel = RunDebugPanel::new();
+        panel.debug_active = true;
+        panel.debug_rows = rows();
+        panel.row_cursor = Some(3);
+        panel.replace_rows(rows());
+        assert_eq!(panel.row_cursor, Some(3), "still the second `x`");
+    }
+
+    /// #2748: twins are counted at every depth. Two same-named parents each
+    /// hold an `x`; the keyboard is on the second parent's `x` while the
+    /// first parent's children are still loading. When they arrive, the
+    /// keyboard stays under the second parent.
+    #[test]
+    fn the_row_cursor_stays_under_the_second_of_two_twin_parents() {
+        let variable = |indent: u8, name: &str| DebugRow {
+            indent,
+            kind: DebugRowKind::Variable {
+                reference: if indent == 2 { 7 } else { 0 },
+                expandable: indent == 2,
+                expanded: indent == 2,
+                name: name.into(),
+                value: String::new(),
+                type_name: String::new(),
+                evaluate_name: None,
+            },
+        };
+        let top = || {
+            vec![
+                DebugRow {
+                    indent: 0,
+                    kind: DebugRowKind::Header {
+                        title: String::from("VARIABLES"),
+                    },
+                },
+                DebugRow {
+                    indent: 1,
+                    kind: DebugRowKind::Scope {
+                        name: String::from("Locals"),
+                        index: 0,
+                        open: None,
+                    },
+                },
+            ]
+        };
+        let mut loading = top();
+        loading.extend([variable(2, "p"), variable(2, "p"), variable(3, "x")]);
+        let mut loaded = top();
+        loaded.extend([
+            variable(2, "p"),
+            variable(3, "x"),
+            variable(2, "p"),
+            variable(3, "x"),
+        ]);
+        let mut panel = RunDebugPanel::new();
+        panel.debug_active = true;
+        panel.debug_rows = loading;
+        panel.row_cursor = Some(4);
+        panel.replace_rows(loaded);
+        assert_eq!(panel.row_cursor, Some(5), "still the second `p`'s `x`");
+    }
+
+    /// #2748: a cursor past the old rows' end (a list shortened behind its
+    /// back) gives the keys to the prompt instead of crashing.
+    #[test]
+    fn a_cursor_past_the_old_rows_hands_the_keys_back() {
+        let header = DebugRow {
+            indent: 0,
+            kind: DebugRowKind::Header {
+                title: String::from("WATCH"),
+            },
+        };
+        let mut panel = RunDebugPanel::new();
+        panel.debug_active = true;
+        panel.debug_rows = vec![header.clone()];
+        panel.row_cursor = Some(4);
+        panel.replace_rows(vec![
+            header,
+            DebugRow {
+                indent: 1,
+                kind: DebugRowKind::WatchAdd,
+            },
+        ]);
+        assert_eq!(panel.row_cursor, None);
+    }
 
     /// Every row of `line` wrapped to `width`.
     fn wrap_console_line(line: &str, width: usize) -> Vec<String> {
@@ -1948,6 +2507,124 @@ mod tests {
         );
     }
 
+    /// #2751: a click read after a key that scrolled the rows, in the same
+    /// burst and so before the next frame, meets the rows the last frame
+    /// drew: the screen still shows them, and the key has already moved the
+    /// scroll by one.
+    #[test]
+    fn a_click_before_the_next_frame_meets_the_drawn_rows() {
+        let mut panel = RunDebugPanel::new();
+        panel.debug_active = true;
+        panel.debug_rows = std::iter::once(DebugRow {
+            indent: 0,
+            kind: DebugRowKind::Header {
+                title: String::from("VARIABLES"),
+            },
+        })
+        .chain((0..30).map(|i| DebugRow {
+            indent: 1,
+            kind: DebugRowKind::Variable {
+                reference: 0,
+                expandable: false,
+                expanded: false,
+                name: format!("v{i}"),
+                value: String::from("1"),
+                type_name: String::from("int"),
+                evaluate_name: Some(format!("v{i}")),
+            },
+        }))
+        .collect();
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 40,
+            height: 16,
+        };
+        let mut buf = Buffer::empty(area);
+        Widget::render(&mut panel, area, &mut buf);
+        let shown = panel.last_debug_rows_shown;
+        assert!(
+            shown > 1 && shown < panel.debug_rows.len(),
+            "rows to scroll"
+        );
+        let y0 = panel.last_debug_row_y0;
+        let top = panel.debug_row_at(y0).expect("a row is drawn at the top");
+        panel.row_cursor = Some(top + shown - 1);
+        let before = panel.debug_scroll;
+        panel.move_row_cursor(1);
+        assert!(panel.debug_scroll > before, "the key scrolled the rows");
+        assert_eq!(
+            panel.debug_row_at(y0),
+            Some(top),
+            "the row drawn at the top, not the one scrolled there"
+        );
+    }
+
+    /// #2751: a click that rebuilds the rows (a scope opened, a watch
+    /// removed) and a second click read in the same burst: the second meets
+    /// the row drawn on its line where the rebuild put it, and nothing once
+    /// it is gone, however many rebuilds came between.
+    #[test]
+    fn a_click_after_a_rebuild_meets_the_drawn_row() {
+        let header = DebugRow {
+            indent: 0,
+            kind: DebugRowKind::Header {
+                title: String::from("VARIABLES"),
+            },
+        };
+        let var = |name: &str| DebugRow {
+            indent: 1,
+            kind: DebugRowKind::Variable {
+                reference: 0,
+                expandable: false,
+                expanded: false,
+                name: name.to_string(),
+                value: String::from("1"),
+                type_name: String::from("int"),
+                evaluate_name: Some(name.to_string()),
+            },
+        };
+        let rows = |names: &[&str]| -> Vec<DebugRow> {
+            std::iter::once(header.clone())
+                .chain(names.iter().map(|n| var(n)))
+                .collect()
+        };
+        let name_at = |panel: &RunDebugPanel, y| {
+            panel
+                .debug_row_at(y)
+                .map(|i| match &panel.debug_rows[i].kind {
+                    DebugRowKind::Variable { name, .. } => name.clone(),
+                    _ => String::from("not a variable"),
+                })
+        };
+        let mut panel = RunDebugPanel::new();
+        panel.debug_active = true;
+        panel.replace_rows(rows(&["v0", "v1", "v2", "v3"]));
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 40,
+            height: 16,
+        };
+        Widget::render(&mut panel, area, &mut Buffer::empty(area));
+        let y = (panel.last_debug_row_y0..area.height)
+            .find(|&y| name_at(&panel, y).as_deref() == Some("v2"))
+            .expect("v2 is drawn");
+
+        panel.replace_rows(rows(&["w", "v0", "v1", "v2", "v3"]));
+        assert_eq!(
+            name_at(&panel, y).as_deref(),
+            Some("v2"),
+            "the row drawn there, a row down now, not v1"
+        );
+        panel.replace_rows(rows(&["w", "v0", "v1", "v3"]));
+        assert_eq!(
+            name_at(&panel, y),
+            None,
+            "v2 is gone, so the click meets none"
+        );
+    }
+
     fn buffer_to_string(buf: &Buffer) -> String {
         let mut out = String::new();
         for y in 0..buf.area.height {
@@ -2235,10 +2912,10 @@ mod tests {
         assert!(dump.contains("a.rs:3"), "first row:\n{dump}");
         assert!(dump.contains("b.rs:9 if x > 1"), "detail shown:\n{dump}");
         assert_eq!(panel.breakpoint_row_rects.len(), 2);
-        let (y, idx) = panel.breakpoint_row_rects[1];
+        let (y, idx, _) = panel.breakpoint_row_rects[1].clone();
         assert_eq!(idx, 1);
         assert_eq!(panel.breakpoint_at(3, y), Some((1, false)), "a row click");
-        let (ry, rx, ridx) = panel.breakpoint_remove_rects[0];
+        let (ry, rx, ridx, _) = panel.breakpoint_remove_rects[0].clone();
         assert_eq!(panel.breakpoint_at(rx, ry), Some((ridx, true)), "the ✕");
         assert_eq!(panel.breakpoint_at(3, y + 10), None);
     }
@@ -2316,10 +2993,11 @@ mod tests {
         // Every watch row recorded a remove ✕ at the right edge, mapped by
         // render order.
         assert_eq!(panel.watch_remove_rects.len(), 3);
-        let (y, x, idx) = panel.watch_remove_rects[1];
+        let watches = ["t", "self.missing", "len(cart)"].map(String::from);
+        let (y, x, idx, _) = panel.watch_remove_rects[1].clone();
         assert_eq!(idx, 1, "the second watch row maps to index 1");
-        assert_eq!(panel.watch_remove_at(x, y), Some(1));
-        assert_eq!(panel.watch_remove_at(x, y + 5), None);
+        assert_eq!(panel.watch_remove_at(x, y, &watches), Some(1));
+        assert_eq!(panel.watch_remove_at(x, y + 5, &watches), None);
 
         // Scrolled: the header and the first watch row are skipped. The
         // first VISIBLE watch row must still map to expression index 1 —
@@ -2328,11 +3006,51 @@ mod tests {
         panel.debug_scroll = 2;
         let mut buf = Buffer::empty(area);
         Widget::render(&mut panel, area, &mut buf);
-        let (y, x, idx) = panel.watch_remove_rects[0];
+        let (y, x, idx, _) = panel.watch_remove_rects[0].clone();
         assert_eq!(
             idx, 1,
             "after scrolling past the first watch row, the first visible one keeps its true index"
         );
-        assert_eq!(panel.watch_remove_at(x, y), Some(1));
+        assert_eq!(panel.watch_remove_at(x, y, &watches), Some(1));
+    }
+
+    /// #2753: two remove clicks read in one burst: once the first watch is
+    /// gone, the second `✕` still removes the watch it was drawn for, now
+    /// one place up, and the first `✕` meets nothing.
+    #[test]
+    fn a_remove_click_after_another_meets_the_drawn_watch() {
+        let watch = |index: usize, expression: &str| DebugRow {
+            indent: 1,
+            kind: DebugRowKind::Watch {
+                index,
+                expression: expression.into(),
+                value: "1".into(),
+                available: true,
+                changed: false,
+                pending: false,
+            },
+        };
+        let mut panel = RunDebugPanel::new();
+        panel.debug_active = true;
+        panel.debug_rows = vec![watch(0, "a"), watch(1, "b"), watch(2, "c")];
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 44,
+            height: 20,
+        };
+        Widget::render(&mut panel, area, &mut Buffer::empty(area));
+        let cell = |i: usize| {
+            let (y, x, ..) = panel.watch_remove_rects[i];
+            (x, y)
+        };
+        let ((ax, ay), (bx, by)) = (cell(0), cell(1));
+        let after_a = ["b", "c"].map(String::from);
+        assert_eq!(
+            panel.watch_remove_at(bx, by, &after_a),
+            Some(0),
+            "b, now first, not c"
+        );
+        assert_eq!(panel.watch_remove_at(ax, ay, &after_a), None, "a is gone");
     }
 }

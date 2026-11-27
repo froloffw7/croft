@@ -5,6 +5,54 @@
 use super::*;
 use crate::widgets::confirm_frame::{ConfirmFrame, Inset, draw_confirm, yes_no_keys};
 use crate::widgets::picker_rows::{PickerMouse, answer_mouse};
+use crate::widgets::source_control::{CardButton, KeyStop};
+
+/// The *Git: … Changes* commands that act on one file (#871).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum GitFileCommand {
+    Open,
+    Stage,
+    Unstage,
+    Discard,
+}
+
+/// A *Git: … Changes* command run on the open file, waiting on its own
+/// read of the repository's changes (#871): Source Control's list is only
+/// kept fresh while the view is open, so the command never trusts it.
+pub(super) struct GitFileLookup {
+    command: GitFileCommand,
+    /// The open file, as the editor names it.
+    path: PathBuf,
+    /// The workspace folder whose repository was read: the reply is
+    /// dropped when Source Control has moved to another one meanwhile.
+    folder: PathBuf,
+    job: crate::jobs::Job<(crate::git::GitStatus, Vec<crate::git::ChangeEntry>)>,
+}
+
+impl GitFileCommand {
+    /// The change list's own key for it, which is its shortcut.
+    fn key(self) -> KeyCode {
+        match self {
+            GitFileCommand::Open => KeyCode::Enter,
+            GitFileCommand::Stage => KeyCode::Char('s'),
+            GitFileCommand::Unstage => KeyCode::Char('u'),
+            GitFileCommand::Discard => KeyCode::Char('d'),
+        }
+    }
+}
+
+/// Source Control's `⋯` menu laid out (#871): its rows and top column, and
+/// the open fly-out's rows and column.
+pub(super) struct ScmMenuLayout {
+    /// Which plain panel the top column is.
+    pub(super) panel: crate::widgets::scm_menu::Panel,
+    pub(super) rows: Vec<crate::widgets::scm_menu::Row>,
+    pub(super) top: crate::widgets::scm_menu::Column,
+    pub(super) fly_out: Option<(
+        Vec<crate::widgets::scm_menu::Row>,
+        crate::widgets::scm_menu::Column,
+    )>,
+}
 
 /// How many commits the history scrubber loads up front (#371).
 ///
@@ -368,7 +416,9 @@ impl App {
         let w = self.git_worker_for_root_mut(&active);
         w.bypass_debounce();
         w.request_status_and_changes();
-        let status = self.git_worker_for_root(&active).status().clone();
+        let worker = self.git_worker_for_root(&active);
+        let (status, known) = (worker.status().clone(), worker.reported());
+        self.source_control.status_known = known;
         self.source_control.set_status(status, Vec::new());
         self.refresh_scm_repositories();
         self.refresh_commit_graph();
@@ -430,7 +480,7 @@ impl App {
     /// the focus sync, and the seed (active-highlight moves with a row
     /// click). Empty — section hidden — with one folder.
     pub(super) fn refresh_scm_repositories(&mut self) {
-        self.source_control.repositories = if self.roots.is_multi() {
+        let rows = if self.roots.is_multi() {
             let roots: Vec<PathBuf> = self.roots.iter().map(Path::to_path_buf).collect();
             let labels = crate::workspace::root_display_labels(&roots);
             roots
@@ -453,6 +503,7 @@ impl App {
         } else {
             Vec::new()
         };
+        self.source_control.set_repositories(rows);
     }
 
     /// Let the ACTIVE repo's next debounced refresh through immediately —
@@ -683,150 +734,6 @@ impl App {
             self.hover_anchor.unwrap_or((0, 0)),
         ));
         true
-    }
-
-    pub(super) fn render_commit_dropdown(&mut self, frame: &mut ratatui::Frame) {
-        use crate::widgets::source_control::CommitMenuItem;
-        // The dropdown belongs to the Source Control view only. Gate on it
-        // so a stale `commit_menu_open` flag can never paint the menu over
-        // another sidebar view (e.g. Run-Debug) after a view switch.
-        if !self.commit_menu_open || self.sidebar_view != SidebarView::SourceControl {
-            self.source_control.commit_menu_item_areas.clear();
-            return;
-        }
-        let caret = self.source_control.last_commit_caret_area;
-        let main = self.source_control.last_button_area;
-        if caret.width == 0 || main.width == 0 {
-            return;
-        }
-        let default_branch = self
-            .default_branch_label
-            .clone()
-            .unwrap_or_else(|| "default".to_string());
-        let items: Vec<(CommitMenuItem, String)> = CommitMenuItem::ALL
-            .iter()
-            .map(|item| (*item, item.label(&default_branch)))
-            .collect();
-        // Row layout: [pad][icon][gap][label][pad]. The icon occupies one
-        // cell at item_x+1; the label starts two cells later at item_x+3.
-        const ICON_PAD: u16 = 3;
-        let label_w = items
-            .iter()
-            .map(|(_, l)| l.chars().count() as u16 + ICON_PAD + 1)
-            .max()
-            .unwrap_or(0);
-        let item_w: u16 = label_w.max(caret.width);
-        let item_x = (caret.x + caret.width).saturating_sub(item_w).max(main.x);
-        let item_y_top = caret.y + caret.height;
-        self.source_control.commit_menu_item_areas.clear();
-        if let Some(t) = crate::widgets::surface::tones(self.theme) {
-            // A raised card with the accent lip, one row taller above and
-            // below than the rows, whose rim falls on the rows' pad cells:
-            // each hit rect is still the row drawn. Icons rest muted; the
-            // row under the pointer lifts, its icon and label with it.
-            let card = Rect {
-                x: item_x,
-                y: item_y_top,
-                width: item_w,
-                height: items.len() as u16 + 2,
-            }
-            .intersection(frame.area());
-            if card.width < 3 || card.height < 3 {
-                return;
-            }
-            let pointer = self.pointer_cell;
-            let buf = frame.buffer_mut();
-            ratatui::widgets::Widget::render(ratatui::widgets::Clear, card, buf);
-            buf.set_style(card, Style::default().bg(t.raised()));
-            crate::widgets::surface::paint_overlay_frame(buf, card, self.theme);
-            for (i, (item, label)) in items.into_iter().enumerate() {
-                let row_y = card.y + 1 + i as u16;
-                if row_y + 1 >= card.bottom() {
-                    break;
-                }
-                let row_rect = Rect::new(card.x, row_y, card.width, 1);
-                let lit = crate::widgets::hover::contains(row_rect, pointer);
-                if lit {
-                    let inner = Rect::new(card.x + 1, row_y, card.width - 2, 1);
-                    buf.set_style(inner, Style::default().bg(t.hover_on(t.raised)));
-                }
-                let (icon_fg, ink) = if lit {
-                    (t.text(), t.strong())
-                } else {
-                    (t.muted(), t.text())
-                };
-                buf.set_string(
-                    card.x + 1,
-                    row_y,
-                    item.icon().to_string(),
-                    Style::default().fg(icon_fg),
-                );
-                buf.set_stringn(
-                    card.x + 3,
-                    row_y,
-                    &label,
-                    usize::from(card.width.saturating_sub(4)),
-                    Style::default().fg(ink),
-                );
-                self.source_control
-                    .commit_menu_item_areas
-                    .push((row_rect, item));
-            }
-            return;
-        }
-        let menu_rect = Rect {
-            x: item_x,
-            y: item_y_top,
-            width: item_w,
-            height: items.len() as u16,
-        };
-        let bg = self.theme.ui(Color::Rgb(0x25, 0x2b, 0x37));
-        let fg = self.theme.ui(Color::White);
-        let style = Style::default().fg(fg).bg(bg);
-        frame.render_widget(ratatui::widgets::Clear, menu_rect);
-        for (i, (item, label)) in items.into_iter().enumerate() {
-            let row_y = item_y_top + i as u16;
-            let row_rect = Rect {
-                x: item_x,
-                y: row_y,
-                width: item_w,
-                height: 1,
-            };
-            for rx in 0..row_rect.width {
-                frame.buffer_mut()[(row_rect.x + rx, row_rect.y)]
-                    .set_symbol(" ")
-                    .set_style(style);
-            }
-            // Leading codicon, colored per action: push glyphs in blue,
-            // diff/compare glyphs in purple, mirroring VS Code's SCM accents.
-            let icon_color = match item {
-                CommitMenuItem::CommitAndPush => self.theme.ui(Color::Rgb(0x9a, 0xa4, 0xb2)),
-                CommitMenuItem::Push | CommitMenuItem::Pull | CommitMenuItem::Sync => {
-                    self.theme.ui(Color::Rgb(0x6c, 0xb6, 0xff))
-                }
-                CommitMenuItem::CheckoutBranch => self.theme.ui(Color::Rgb(0x88, 0xc0, 0xd0)),
-                CommitMenuItem::Stash | CommitMenuItem::StashPop => {
-                    self.theme.ui(Color::Rgb(0xeb, 0xcb, 0x8b))
-                }
-                CommitMenuItem::ViewStagedDiff
-                | CommitMenuItem::ViewPreviousCommitDiff
-                | CommitMenuItem::ViewDefaultBranchDiff => {
-                    self.theme.ui(Color::Rgb(0xc0, 0xa4, 0xf5))
-                }
-            };
-            frame.buffer_mut().set_string(
-                row_rect.x + 1,
-                row_rect.y,
-                item.icon().to_string(),
-                Style::default().fg(icon_color).bg(bg),
-            );
-            frame
-                .buffer_mut()
-                .set_string(row_rect.x + 3, row_rect.y, &label, style);
-            self.source_control
-                .commit_menu_item_areas
-                .push((row_rect, item));
-        }
     }
 
     pub(super) fn dispatch_commit_menu_item(
@@ -1069,9 +976,13 @@ impl App {
             self.stage_selected_source_control_entries();
             return;
         }
-        if self.source_control.list_focused {
-            self.handle_source_control_list_key(key);
-            return;
+        self.source_control.settle_keys();
+        match self.source_control.keys {
+            KeyStop::Repositories => return self.handle_repositories_key(key),
+            KeyStop::Commits => return self.handle_commit_graph_key(key),
+            KeyStop::List => return self.handle_source_control_list_key(key),
+            KeyStop::Card => return self.handle_card_key(key),
+            KeyStop::Message => {}
         }
         if is_clipboard_paste_key(key) {
             if let Some(text) = self.clipboard_text() {
@@ -1132,9 +1043,11 @@ impl App {
                     self.source_control.scroll_down(1);
                 }
             }
-            KeyCode::Tab => {
-                self.source_control.focus_list();
-            }
+            // Tab steps to the change list, or past an empty one to COMMITS
+            // (#871), so a clean repository still reaches its history;
+            // Shift+Tab goes back up to REPOSITORIES, or round to COMMITS.
+            KeyCode::Tab => self.step_source_control_keys(true),
+            KeyCode::BackTab => self.step_source_control_keys(false),
             // Shift/Alt+Enter start a new message line (the commit body),
             // VS Code's multi-line SCM input; plain Enter commits.
             KeyCode::Enter
@@ -1176,8 +1089,16 @@ impl App {
             .is_some_and(|e| e.kind.section() == crate::git::ChangeSection::Staged);
         let sc = &mut self.source_control;
         match (key.code, selected) {
-            (KeyCode::Tab | KeyCode::BackTab, _) => sc.list_focused = false,
-            (KeyCode::Up, _) => sc.list_focused = sc.move_selection(true),
+            // Source Control's Tab stops, in VS Code's order (#871): the
+            // message box, the change list, COMMITS, and round again.
+            (KeyCode::BackTab, _) => self.step_source_control_keys(false),
+            (KeyCode::Tab, _) => self.step_source_control_keys(true),
+            (KeyCode::Char('r'), _) => self.refresh_source_control_from_key(),
+            (KeyCode::Up, _) => {
+                if !sc.move_selection(true) {
+                    sc.keys = KeyStop::Message;
+                }
+            }
             (KeyCode::Down, _) => {
                 sc.move_selection(false);
             }
@@ -1189,6 +1110,366 @@ impl App {
             (KeyCode::Backspace | KeyCode::Delete | KeyCode::Char('d'), Some(idx)) => {
                 self.request_discard_source_control_entry(idx)
             }
+            _ => {}
+        }
+    }
+
+    /// *Git: Open Changes*, *Stage Changes*, *Unstage Changes* and *Discard
+    /// Changes* (#871). While Source Control's change list has the keys they
+    /// do what its own `Enter`, `S`, `U` and `D` do to the selected row,
+    /// which are their shortcuts; anywhere else they act on the open file
+    /// (a diff tab's file), as VS Code's do, once a fresh read of the
+    /// repository's changes lands ([`Self::drain_git_file_lookup`]). A file
+    /// with a row in each section gives Unstage its Staged row and the
+    /// others its Changes row.
+    pub(super) fn git_file_command(&mut self, command: GitFileCommand) {
+        if self.focus == Pane::Tree
+            && self.sidebar_view == SidebarView::SourceControl
+            && self.source_control.keys == KeyStop::List
+        {
+            let key = KeyEvent::new(command.key(), KeyModifiers::NONE);
+            self.handle_source_control_list_key(key);
+            return;
+        }
+        let Some(path) = self.open_file_path() else {
+            self.status = String::from("No file is open");
+            return;
+        };
+        let folder = self.active_scm_root.clone();
+        // One at a time, in the order they were run: each reads the changes
+        // after the one before it has acted, so Stage then Unstage sees
+        // what Stage staged. Every command joins the back of the line, and
+        // the line starts its head, so a command run while an earlier one
+        // waits (behind a discard's question, say) never jumps ahead of it.
+        self.git_file_queue.push_back((command, path, folder));
+        self.start_next_git_file_command();
+    }
+
+    /// Read `folder`'s repository's changes off the UI thread for
+    /// `command` on `path`; [`Self::drain_git_file_lookup`] finishes it.
+    fn start_git_file_lookup(&mut self, command: GitFileCommand, path: PathBuf, folder: PathBuf) {
+        let root = self
+            .git_worker_for_root(&folder)
+            .status()
+            .repo_root
+            .clone()
+            .unwrap_or_else(|| folder.clone());
+        let job = crate::jobs::Job::spawn("git-file-command", crate::jobs::Start::Now, move || {
+            (crate::git::query(&root), crate::git::query_changes(&root))
+        });
+        match job {
+            Ok(job) => {
+                self.status = String::from("Git: reading changes\u{2026}");
+                self.git_file_lookup = Some(GitFileLookup {
+                    command,
+                    path,
+                    folder,
+                    job,
+                });
+            }
+            Err(e) => self.status = format!("Could not read the changes: {e}"),
+        }
+    }
+
+    /// The file the open tab shows: a diff tab's file, the old side of a
+    /// deletion (whose new side is `/dev/null`), else the editor's file. A
+    /// deletion's view names its file relative to the repository.
+    fn open_file_path(&self) -> Option<PathBuf> {
+        let diff_file = self.editor.diff.as_ref().map(|d| {
+            if d.right_path == Path::new("/dev/null") {
+                d.left_path.clone()
+            } else {
+                d.right_path.clone()
+            }
+        });
+        let path = diff_file.or_else(|| self.editor.path.clone())?;
+        Some(if path.is_relative() {
+            self.scm_root().join(path)
+        } else {
+            path
+        })
+    }
+
+    /// Finish a *Git: … Changes* command once its read of the changes has
+    /// landed: show the fresh list and act on the open file's row. True
+    /// when something changed on screen.
+    pub(super) fn drain_git_file_lookup(&mut self) -> bool {
+        // A discard asking first holds every command: one whose read is in
+        // flight goes back to the front of the line and reads again once
+        // the question is answered, so it neither replaces the file the
+        // question is about nor acts behind it on what the read saw before
+        // the answer.
+        if self.pending_discard.is_some() {
+            if let Some(lookup) = self.git_file_lookup.take() {
+                self.git_file_queue
+                    .push_front((lookup.command, lookup.path, lookup.folder));
+            }
+            return false;
+        }
+        let started = self.start_next_git_file_command();
+        let reply = match self.git_file_lookup.as_ref().map(|l| l.job.poll()) {
+            None | Some(crate::jobs::Poll::Pending) => return started,
+            Some(crate::jobs::Poll::Done(reply)) => Some(reply),
+            // Its thread crashed, and the crash notice said so.
+            Some(crate::jobs::Poll::Died) => None,
+        };
+        let Some(lookup) = self.git_file_lookup.take() else {
+            return started;
+        };
+        self.finish_git_file_lookup(lookup, reply);
+        self.start_next_git_file_command();
+        true
+    }
+
+    /// Start the next waiting *Git: … Changes* command, unless one is still
+    /// reading or a discard is asking first: a command that ran meanwhile
+    /// would act behind the question, and a second Discard would replace
+    /// the file the open question is about. The queue moves on once the
+    /// question is answered either way. True when one started.
+    fn start_next_git_file_command(&mut self) -> bool {
+        if self.git_file_lookup.is_some() || self.pending_discard.is_some() {
+            return false;
+        }
+        let Some((command, path, folder)) = self.git_file_queue.pop_front() else {
+            return false;
+        };
+        self.start_git_file_lookup(command, path, folder);
+        true
+    }
+
+    /// Act on the open file's row in the changes `reply` read, against the
+    /// repository root that read found: before git's first status lands the
+    /// app's own idea of the root is the workspace folder, which for a
+    /// folder inside a repository is not where git's paths start.
+    fn finish_git_file_lookup(
+        &mut self,
+        lookup: GitFileLookup,
+        reply: Option<(crate::git::GitStatus, Vec<crate::git::ChangeEntry>)>,
+    ) {
+        let Some((status, entries)) = reply else {
+            self.status = String::from("Could not read the changes");
+            return;
+        };
+        if lookup.folder != self.active_scm_root {
+            self.status =
+                String::from("Git: cancelled: Source Control moved to another repository");
+            return;
+        }
+        let root = status.repo_root.clone().unwrap_or(lookup.folder);
+        let Some(rel) = relative_to_repo(&lookup.path, &root) else {
+            self.status = format!("{} is outside the repository", lookup.path.display());
+            return;
+        };
+        self.source_control.set_status(status, entries);
+        let Some(idx) = self.change_row_for(lookup.command, &rel) else {
+            return;
+        };
+        match lookup.command {
+            GitFileCommand::Open => self.open_source_control_entry_in(&root, idx),
+            GitFileCommand::Stage => self.stage_source_control_entry_in(&root, idx),
+            GitFileCommand::Unstage => self.unstage_source_control_entry_in(&root, idx),
+            GitFileCommand::Discard => self.request_discard_source_control_entry_in(&root, idx),
+        }
+    }
+
+    /// The change list's row for `rel` that `command` acts on, or `None`
+    /// with the status line saying why.
+    fn change_row_for(&mut self, command: GitFileCommand, rel: &str) -> Option<usize> {
+        use crate::git::ChangeSection;
+        let rows: Vec<(usize, bool)> = self
+            .source_control
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.path == rel)
+            .map(|(i, e)| (i, e.kind.section() == ChangeSection::Staged))
+            .collect();
+        let staged = rows.iter().find(|(_, staged)| *staged).map(|(i, _)| *i);
+        let changed = rows.iter().find(|(_, staged)| !*staged).map(|(i, _)| *i);
+        let row = match command {
+            GitFileCommand::Unstage => staged,
+            GitFileCommand::Stage => changed,
+            GitFileCommand::Open | GitFileCommand::Discard => changed.or(staged),
+        };
+        if row.is_none() {
+            self.status = match (command, rows.is_empty()) {
+                (_, true) => format!("No changes in {rel}"),
+                (GitFileCommand::Unstage, false) => format!("No staged changes in {rel}"),
+                _ => format!("No unstaged changes in {rel}"),
+            };
+        }
+        row
+    }
+
+    /// Tab (`forward`) or Shift+Tab in Source Control (#871): the keys go
+    /// to the next of the view's stops on screen, in VS Code's order
+    /// (REPOSITORIES, the message box, the change list, COMMITS; or with no
+    /// repository, REPOSITORIES and the card's buttons), round again past
+    /// either end.
+    pub(super) fn step_source_control_keys(&mut self, forward: bool) {
+        match self.source_control.next_stop(forward) {
+            KeyStop::Repositories => self.source_control.focus_repositories(),
+            KeyStop::Message => self.source_control.keys = KeyStop::Message,
+            KeyStop::List => {
+                self.source_control.focus_list();
+            }
+            KeyStop::Commits => self.focus_commit_graph(),
+            KeyStop::Card => self.source_control.focus_card(forward),
+        }
+    }
+
+    /// Show the repository of workspace folder `root` in Source Control,
+    /// pinned there (#161) until the focus next crosses folders: what a
+    /// click on its REPOSITORIES row, or Enter on it, does.
+    pub(super) fn pin_scm_repository(&mut self, root: PathBuf) {
+        self.scm_pin = Some(root.clone());
+        self.seed_active_scm(root);
+    }
+
+    /// A key while REPOSITORIES has the keys (#871): the arrows, Home and
+    /// End move its keyboard row, Enter or Space shows that row's
+    /// repository, R refreshes, and Tab / Shift+Tab go on to the message
+    /// box (or the card) / back round to COMMITS.
+    pub(super) fn handle_repositories_key(&mut self, key: KeyEvent) {
+        if key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
+        {
+            return;
+        }
+        let sc = &mut self.source_control;
+        match key.code {
+            KeyCode::Tab => self.step_source_control_keys(true),
+            KeyCode::BackTab => self.step_source_control_keys(false),
+            KeyCode::Up => sc.move_repo_cursor(-1),
+            KeyCode::Down => sc.move_repo_cursor(1),
+            KeyCode::Home => sc.repo_cursor = 0,
+            KeyCode::End => sc.move_repo_cursor(isize::MAX),
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                if let Some(root) = sc.repo_under_cursor().map(|r| r.workspace_root.clone()) {
+                    self.pin_scm_repository(root);
+                }
+            }
+            KeyCode::Char('r' | 'R') => self.refresh_source_control_from_key(),
+            _ => {}
+        }
+    }
+
+    /// A key while the no-repository card has the keys (#871): Tab and
+    /// Shift+Tab walk its buttons and then go on round the view, Up and
+    /// Down walk the buttons, Enter or Space presses the one with the
+    /// keys, and R refreshes.
+    pub(super) fn handle_card_key(&mut self, key: KeyEvent) {
+        if key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
+        {
+            return;
+        }
+        let sc = &mut self.source_control;
+        match key.code {
+            KeyCode::Tab => {
+                if !sc.move_card_button(true) {
+                    self.step_source_control_keys(true);
+                }
+            }
+            KeyCode::BackTab => {
+                if !sc.move_card_button(false) {
+                    self.step_source_control_keys(false);
+                }
+            }
+            KeyCode::Up => {
+                sc.move_card_button(false);
+            }
+            KeyCode::Down => {
+                sc.move_card_button(true);
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => match sc.keyed_card_button() {
+                Some(CardButton::Initialize) => self.initialize_repository(),
+                Some(CardButton::Open(repo)) => self.change_workspace_root(repo),
+                None => {}
+            },
+            KeyCode::Char('r' | 'R') => self.refresh_source_control_from_key(),
+            _ => {}
+        }
+    }
+
+    /// Git: Initialize Repository from the Command Palette (#871): what the
+    /// no-repository card's button does, which itself refuses a folder
+    /// inside a repository. In one whose subfolders are repositories (where
+    /// the card offers only their Open, as `git init` would wrap them), a
+    /// line says why not.
+    pub(super) fn initialize_repository_command(&mut self) {
+        let folder = self.active_scm_root.clone();
+        if !crate::git::child_repos(&folder).is_empty() {
+            self.status = format!(
+                "{} holds repositories in its subfolders: open one from Source Control",
+                folder.display()
+            );
+            return;
+        }
+        self.initialize_repository();
+    }
+
+    /// COMMITS takes the keys (#871), its first row picked when none is.
+    pub(super) fn focus_commit_graph(&mut self) {
+        self.source_control.keys = KeyStop::Commits;
+        if self.commit_graph.selected_commit().is_none() {
+            self.commit_graph.select(0);
+        }
+    }
+
+    /// Git: Refresh (`R` in Source Control's lists, #871): what the header's
+    /// refresh button does.
+    pub(super) fn refresh_source_control_from_key(&mut self) {
+        self.refresh_source_control();
+        self.status = String::from("Refreshed Source Control");
+    }
+
+    /// A key while COMMITS has the keys (#871): the arrows, Home / End and
+    /// PageUp / PageDown pick a commit, Enter opens its changes, Left and
+    /// Right collapse and expand the section, R refreshes, and Tab /
+    /// Shift+Tab go on to the message box / back to the change list.
+    pub(super) fn handle_commit_graph_key(&mut self, key: KeyEvent) {
+        if key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
+        {
+            return;
+        }
+        let graph = &mut self.commit_graph;
+        let open = !graph.collapsed;
+        match key.code {
+            // On round to REPOSITORIES or the message box; back to the
+            // change list, or past an empty one to the message box.
+            KeyCode::Tab => self.step_source_control_keys(true),
+            KeyCode::BackTab => self.step_source_control_keys(false),
+            KeyCode::Up if open => graph.move_selection(-1),
+            KeyCode::Down if open => graph.move_selection(1),
+            KeyCode::PageUp if open => {
+                let page = graph.page() as isize;
+                graph.move_selection(-page);
+            }
+            KeyCode::PageDown if open => {
+                let page = graph.page() as isize;
+                graph.move_selection(page);
+            }
+            KeyCode::Home if open => graph.select(0),
+            KeyCode::End if open => {
+                let last = graph.last_row();
+                graph.select(last);
+            }
+            KeyCode::Left if open => graph.toggle_collapse(),
+            KeyCode::Right if !open => graph.toggle_collapse(),
+            KeyCode::Enter if open => {
+                if let Some((hash, short)) = graph
+                    .selected_commit()
+                    .map(|c| (c.hash.clone(), c.short_hash.clone()))
+                {
+                    self.open_commit_patch(&hash, &short);
+                }
+            }
+            KeyCode::Char('r' | 'R') => self.refresh_source_control_from_key(),
             _ => {}
         }
     }
@@ -1296,6 +1577,13 @@ impl App {
     /// (Deleted). Selection state on the panel updates so the user can
     /// see which entry the editor is bound to.
     pub fn open_source_control_entry(&mut self, entry_idx: usize) {
+        let root = self.scm_root();
+        self.open_source_control_entry_in(&root, entry_idx);
+    }
+
+    /// [`Self::open_source_control_entry`] for the repository at
+    /// `scm_root`.
+    pub(super) fn open_source_control_entry_in(&mut self, scm_root: &Path, entry_idx: usize) {
         use crate::git::ChangeKind;
         let Some(entry) = self.source_control.entries.get(entry_idx).cloned() else {
             return;
@@ -1303,7 +1591,6 @@ impl App {
         self.source_control.selected_change = Some(entry_idx);
         // Porcelain paths are toplevel-relative (#139): join and HEAD-read
         // against the repo root, never the workspace root.
-        let scm_root = self.scm_root();
         let abs = scm_root.join(&entry.path);
         let opened = match entry.kind {
             // A conflicted entry opens the three-way MERGE EDITOR (#253)
@@ -1344,9 +1631,9 @@ impl App {
             // HEAD:lib` is "bad object"): show what moved in it, read-only,
             // the way a commit's patch opens (#1235).
             ChangeKind::Modified | ChangeKind::StagedModified
-                if crate::git::is_submodule(&scm_root, &entry.path) =>
+                if crate::git::is_submodule(scm_root, &entry.path) =>
             {
-                match crate::git::submodule_diff(&scm_root, &entry.path) {
+                match crate::git::submodule_diff(scm_root, &entry.path) {
                     Ok(text) => {
                         let label = format!("{} (submodule)", entry.path);
                         match self.editor.open_text_buffer(Path::new(&label), &text) {
@@ -1371,7 +1658,7 @@ impl App {
                 // so a windows-1252 or UTF-16 file diffs too (#1242).
                 let enc = self.open_tab_encoding(&abs);
                 let texts =
-                    crate::git::read_bytes_at_head(&scm_root, &entry.path).and_then(|head| {
+                    crate::git::read_bytes_at_head(scm_root, &entry.path).and_then(|head| {
                         let working = std::fs::read(&abs).map_err(|e| e.to_string())?;
                         let decode = |b: &[u8]| crate::widgets::editor::decode_blob(b, enc);
                         decode(&head)
@@ -1428,7 +1715,7 @@ impl App {
                 // blob as a one-sided unified diff so every removed
                 // line is visible in red, matching `git diff` output
                 // for a deletion.
-                match crate::git::read_file_at_head(&scm_root, &entry.path) {
+                match crate::git::read_file_at_head(scm_root, &entry.path) {
                     Ok(head_text) => {
                         let label = std::path::PathBuf::from(&entry.path);
                         match self.editor.open_deleted_diff_with_text(&label, &head_text) {
@@ -1466,18 +1753,32 @@ impl App {
         }
     }
 
+    /// The card's Initialize Repository: `git init` in the folder Source
+    /// Control shows, which with several folders open is the focused
+    /// file's, not the first (#2734).
     pub(super) fn initialize_repository(&mut self) {
+        let folder = self.active_scm_root.clone();
+        // Asked of git itself, right before acting: Source Control's own
+        // status may not have arrived yet, or be the last folder's, and
+        // `git init` inside a repository nests a new one in it (#871).
+        let inside = crate::proc::command("git")
+            .arg("-C")
+            .arg(&folder)
+            .args(["rev-parse", "--is-inside-work-tree"])
+            .output()
+            .is_ok_and(|out| out.status.success());
+        if inside {
+            self.status = format!("{} is already in a Git repository", folder.display());
+            return;
+        }
         match crate::proc::command("git")
             .arg("-C")
-            .arg(&self.tree.root)
+            .arg(&folder)
             .arg("init")
             .output()
         {
             Ok(out) if out.status.success() => {
-                self.status = format!(
-                    "Initialized empty Git repository in {}",
-                    self.tree.root.display()
-                );
+                self.status = format!("Initialized empty Git repository in {}", folder.display());
                 self.active_git_bypass_debounce();
                 self.refresh_git_status_debounced();
                 self.refresh_source_control();
@@ -1829,13 +2130,19 @@ impl App {
     /// Unstage a single entry by index (the inline "−" icon on a staged
     /// row). Mirror of `stage_source_control_entry`.
     pub fn unstage_source_control_entry(&mut self, entry_idx: usize) {
+        let root = self.scm_root();
+        self.unstage_source_control_entry_in(&root, entry_idx);
+    }
+
+    /// [`Self::unstage_source_control_entry`] in the repository at `root`.
+    pub(super) fn unstage_source_control_entry_in(&mut self, root: &Path, entry_idx: usize) {
         if self.repo_git_busy() {
             return;
         }
         let Some(entry) = self.source_control.entries.get(entry_idx).cloned() else {
             return;
         };
-        match crate::git::unstage_path(&self.scm_root(), &entry.path) {
+        match crate::git::unstage_path(root, &entry.path) {
             Ok(()) => {
                 self.status = format!("Unstaged {}", entry.path);
                 self.active_git_bypass_debounce();
@@ -2565,7 +2872,7 @@ impl App {
         use crate::widgets::input_prompt::{InputPrompt, InputPurpose};
         use crate::widgets::list_picker::ListPurpose;
         use crate::widgets::scm_menu::ScmAction;
-        self.scm_menu.close();
+        self.close_scm_menus();
         // Nothing else touches the repository while a push, pull or fetch
         // runs in the background: a commit or branch switch under it fights
         // over `index.lock`, and a pull would land on the switched branch.
@@ -3099,13 +3406,19 @@ impl App {
     }
 
     pub fn stage_source_control_entry(&mut self, entry_idx: usize) {
+        let root = self.scm_root();
+        self.stage_source_control_entry_in(&root, entry_idx);
+    }
+
+    /// [`Self::stage_source_control_entry`] in the repository at `root`.
+    pub(super) fn stage_source_control_entry_in(&mut self, root: &Path, entry_idx: usize) {
         if self.repo_git_busy() {
             return;
         }
         let Some(entry) = self.source_control.entries.get(entry_idx).cloned() else {
             return;
         };
-        match crate::git::stage_path(&self.scm_root(), &entry.path) {
+        match crate::git::stage_path(root, &entry.path) {
             Ok(()) => {
                 self.status = format!("Staged {}", entry.path);
                 self.active_git_bypass_debounce();
@@ -3240,22 +3553,7 @@ impl App {
     /// `repo/sub` sent `x` for `sub/x`, and every hunk action failed or hit
     /// a same-named file at the top level.
     pub(super) fn repo_relative_path(&self, path: &Path) -> Option<String> {
-        let root = self.scm_root();
-        let rel = match path.strip_prefix(&root) {
-            Ok(rel) => rel.to_path_buf(),
-            Err(_) => path
-                .canonicalize()
-                .ok()?
-                .strip_prefix(root.canonicalize().ok()?)
-                .ok()?
-                .to_path_buf(),
-        };
-        Some(
-            rel.components()
-                .map(|c| c.as_os_str().to_string_lossy())
-                .collect::<Vec<_>>()
-                .join("/"),
-        )
+        relative_to_repo(path, &self.scm_root())
     }
 
     /// Stage only the hunk under the diff caret (`git apply --cached`).
@@ -3370,6 +3668,17 @@ impl App {
     }
 
     pub fn request_discard_source_control_entry(&mut self, entry_idx: usize) {
+        let root = self.scm_root();
+        self.request_discard_source_control_entry_in(&root, entry_idx);
+    }
+
+    /// [`Self::request_discard_source_control_entry`] in the repository at
+    /// `root`, which the confirmed discard then acts in.
+    pub(super) fn request_discard_source_control_entry_in(
+        &mut self,
+        root: &Path,
+        entry_idx: usize,
+    ) {
         use crate::git::ChangeKind;
         let Some(entry) = self.source_control.entries.get(entry_idx).cloned() else {
             return;
@@ -3383,6 +3692,7 @@ impl App {
                 | ChangeKind::StagedRenamed
         );
         self.pending_discard = Some(PendingDiscard {
+            root: root.to_path_buf(),
             rel_path: entry.path,
             untracked,
             staged,
@@ -3393,7 +3703,7 @@ impl App {
         let Some(pd) = self.pending_discard.take() else {
             return;
         };
-        match crate::git::discard_path(&self.scm_root(), &pd.rel_path, pd.untracked, pd.staged) {
+        match crate::git::discard_path(&pd.root, &pd.rel_path, pd.untracked, pd.staged) {
             Ok(()) => {
                 self.status = format!("Discarded {}", pd.rel_path);
                 self.active_git_bypass_debounce();
@@ -3499,7 +3809,7 @@ impl App {
         if self.branch_picker.is_some() {
             return;
         }
-        self.commit_menu_open = false;
+        self.close_scm_menus();
         match crate::git::list_branches(&self.scm_root()) {
             Ok(branches) => {
                 let n = branches.len();
@@ -3791,25 +4101,275 @@ impl App {
         );
     }
 
-    /// Render the Source Control "⋯" actions menu under the header pill.
-    pub(super) fn render_scm_menu(&mut self, frame: &mut ratatui::Frame) {
-        if !self.scm_menu.open || self.sidebar_view != SidebarView::SourceControl {
-            self.scm_menu.close();
-            return;
+    /// Source Control's `⋯` actions menu (#871), opened on the shared menu
+    /// with its own look. A click opens it with no row highlighted, as it
+    /// always has; the keyboard (`keyed`) opens it with its first row
+    /// highlighted. The operation the repository is in leads it (#1356).
+    pub(super) fn open_scm_actions_menu(&mut self, keyed: bool) {
+        let op = crate::git::repo_operation(&self.scm_root());
+        self.open_scm_actions_menu_for(op, keyed);
+    }
+
+    /// Open Source Control's `⋯` menu for a repository in `op`, whose rows
+    /// lead it (#1356).
+    pub(super) fn open_scm_actions_menu_for(
+        &mut self,
+        op: Option<crate::git::RepoOp>,
+        keyed: bool,
+    ) {
+        use crate::widgets::scm_menu::{Node, menu_for};
+        let leaf = |l: &crate::widgets::scm_menu::Leaf| {
+            MenuEntry::item(l.label, MenuAction::Scm(l.action))
+        };
+        let items: Vec<MenuEntry> = menu_for(op)
+            .iter()
+            .map(|node| match node {
+                Node::Item(l) => leaf(l),
+                Node::Sep => MenuEntry::Separator,
+                Node::Sub { label, items, .. } => MenuEntry::Submenu {
+                    label: label.to_string(),
+                    items: items.iter().map(leaf).collect(),
+                },
+            })
+            .collect();
+        let selected = items.iter().position(MenuEntry::is_selectable).unwrap_or(0);
+        self.context_menu = Some(ContextMenu {
+            origin: (0, 0),
+            items,
+            selected,
+            open_submenu: None,
+            submenu_selected: 0,
+            target_dir: self.scm_root(),
+            crumb: None,
+            scroll: Default::default(),
+            submenu_scroll: Default::default(),
+            look: MenuLook::ScmActions { op },
+            keyed,
+        });
+    }
+
+    /// Close Source Control's `⋯` menu or Commit dropdown, when one is the
+    /// menu open: a prompt or picker one of its rows opened takes the keys
+    /// from here on, and neither outlives its view.
+    pub(super) fn close_scm_menus(&mut self) {
+        if self
+            .context_menu
+            .as_ref()
+            .is_some_and(|m| m.look != MenuLook::Panel)
+        {
+            self.context_menu = None;
         }
+    }
+
+    /// The Commit button's `▾` dropdown (#871), opened on the shared menu
+    /// with Source Control's look, under the `▾`. A click opens it with no
+    /// row highlighted; the keyboard (`keyed`) with its first row
+    /// highlighted.
+    pub(super) fn open_commit_actions_menu(&mut self, keyed: bool) {
+        use crate::widgets::source_control::CommitMenuItem;
+        let default_branch = self.default_branch_label.as_deref().unwrap_or("default");
+        let items = CommitMenuItem::ALL
+            .iter()
+            .map(|item| MenuEntry::item(item.label(default_branch), MenuAction::Commit(*item)))
+            .collect();
+        self.context_menu = Some(ContextMenu {
+            origin: (0, 0),
+            items,
+            selected: 0,
+            open_submenu: None,
+            submenu_selected: 0,
+            target_dir: self.scm_root(),
+            crumb: None,
+            scroll: Default::default(),
+            submenu_scroll: Default::default(),
+            look: MenuLook::CommitActions,
+            keyed,
+        });
+    }
+
+    /// Git: Show Commit Actions (Cmd+K Shift+C, #871): the Commit button's
+    /// dropdown from the keyboard, showing Source Control first when it is
+    /// not up.
+    pub(super) fn open_commit_actions_menu_from_keyboard(&mut self) {
+        if self.sidebar_view != SidebarView::SourceControl || !self.show_tree {
+            self.set_sidebar_view(SidebarView::SourceControl);
+        }
+        self.open_commit_actions_menu(true);
+    }
+
+    /// A left click while the Commit dropdown is open, answered as the
+    /// dropdown always answered it: a row runs its action, and a click on
+    /// the `▾` closes it; both are spent here (`true`). Anywhere else closes
+    /// the dropdown and the click goes on to what it lands on (`false`).
+    pub(super) fn click_commit_actions_menu(&mut self, x: u16, y: u16) -> bool {
+        let row = self.scm_menu_layout().and_then(|l| l.top.row_at(x, y));
+        let Some(menu) = self.context_menu.take() else {
+            return false;
+        };
+        if let Some(action) = row
+            .and_then(|i| menu.items.get(i))
+            .and_then(MenuEntry::action)
+            .cloned()
+        {
+            self.dispatch_menu_action(action, menu.target_dir);
+            return true;
+        }
+        self.source_control.click_commit_caret(x, y)
+    }
+
+    /// A left click while Source Control's `⋯` menu is open (#871), answered
+    /// as that menu always answered it: a row of the open fly-out runs its
+    /// action; a fly-out's row in the top column opens that fly-out, or
+    /// closes it when it is the one open; an action's row runs it; anywhere
+    /// else, a separator included, closes the menu.
+    pub(super) fn click_scm_actions_menu(&mut self, x: u16, y: u16) {
+        let Some(layout) = self.scm_menu_layout() else {
+            self.context_menu = None;
+            return;
+        };
+        let Some(menu) = self.context_menu.as_mut() else {
+            return;
+        };
+        let fly_out_hit = layout
+            .fly_out
+            .as_ref()
+            .and_then(|(_, col)| col.row_at(x, y))
+            .zip(menu.open_submenu);
+        let action = if let Some((child, parent)) = fly_out_hit {
+            match menu.items.get(parent) {
+                Some(MenuEntry::Submenu { items, .. }) => {
+                    items.get(child).and_then(MenuEntry::action).cloned()
+                }
+                _ => None,
+            }
+        } else if let Some(row) = layout.top.row_at(x, y) {
+            match menu.items.get(row) {
+                Some(MenuEntry::Item { action, .. }) => Some(action.clone()),
+                Some(MenuEntry::Submenu { .. }) => {
+                    let was_open = menu.open_submenu == Some(row);
+                    menu.close_submenu();
+                    if !was_open {
+                        menu.selected = row;
+                        menu.open_cursor_submenu();
+                    }
+                    return;
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let dir = menu.target_dir.clone();
+        self.context_menu = None;
+        if let Some(action) = action {
+            self.dispatch_menu_action(action, dir);
+        }
+    }
+
+    /// Git: Show Source Control Actions (Cmd+K Shift+A, #871): the `⋯` menu
+    /// from the keyboard, showing Source Control first when it is not up.
+    /// The view already up keeps its focus, in the message box or the list.
+    pub(super) fn open_scm_actions_menu_from_keyboard(&mut self) {
+        if self.sidebar_view != SidebarView::SourceControl || !self.show_tree {
+            self.set_sidebar_view(SidebarView::SourceControl);
+        }
+        self.open_scm_actions_menu(true);
+    }
+
+    /// Source Control's open menu as it is laid out now: the `⋯` menu's top
+    /// column under the header's `⋯` pill with its open fly-out beside its
+    /// row, or the Commit dropdown under the button's `▾`. `None` unless one
+    /// of them is open and what it hangs from is drawn.
+    pub(super) fn scm_menu_layout(&self) -> Option<ScmMenuLayout> {
+        use crate::widgets::scm_menu;
+        let menu = self.context_menu.as_ref()?;
+        let card = crate::widgets::surface::tones(self.theme).is_some();
+        let op = match menu.look {
+            MenuLook::Panel => return None,
+            MenuLook::CommitActions => {
+                let default_branch = self.default_branch_label.as_deref().unwrap_or("default");
+                let rows = scm_menu::commit_rows(default_branch);
+                let top = scm_menu::commit_column(
+                    &rows,
+                    self.source_control.last_commit_caret_area,
+                    self.source_control.last_button_area,
+                    self.last_frame_area,
+                    card,
+                )?;
+                let top = top.shown_from(menu.scroll_for(top.shown()));
+                return Some(ScmMenuLayout {
+                    panel: scm_menu::Panel::Commit,
+                    rows,
+                    top,
+                    fly_out: None,
+                });
+            }
+            MenuLook::ScmActions { op } => op,
+        };
         let anchor = self.source_control.header_more_btn;
         if anchor.width == 0 {
-            return;
+            return None;
         }
-        let screen = frame.area();
-        self.scm_menu.hover = self.pointer_cell;
-        crate::widgets::scm_menu::render(
-            &mut self.scm_menu,
-            anchor,
-            screen,
-            frame.buffer_mut(),
+        let screen = self.last_frame_area;
+        let nodes = scm_menu::menu_for(op);
+        let rows = scm_menu::rows(&nodes);
+        // On a terminal too short for every row, each column shows a window
+        // of them kept around the keyboard's row, as croft's other menus do.
+        let top = scm_menu::top_column(&rows, anchor, screen, card);
+        let top = top.shown_from(menu.scroll_for(top.shown()));
+        let fly_out = menu.open_submenu.and_then(|parent| {
+            let items = scm_menu::fly_out_rows(&nodes, parent)?;
+            let col = scm_menu::fly_out_column(top, parent, &items, screen, card);
+            let col = col.shown_from(menu.submenu_scroll_for(col.shown()));
+            Some((items, col))
+        });
+        Some(ScmMenuLayout {
+            panel: scm_menu::Panel::Top,
+            rows,
+            top,
+            fly_out,
+        })
+    }
+
+    /// Paint Source Control's open menu: the top column, then the open
+    /// fly-out. The keyboard's row shows once the keyboard drives the menu,
+    /// on the level it is on; a card lifts the row under the pointer too.
+    pub(super) fn render_scm_menu(&self, frame: &mut ratatui::Frame) {
+        use crate::widgets::scm_menu::{Marks, Panel, paint_column};
+        let (Some(menu), Some(layout)) = (self.context_menu.as_ref(), self.scm_menu_layout())
+        else {
+            return;
+        };
+        let cursor_colours = if self.popup_gradient() {
+            (rgb_color(POPUP_SEL_BG), Color::White)
+        } else {
+            (self.theme.ui(Color::Rgb(0x4e, 0x9a, 0xff)), Color::Black)
+        };
+        let in_fly_out = menu.open_submenu.is_some();
+        let top_marks = Marks {
+            open: menu.open_submenu,
+            cursor: (menu.keyed && !in_fly_out).then_some(menu.selected),
+            pointer: self.pointer_cell,
+            cursor_colours,
+        };
+        let buf = frame.buffer_mut();
+        paint_column(
+            buf,
+            layout.top,
+            &layout.rows,
+            layout.panel,
+            top_marks,
             self.theme,
         );
+        if let Some((items, col)) = &layout.fly_out {
+            let marks = Marks {
+                open: None,
+                cursor: (menu.keyed && in_fly_out).then_some(menu.submenu_selected),
+                pointer: self.pointer_cell,
+                cursor_colours,
+            };
+            paint_column(buf, *col, items, Panel::FlyOut, marks, self.theme);
+        }
     }
 
     pub(super) fn toggle_inline_blame(&mut self) {
@@ -3885,6 +4445,8 @@ impl App {
             crumb: None,
             scroll: Default::default(),
             submenu_scroll: Default::default(),
+            look: MenuLook::Panel,
+            keyed: true,
         }
     }
 
@@ -4041,4 +4603,26 @@ impl App {
             .find(|e| e.diff.is_none() && e.path.as_deref() == Some(path))
             .map_or(encoding_rs::UTF_8, |e| e.encoding)
     }
+}
+
+/// `path` as git names it in the repository at `root`: relative, with `/`
+/// between parts. A workspace opened through a symlink (macOS's `/var` is
+/// `/private/var`) names the file one way and git's root the other, so a
+/// path outside `root` as spelled is retried with both resolved.
+pub(super) fn relative_to_repo(path: &Path, root: &Path) -> Option<String> {
+    let rel = match path.strip_prefix(root) {
+        Ok(rel) => rel.to_path_buf(),
+        Err(_) => path
+            .canonicalize()
+            .ok()?
+            .strip_prefix(root.canonicalize().ok()?)
+            .ok()?
+            .to_path_buf(),
+    };
+    Some(
+        rel.components()
+            .map(|c| c.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/"),
+    )
 }

@@ -40,6 +40,7 @@ pub(super) fn open(app: &mut App, p: Popup) -> Option<std::os::unix::net::UnixSt
         }
         Popup::DiscardConfirm => {
             app.pending_discard = Some(PendingDiscard {
+                root: std::path::PathBuf::new(),
                 rel_path: String::from("a.rs"),
                 untracked: false,
                 staged: false,
@@ -409,16 +410,14 @@ fn painter(p: Popup) -> &'static str {
 /// The painters the frame calls for things that open next to what they
 /// belong to. Pictures yield to these only where they overlap, so they are
 /// not pop-ups in this sense.
-const BESIDE_THEIR_OWNER: [&str; 9] = [
+const BESIDE_THEIR_OWNER: [&str; 7] = [
     "render_port_toast",
     "render_update_toast",
     "render_zen_hint",
     "render_context_menu",
-    "render_commit_dropdown",
     "render_editor_find",
     "render_terminal_find",
     "render_tour_caption",
-    "render_scm_menu",
 ];
 
 /// Every painter the frame calls in its overlay pass draws a listed pop-up
@@ -885,7 +884,7 @@ fn a_drag_a_popup_cuts_short_drops_nothing_later() {
         std::fs::create_dir(tmp.path().join("dest")).unwrap();
         let mut app = App::new(tmp.path().to_path_buf()).unwrap();
         app.tree.last_area = Rect::new(0, 0, 40, 8);
-        app.tree.last_inner = Rect::new(1, 1, 38, 6);
+        app.tree.pretend_drawn(Rect::new(1, 1, 38, 6));
         let row_of = |app: &App, name: &str| {
             let i = app.tree.nodes.iter().position(|n| n.path.ends_with(name));
             app.tree.last_inner.y + i.expect("the tree lists it") as u16

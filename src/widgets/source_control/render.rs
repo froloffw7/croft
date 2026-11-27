@@ -16,6 +16,8 @@ pub(super) fn badge_color(kind: ChangeKind, theme: crate::theme::Theme) -> Color
 
 impl Widget for &mut SourceControlPanel {
     fn render(self, area: Rect, buf: &mut Buffer) {
+        // Only a stop on screen draws as having the keys (#871).
+        self.settle_keys();
         let focus_blue = self.theme.ui(Color::Rgb(0x4e, 0x9a, 0xff));
         // Black theme: the commit-input focus ring wears the muted brand teal
         // instead of the legacy blue (the outer border becomes the gradient).
@@ -47,7 +49,6 @@ impl Widget for &mut SourceControlPanel {
         self.last_input_area = Rect::default();
         self.last_button_area = Rect::default();
         self.last_commit_caret_area = Rect::default();
-        self.commit_menu_item_areas.clear();
         self.last_list_area = Rect::default();
         self.last_scrollbar = Rect::default();
         self.last_row_actions = None;
@@ -154,8 +155,11 @@ impl Widget for &mut SourceControlPanel {
             self.render_repositories_section(inner, inner.y + 2, buf);
             return;
         }
-        // Repo path: hero is only for the empty state.
+        // Repo path: the hero and the card's buttons are only for the empty
+        // state, and a button area left from its last frame would take a
+        // click meant for what is drawn there now (#2736).
         self.last_hero_area = Rect::default();
+        self.last_init_repo_button_area = Rect::default();
         self.nested_repo_button_areas.clear();
 
         // Row 2: branch row — a green branch glyph plus the branch name.
@@ -243,7 +247,7 @@ impl Widget for &mut SourceControlPanel {
                 .min(left),
         };
         self.last_input_area = input_box;
-        let input_border_style = if self.focused && !self.list_focused {
+        let input_border_style = if self.focused && self.keys == KeyStop::Message {
             Style::default().fg(accent)
         } else {
             Style::default().fg(self.theme.ui(Color::Rgb(0x60, 0x68, 0x78)))
@@ -257,7 +261,7 @@ impl Widget for &mut SourceControlPanel {
         // the accent while it has the keyboard) in place of the rounded line
         // box. The inner rect is the box's, so the text and the caret land on
         // the same cells.
-        let field_focused = self.focused && !self.list_focused;
+        let field_focused = self.focused && self.keys == KeyStop::Message;
         match tones {
             Some(t) => crate::widgets::surface::paint_field(
                 buf,
@@ -626,7 +630,7 @@ impl Widget for &mut SourceControlPanel {
                             },
                             t,
                             t.chrome,
-                            self.focused && self.list_focused,
+                            self.focused && self.keys == KeyStop::List,
                         );
                     }
                     let row_bg = if is_primary {

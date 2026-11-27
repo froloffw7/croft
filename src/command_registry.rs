@@ -1051,6 +1051,64 @@ commands! {
         title: "View: Split Editor",
         hint: "Cmd+\\",
     }
+    /// The editor tab menu's Split & Move rows as VS Code's commands
+    /// (#871): each acts on the active tab, so the keyboard reaches what
+    /// the tab menu does.
+    SplitEditorUp {
+        id: "split_editor_up",
+        title: "View: Split Editor Up",
+        hint: "Cmd+K Cmd+\\",
+    }
+    SplitEditorDown {
+        id: "split_editor_down",
+        title: "View: Split Editor Down",
+        hint: "Cmd+K Opt+↓",
+    }
+    SplitEditorLeft {
+        id: "split_editor_left",
+        title: "View: Split Editor Left",
+        hint: "Cmd+K Opt+←",
+    }
+    SplitEditorInGroup {
+        id: "split_editor_in_group",
+        title: "View: Split Editor in Group",
+        hint: "Cmd+K Shift+Cmd+\\",
+    }
+    MoveEditorToAboveGroup {
+        id: "move_editor_to_above_group",
+        title: "View: Move Editor into Group Above",
+        hint: "Cmd+K Shift+↑",
+    }
+    MoveEditorToBelowGroup {
+        id: "move_editor_to_below_group",
+        title: "View: Move Editor into Group Below",
+        hint: "Cmd+K Shift+↓",
+    }
+    MoveEditorToLeftGroup {
+        id: "move_editor_to_left_group",
+        title: "View: Move Editor into Left Group",
+        hint: "Cmd+K Shift+←",
+    }
+    MoveEditorToRightGroup {
+        id: "move_editor_to_right_group",
+        title: "View: Move Editor into Right Group",
+        hint: "Cmd+K Shift+→",
+    }
+    MoveEditorToNewWindow {
+        id: "move_editor_to_new_window",
+        title: "View: Move Editor into New Window",
+        hint: "Cmd+K Shift+O",
+    }
+    CopyEditorToNewWindow {
+        id: "copy_editor_to_new_window",
+        title: "View: Copy Editor into New Window",
+        hint: "Cmd+K O",
+    }
+    RevealActiveFileInExplorer {
+        id: "reveal_active_file_in_explorer",
+        title: "File: Reveal Active File in Explorer View",
+        hint: "Cmd+K E",
+    }
     /// View: Focus Left / Right Editor Group (#843): Cmd+Opt+Left / Right,
     /// which have no `Ctrl` form off macOS.
     FocusLeftEditorGroup {
@@ -1957,6 +2015,13 @@ commands! {
         title: "View: Toggle Minimap",
         hint: "Cmd+Opt+M",
     }
+    /// The minimap's Side submenu from the keyboard (#871): moves the strip
+    /// to the editor's other edge.
+    ToggleMinimapSide {
+        id: "toggle_minimap_side",
+        title: "View: Toggle Minimap Side",
+        hint: "Cmd+K Shift+M",
+    }
     /// Run the whole-project checker and put its findings in PROBLEMS (#256).
     ProblemsCheckProject {
         id: "problems_check_project",
@@ -2255,6 +2320,54 @@ commands! {
         title: "Git: Stash",
         hint: "",
     }
+    /// Source Control's `⋯` actions menu from the keyboard (#871): every
+    /// Git action it lists, reached with the arrows and run with Enter.
+    GitShowSourceControlActions {
+        id: "git_show_source_control_actions",
+        title: "Git: Show Source Control Actions",
+        hint: "Cmd+K Shift+A",
+    }
+    /// The Commit button's `▾` dropdown from the keyboard (#871).
+    GitShowCommitActions {
+        id: "git_show_commit_actions",
+        title: "Git: Show Commit Actions",
+        hint: "Cmd+K Shift+C",
+    }
+    /// The open file's changes (#871), or the selected Source Control row's
+    /// while the change list has the keys; its keys are the shortcuts.
+    GitOpenChanges {
+        id: "git_open_changes",
+        title: "Git: Open Changes",
+        hint: "Enter in Source Control",
+    }
+    GitStageChanges {
+        id: "git_stage_changes",
+        title: "Git: Stage Changes",
+        hint: "S in Source Control",
+    }
+    GitUnstageChanges {
+        id: "git_unstage_changes",
+        title: "Git: Unstage Changes",
+        hint: "U in Source Control",
+    }
+    GitDiscardChanges {
+        id: "git_discard_changes",
+        title: "Git: Discard Changes",
+        hint: "D in Source Control",
+    }
+    /// The header's refresh button (#871); `R` in Source Control's lists.
+    GitRefresh {
+        id: "git_refresh",
+        title: "Git: Refresh",
+        hint: "R in Source Control",
+    }
+    /// The no-repository card's button (#871); `Enter` on it in Source
+    /// Control.
+    GitInitializeRepository {
+        id: "git_initialize_repository",
+        title: "Git: Initialize Repository",
+        hint: "Enter in Source Control",
+    }
     ToggleTerminalSuggestions {
         id: "toggle_terminal_suggestions",
         title: "Terminal: Toggle Command Suggestions",
@@ -2285,6 +2398,13 @@ commands! {
         id: "step_over",
         title: "Debug: Step Over",
         hint: "F10",
+    }
+    /// The right-click menu of what has the keys, at it (#2739): VS Code's
+    /// Shift+F10. The Menu key opens it too.
+    ShowContextMenu {
+        id: "show_context_menu",
+        title: "View: Show Context Menu",
+        hint: "Shift+F10",
     }
     /// Debug: Continue / Step Into / Step Out (#1543): the F5 / F11 /
     /// Shift+F11 actions as commands, so the palette finds them and
@@ -2383,7 +2503,7 @@ commands! {
     OpenUserMenu {
         id: "open_user_menu",
         title: "User Menu: Open",
-        hint: "Cmd+K Shift+M",
+        hint: "Cmd+K Shift+N",
     }
     OpenUserMenuJson {
         id: "open_user_menu_json",

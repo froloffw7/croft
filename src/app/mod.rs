@@ -54,6 +54,7 @@ mod popups;
 mod prompts;
 mod remote_sessions;
 mod review;
+mod right_click;
 mod runners;
 mod save_restore;
 mod scm;
@@ -510,6 +511,10 @@ struct PendingCapture {
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 enum MenuAction {
+    /// A row of Source Control's `⋯` actions menu (#871).
+    Scm(crate::widgets::scm_menu::ScmAction),
+    /// A row of the Commit button's `▾` dropdown (#871).
+    Commit(crate::widgets::source_control::CommitMenuItem),
     Create(CreateKind),
     /// Run a palette command: a row of the user's menu (`menu.json`).
     RunCommand(crate::widgets::command_palette::Command),
@@ -1037,6 +1042,30 @@ struct ContextMenu {
     /// wheel (`wheel_active`) and kept in range by
     /// render_context_menu.
     submenu_scroll: std::cell::Cell<usize>,
+    /// How the menu is drawn and where it opens.
+    look: MenuLook,
+    /// The keyboard (or the wheel) has moved the highlight, so a look that
+    /// otherwise shows none draws it. A [`MenuLook::Panel`] menu always
+    /// shows its highlight; Source Control's menus show it only once the
+    /// keyboard drives them, so one opened with a click looks as it did.
+    keyed: bool,
+}
+
+/// How a [`ContextMenu`] is drawn and placed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MenuLook {
+    /// croft's menus: a bordered panel at the menu's origin (a card in a
+    /// `surfaces` theme), with each row's shortcut on its right.
+    Panel,
+    /// Source Control's `⋯` actions menu (#871): rows with a coloured
+    /// glyph and no border, opened under the header's `⋯` pill, each
+    /// fly-out beside its row. A click on a fly-out's row toggles it. `op`
+    /// is the operation the repository was in when it opened, whose rows
+    /// lead the menu (#1356); the rows are drawn from it.
+    ScmActions { op: Option<crate::git::RepoOp> },
+    /// The Commit button's `▾` dropdown (#871): the same rows, under the
+    /// `▾`. A click outside it closes it and goes on to what it lands on.
+    CommitActions,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -1151,6 +1180,8 @@ struct PendingStashDrop {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct PendingDiscard {
+    /// The repository the discard was asked in, which it acts in.
+    root: PathBuf,
     rel_path: String,
     untracked: bool,
     staged: bool,
@@ -1550,6 +1581,12 @@ pub struct App {
     /// commit diff, a COMMITS patch): a large repo's `git show` or rename
     /// walk froze the editor when run inline. A newer click replaces it.
     git_view_job: Option<std::sync::mpsc::Receiver<GitNetDone>>,
+    /// A *Git: … Changes* command waiting on its read of the repository's
+    /// changes (#871). A newer one replaces it.
+    git_file_lookup: Option<scm::GitFileLookup>,
+    /// *Git: … Changes* commands run while one was reading, each with its
+    /// open file and folder, waiting their turn in order (#871).
+    git_file_queue: std::collections::VecDeque<(scm::GitFileCommand, PathBuf, PathBuf)>,
     /// The `vim_mode` pref as last applied (#1286). A settings reload
     /// changes the live mode only when the pref itself changed, so an
     /// unrelated edit to config.json does not reset the mode in use.
@@ -2348,10 +2385,6 @@ pub struct App {
     /// and the user hasn't silenced the nudge. Drawn as a dismissible modal
     /// recommending iTerm2 (macOS) / Ghostty (macOS/Linux).
     pending_terminal_warning: bool,
-    /// True while the Source Control commit dropdown (▾ caret) is open.
-    /// The caret button toggles this; clicking a menu row, the commit
-    /// button, or anywhere outside the menu closes it.
-    commit_menu_open: bool,
     /// Cached default-branch name (e.g. "main" / "master"), refreshed
     /// when the workspace root changes. Surfaced in the commit dropdown's
     /// "View Changes vs <name>" label so users know which branch the
@@ -3556,8 +3589,6 @@ pub struct App {
         Option<String>,
         crate::widgets::branch_picker::BranchAction,
     )>,
-    /// The Source Control "⋯" title menu (open/expanded state + hit rects).
-    pub scm_menu: crate::widgets::scm_menu::ScmMenuState,
     /// Single-line input modal for SCM ops that need a typed value
     /// (clone URL, branch rename, remote name/URL, tag name).
     pub input_prompt: Option<crate::widgets::input_prompt::InputPrompt>,
@@ -4391,6 +4422,8 @@ impl App {
             blame_hover: None,
             git_net_job: None,
             git_view_job: None,
+            git_file_lookup: None,
+            git_file_queue: std::collections::VecDeque::new(),
             vim_mode_pref: false,
             inline_blame_enabled: !loaded_prefs.disable_inline_blame,
             provenance_overlay: false,
@@ -4667,7 +4700,6 @@ impl App {
             run_tasks: Vec::new(),
             last_task: None,
             pending_terminal_warning: false,
-            commit_menu_open: false,
             default_branch_label: None,
             default_branch_ask: None,
             trust_local_browser: false,
@@ -4949,7 +4981,6 @@ impl App {
             branch_picker: None,
             branch_purpose: BranchPurpose::Checkout,
             blocked_switch: None,
-            scm_menu: crate::widgets::scm_menu::ScmMenuState::default(),
             input_prompt: None,
             list_picker: None,
             session_channel: crate::session_host::InnerChannel::from_env(),

@@ -797,6 +797,13 @@ impl App {
                 && revspec == self.graph_revspec
             {
                 self.commit_graph.set_rows(rows);
+                // COMMITS took the keys before its history landed (#871):
+                // the newest commit is picked now, as Tab would have.
+                if self.source_control.keys == crate::widgets::source_control::KeyStop::Commits
+                    && self.commit_graph.selected_commit().is_none()
+                {
+                    self.commit_graph.select(0);
+                }
                 changed = true;
             }
             // A trigger arrived while this fetch was in flight: what it
@@ -2254,6 +2261,9 @@ impl App {
         // OLD repo's state (or "no repo") even after a Make Root that
         // landed inside a real git tree.
         self.git.set_root(new_root.clone());
+        // Until the new root's status lands, the card the old one may have
+        // left does not take the keys (#871).
+        self.source_control.status_known = false;
         self.refresh_git_status_debounced();
         // Drop the old repo's graph before the refresh (inside
         // refresh_source_control) refetches for the new root; a reply still

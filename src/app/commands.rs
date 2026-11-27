@@ -1447,6 +1447,19 @@ impl App {
             Cmd::MoveEditorToNextGroup => self.move_active_editor_to_adjacent_group(true),
             Cmd::MoveEditorToPreviousGroup => self.move_active_editor_to_adjacent_group(false),
             Cmd::SplitEditor => self.split_editor(),
+            Cmd::SplitEditorUp => self.split_editor_dir(editor_layout::SplitDir::Vertical, false),
+            Cmd::SplitEditorDown => self.split_editor_dir(editor_layout::SplitDir::Vertical, true),
+            Cmd::SplitEditorLeft => {
+                self.split_editor_dir(editor_layout::SplitDir::Horizontal, false)
+            }
+            Cmd::SplitEditorInGroup => self.split_in_group(),
+            Cmd::MoveEditorToAboveGroup => self.move_active_editor(editor_layout::Dir::Up),
+            Cmd::MoveEditorToBelowGroup => self.move_active_editor(editor_layout::Dir::Down),
+            Cmd::MoveEditorToLeftGroup => self.move_active_editor(editor_layout::Dir::Left),
+            Cmd::MoveEditorToRightGroup => self.move_active_editor(editor_layout::Dir::Right),
+            Cmd::MoveEditorToNewWindow => self.move_into_new_window(tab_target),
+            Cmd::CopyEditorToNewWindow => self.copy_into_new_window(tab_target),
+            Cmd::RevealActiveFileInExplorer => self.reveal_active_file_in_explorer(),
             // The chords' own moves (#843): Cmd+Opt+Left / Right have no
             // `Ctrl` form off macOS.
             Cmd::FocusLeftEditorGroup => self.focus_editor_group(true),
@@ -1982,6 +1995,7 @@ impl App {
             Cmd::SetQuickInputPosition => self.open_quick_input_position_picker(),
             Cmd::CustomizeLayout => self.open_customize_layout_menu(),
             Cmd::ToggleMinimap => self.toggle_minimap(),
+            Cmd::ToggleMinimapSide => self.toggle_minimap_side(),
             Cmd::ProblemsToggleProjectAuto => {
                 // auto -> on -> off -> auto. Cycling rather than a boolean
                 // because `auto` is a distinct answer from both, not a
@@ -2195,6 +2209,14 @@ impl App {
                 self.dispatch_scm_action(crate::widgets::scm_menu::ScmAction::CheckoutTo)
             }
             Cmd::GitStash => self.dispatch_scm_action(crate::widgets::scm_menu::ScmAction::Stash),
+            Cmd::GitShowSourceControlActions => self.open_scm_actions_menu_from_keyboard(),
+            Cmd::GitShowCommitActions => self.open_commit_actions_menu_from_keyboard(),
+            Cmd::GitOpenChanges => self.git_file_command(super::scm::GitFileCommand::Open),
+            Cmd::GitStageChanges => self.git_file_command(super::scm::GitFileCommand::Stage),
+            Cmd::GitUnstageChanges => self.git_file_command(super::scm::GitFileCommand::Unstage),
+            Cmd::GitDiscardChanges => self.git_file_command(super::scm::GitFileCommand::Discard),
+            Cmd::GitRefresh => self.refresh_source_control_from_key(),
+            Cmd::GitInitializeRepository => self.initialize_repository_command(),
             Cmd::ToggleTerminalSuggestions => self.toggle_terminal_suggestions(),
             Cmd::ToggleScreenReader => self.toggle_screen_reader(),
             Cmd::OpenKeyboardShortcuts => self.open_keyboard_shortcuts(),
@@ -2212,6 +2234,7 @@ impl App {
             Cmd::ShowOutgoingCalls => self.request_call_hierarchy_at_cursor(false),
             Cmd::EditBreakpointCondition => self.debug_edit_condition(),
             Cmd::StepOver => self.debug_step("next"),
+            Cmd::ShowContextMenu => self.show_context_menu(),
             Cmd::ContinueDebugging => self.debug_continue(),
             Cmd::StepInto => self.debug_step("stepIn"),
             Cmd::StepOut => self.debug_step("stepOut"),

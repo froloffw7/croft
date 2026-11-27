@@ -101,6 +101,22 @@ impl App {
                 self.open_sticky_note_prompt();
                 true
             }
+            // Cmd+K Shift+C anywhere but the terminal's shell: Git: Show
+            // Commit Actions (#871), the Commit button's dropdown with the
+            // keyboard on it. Only the Terminal tab has a shell: on Output,
+            // Problems, Ports or Captures the panel has focus but the chord
+            // is this one. Case-insensitive for the CSI-u reason given at
+            // Shift+W, and before the terminal's C/S/R arm and the plain C arm.
+            KeyCode::Char(c)
+                if shifted
+                    && plain
+                    && c.eq_ignore_ascii_case(&'c')
+                    && !(self.focus == Pane::Terminal
+                        && self.bottom_panel_tab == BottomPanelTab::Terminal) =>
+            {
+                self.open_commit_actions_menu_from_keyboard();
+                true
+            }
             // Cmd+K ⇧C / ⇧S / ⇧R with the terminal focused: the keyboard
             // forms of the decoration-menu actions, applied to the LAST
             // finished command (VS Code's copyLastCommandOutput family).
@@ -155,6 +171,12 @@ impl App {
             // precede the plain E (reveal in Explorer) arm below.
             KeyCode::Char(c) if shifted && plain && c.eq_ignore_ascii_case(&'e') => {
                 self.run_code_lens_at_cursor();
+                true
+            }
+            // Cmd+K Shift+N: the user's menu (menu.json). Must precede any
+            // plain N arm, which matches either case.
+            KeyCode::Char(c) if shifted && plain && !cmd_held && c.eq_ignore_ascii_case(&'n') => {
+                self.open_user_menu();
                 true
             }
             // Cmd+K Shift+U / Shift+D: supertypes ("up") and subtypes
@@ -216,6 +238,14 @@ impl App {
             // Cmd+K Cmd+T / Cmd+K T: open the Color Theme picker.
             KeyCode::Char(c) if plain && c.eq_ignore_ascii_case(&'t') => {
                 self.open_theme_picker();
+                true
+            }
+            // Cmd+K Shift+A: Git: Show Source Control Actions (#871), the
+            // `⋯` menu with the keyboard on it. Matched case-insensitively
+            // for the CSI-u reason given at Shift+W, and before the plain A
+            // arm below.
+            KeyCode::Char(c) if shifted && plain && c.eq_ignore_ascii_case(&'a') => {
+                self.open_scm_actions_menu_from_keyboard();
                 true
             }
             // Cmd+K A: who is attached to this multiplayer session
@@ -295,6 +325,39 @@ impl App {
                 self.split_editor_dir(editor_layout::SplitDir::Vertical, false);
                 true
             }
+            // Cmd+K Shift+arrow: move the active tab into the group on that
+            // side, or into a new group there (View: Move Editor into Left
+            // Group and its siblings, #871). VS Code binds none of the four;
+            // its Cmd+K Shift+Cmd+← / → (move the tab within its group) keep
+            // the Cmd, so they stay free. Before the Cmd+K → arm, which
+            // ignores Shift.
+            KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down
+                if shifted && plain && !cmd_held =>
+            {
+                self.move_active_editor(match key.code {
+                    KeyCode::Left => editor_layout::Dir::Left,
+                    KeyCode::Right => editor_layout::Dir::Right,
+                    KeyCode::Up => editor_layout::Dir::Up,
+                    _ => editor_layout::Dir::Down,
+                });
+                true
+            }
+            // Cmd+K Opt+arrow: split the editor toward that side, as
+            // Cmd+Opt+arrow focuses the group there (#871): Opt+↓ and Opt+←
+            // are View: Split Editor Down / Left, Opt+↑ and Opt+→ the same
+            // as Split Up and Split Right. Cmd may still be held from the
+            // leader.
+            KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down if !plain && !shifted => {
+                match key.code {
+                    KeyCode::Up => self.split_editor_dir(editor_layout::SplitDir::Vertical, false),
+                    KeyCode::Down => self.split_editor_dir(editor_layout::SplitDir::Vertical, true),
+                    KeyCode::Left => {
+                        self.split_editor_dir(editor_layout::SplitDir::Horizontal, false)
+                    }
+                    _ => self.split_editor(),
+                }
+                true
+            }
             // Cmd+K →: close the editors to the right of the active tab.
             KeyCode::Right if plain => {
                 self.close_tabs_to_right(self.editor.active_index());
@@ -357,11 +420,7 @@ impl App {
             }
             // Cmd+K E: reveal the active file in the Explorer tree.
             KeyCode::Char(c) if plain && c.eq_ignore_ascii_case(&'e') => {
-                if let Some(path) = self.editor.path.clone() {
-                    self.reveal_in_explorer(path);
-                } else {
-                    self.status = String::from("Reveal in Explorer View: no active file");
-                }
+                self.reveal_active_file_in_explorer();
                 true
             }
             // Cmd+K Shift+H: outgoing calls (what does this call?). Must
@@ -475,10 +534,10 @@ impl App {
                 self.begin_rename_terminal(self.active_terminal);
                 true
             }
-            // Cmd+K Shift+M: the user's menu (menu.json). Must precede the
-            // plain M arm below, which matches either case.
-            KeyCode::Char(c) if shifted && plain && c.eq_ignore_ascii_case(&'m') => {
-                self.open_user_menu();
+            // Cmd+K Shift+M: View: Toggle Minimap Side (#871), the strip to
+            // the editor's other edge. Before the case-insensitive M arm.
+            KeyCode::Char(c) if shifted && plain && !cmd_held && c.eq_ignore_ascii_case(&'m') => {
+                self.toggle_minimap_side();
                 true
             }
             // Cmd+K M: maximize the active terminal pane / restore the even
@@ -1109,10 +1168,6 @@ impl App {
             }
             return Ok(());
         }
-        if self.scm_menu.open && matches!(key.code, KeyCode::Esc) {
-            self.scm_menu.close();
-            return Ok(());
-        }
         // Macro recording (#255) taps the key here: every modal above has
         // already returned, so what reaches this point is editor work — the
         // thing a macro is for. Capturing keys rather than resolved commands
@@ -1271,6 +1326,13 @@ impl App {
         }
         if is_run_to_cursor_key(key) && !terminal_owns_fkeys {
             self.debug_run_to_cursor();
+            return Ok(());
+        }
+        // Show Context Menu (#2739), checked before the F10 step-over below,
+        // which took Shift+F10 too. Modified, so even a focused shell's app
+        // does not get it, as in VS Code's terminal.
+        if is_show_context_menu_key(key) {
+            self.show_context_menu();
             return Ok(());
         }
         if matches!(key.code, KeyCode::F(10)) && !terminal_owns_fkeys {
@@ -3286,6 +3348,19 @@ pub(super) fn is_go_to_references_key(key: KeyEvent) -> bool {
         && key.modifiers.contains(KeyModifiers::SHIFT)
         && !key.modifiers.contains(KeyModifiers::CONTROL)
         && !key.modifiers.contains(KeyModifiers::SUPER)
+}
+
+/// Show Context Menu (#2739): `Shift+F10`, or the Menu key a terminal reports
+/// on the modern keyboard protocol, opens the right-click menu of what has
+/// the keys, as in VS Code. Shift+F10 was Step Over, which bare F10 still is.
+pub(super) fn is_show_context_menu_key(key: KeyEvent) -> bool {
+    match key.code {
+        KeyCode::F(10) => key.modifiers == KeyModifiers::SHIFT,
+        KeyCode::Menu => !key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER),
+        _ => false,
+    }
 }
 
 /// Debug: Run to Cursor, `Ctrl+F10` (#611), Visual Studio's binding. Checked

@@ -44,9 +44,7 @@ impl SourceControlPanel {
             self.selected_change = None;
         }
         self.multi_selection = multi_selection;
-        if self.entries.is_empty() {
-            self.list_focused = false;
-        }
+        self.settle_keys();
     }
 
     /// Click-to-select: returns the entry index now selected, if the
@@ -77,13 +75,13 @@ impl SourceControlPanel {
     }
 
     /// Hand the keyboard to the change list (#871), selecting its first
-    /// row when no row is selected. False, leaving the message box
-    /// focused, when the list is empty.
+    /// row when no row is selected. False, leaving the keys where they
+    /// were, when the list is empty.
     pub fn focus_list(&mut self) -> bool {
         let Some(&first) = self.entry_order().first() else {
             return false;
         };
-        self.list_focused = true;
+        self.keys = KeyStop::List;
         if self.selected_change.is_none() {
             self.select_only(first);
         }

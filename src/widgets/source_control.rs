@@ -15,6 +15,7 @@ mod change_list;
 mod clicks;
 mod commit_menu;
 mod empty_state;
+mod key_stops;
 mod message;
 mod palette;
 mod render;
@@ -25,11 +26,38 @@ use buttons::*;
 use change_list::*;
 use clicks::*;
 pub use commit_menu::CommitMenuItem;
+pub use empty_state::CardButton;
 use message::*;
 use palette::*;
 #[cfg(test)]
 use render::*;
 pub use repositories::RepoRow;
+
+/// Source Control's Tab stops (#871), in VS Code's order: Tab steps down
+/// them and round again, Shift+Tab steps back up. Only the stops on screen
+/// take part: REPOSITORIES while there are several, and in a folder with
+/// no repository the card's buttons in place of the message box, the
+/// change list and COMMITS.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum KeyStop {
+    /// The REPOSITORIES rows: the arrows move `repo_cursor`, Enter or Space
+    /// switches the view to that repository, as a click on its row does.
+    Repositories,
+    /// The commit message box: typing writes the message.
+    #[default]
+    Message,
+    /// The change list: the arrows move `selected_change`, Enter opens its
+    /// diff. Tab, or Down on the message's last line, steps here; Shift+Tab,
+    /// or Up on the first row, steps back.
+    List,
+    /// COMMITS, below the change list: the arrows pick a commit, Enter
+    /// opens it.
+    Commits,
+    /// The no-repository card's buttons, Initialize Repository or each
+    /// subfolder repository's Open: `card_button` is the one with the keys,
+    /// Enter or Space presses it.
+    Card,
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RowActionAreas {
@@ -63,6 +91,11 @@ pub struct SourceControlPanel {
     /// render, like `message_scroll`, to keep the caret's line visible.
     pub message_line_scroll: usize,
     pub status: GitStatus,
+    /// Git has answered for the folder shown (#871). Until it has, `status`
+    /// is a default that reads as "no repository", so the keys stay with the
+    /// message box as before rather than going to the card, where Enter
+    /// would run `git init`.
+    pub status_known: bool,
     /// The prepared merge message last put in the box (#1282), whole
     /// (#1336), to tell an untouched seed from the user's own text.
     seeded_message: Option<String>,
@@ -83,11 +116,6 @@ pub struct SourceControlPanel {
     /// dropdown (Commit & Push, Push, View …). Empty when the panel is in
     /// the no-repo state or the button row was clipped.
     pub last_commit_caret_area: Rect,
-    /// Hit-test rects for the dropdown items (Commit & Push, Push, …)
-    /// that pop below the caret. Empty when the menu is closed. The App
-    /// owns the open/closed flag (`commit_menu_open`) so menu state
-    /// survives re-renders.
-    pub commit_menu_item_areas: Vec<(Rect, CommitMenuItem)>,
     pub last_list_area: Rect,
     pub last_scrollbar: Rect,
     /// Hit-test rect for the empty-state "Initialize Repository" button.
@@ -123,11 +151,15 @@ pub struct SourceControlPanel {
     /// The Stage shortcut (Cmd+S) acts on this set; click on an action icon
     /// still acts on just that row.
     pub multi_selection: BTreeSet<usize>,
-    /// The change list holds the keyboard instead of the message box
-    /// (#871), as in VS Code: arrows move `selected_change` and Enter opens
-    /// its diff. Tab, or Down on the message's last line, moves here; Tab,
-    /// or Up on the first row, goes back.
-    pub list_focused: bool,
+    /// Which of the view's Tab stops has the keys (#871): one at a time,
+    /// so only one of them ever draws as focused.
+    pub keys: KeyStop,
+    /// The REPOSITORIES row the keyboard is on while that section has the
+    /// keys (#871).
+    pub repo_cursor: usize,
+    /// The no-repository card's button the keyboard is on (#871), counted
+    /// down the card.
+    pub card_button: usize,
     /// Status / error line painted below the button after a commit attempt.
     /// Cleared on the next refresh.
     pub commit_feedback: Option<String>,
@@ -166,6 +198,7 @@ impl SourceControlPanel {
             message_scroll: 0,
             message_line_scroll: 0,
             status: GitStatus::default(),
+            status_known: false,
             seeded_message: None,
             entries: Vec::new(),
             repositories: Vec::new(),
@@ -175,7 +208,6 @@ impl SourceControlPanel {
             last_input_area: Rect::default(),
             last_button_area: Rect::default(),
             last_commit_caret_area: Rect::default(),
-            commit_menu_item_areas: Vec::new(),
             last_list_area: Rect::default(),
             last_scrollbar: Rect::default(),
             last_init_repo_button_area: Rect::default(),
@@ -186,7 +218,9 @@ impl SourceControlPanel {
             scroll: 0,
             selected_change: None,
             multi_selection: BTreeSet::new(),
-            list_focused: false,
+            keys: KeyStop::Message,
+            repo_cursor: 0,
+            card_button: 0,
             commit_feedback: None,
             commit_feedback_is_error: false,
             last_row_actions: None,
