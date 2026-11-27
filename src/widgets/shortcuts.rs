@@ -87,6 +87,11 @@ pub const SHORTCUT_GROUPS: &[ShortcutGroup] = &[
                 handler: "is_command_palette_key",
             },
             ShortcutEntry {
+                keys: "Shift+F10",
+                description: "Open the right-click menu of what has the keys (the Menu key too)",
+                handler: "is_show_context_menu_key",
+            },
+            ShortcutEntry {
                 keys: "Cmd/Ctrl+Shift+O",
                 description: "Go to Symbol in Editor: fuzzy-jump to a symbol (or `:` then a line number)",
                 handler: "is_go_to_symbol_key",
@@ -117,7 +122,7 @@ pub const SHORTCUT_GROUPS: &[ShortcutGroup] = &[
                 handler: "",
             },
             ShortcutEntry {
-                keys: "Cmd/Ctrl+K Shift+M",
+                keys: "Cmd/Ctrl+K Shift+N",
                 description: "User Menu: your own commands from menu.json",
                 handler: "",
             },
@@ -539,6 +544,36 @@ pub const SHORTCUT_GROUPS: &[ShortcutGroup] = &[
             ShortcutEntry {
                 keys: "Cmd+K →",
                 description: "Close the tabs right of the active one (palette: View: Close Editors to the Right in Group)",
+                handler: "",
+            },
+            ShortcutEntry {
+                keys: "Cmd+K Cmd+\\ / Cmd+K Opt+↓ / Cmd+K Opt+←",
+                description: "Split the editor up / down / left: the active file in a new group on that side; Cmd+K Opt+↑ / → split up / right too (palette: View: Split Editor Up / Down / Left)",
+                handler: "",
+            },
+            ShortcutEntry {
+                keys: "Cmd+K Shift+Cmd+\\",
+                description: "A second view of the active file beside it in the same group (palette: View: Split Editor in Group)",
+                handler: "",
+            },
+            ShortcutEntry {
+                keys: "Cmd+K Shift+← / Cmd+K Shift+→ / Cmd+K Shift+↑ / Cmd+K Shift+↓",
+                description: "Move the active tab into the group on that side, opening one there if there is none (palette: View: Move Editor into Left / Right Group, Group Above / Below)",
+                handler: "",
+            },
+            ShortcutEntry {
+                keys: "Cmd+K O / Cmd+K Shift+O",
+                description: "Copy / move the active file into a new window, macOS only (palette: View: Copy / Move Editor into New Window)",
+                handler: "",
+            },
+            ShortcutEntry {
+                keys: "Cmd+K E",
+                description: "Show the active file in the Explorer, its row selected (palette: File: Reveal Active File in Explorer View)",
+                handler: "",
+            },
+            ShortcutEntry {
+                keys: "Cmd+K Shift+M",
+                description: "Move the minimap to the editor's other edge (palette: View: Toggle Minimap Side)",
                 handler: "",
             },
             ShortcutEntry {
@@ -1354,6 +1389,31 @@ pub const SHORTCUT_GROUPS: &[ShortcutGroup] = &[
             ShortcutEntry {
                 keys: "Click branch name",
                 description: "Open the checkout / create-branch picker",
+                handler: "",
+            },
+            ShortcutEntry {
+                keys: "Tab / Shift+Tab",
+                description: "Step between the message box, the change list and COMMITS",
+                handler: "",
+            },
+            ShortcutEntry {
+                keys: "R",
+                description: "In the change list or COMMITS: refresh (Git: Refresh)",
+                handler: "",
+            },
+            ShortcutEntry {
+                keys: "Enter / S / U / D",
+                description: "In the change list: open / stage / unstage / discard the selected file. Git: Open / Stage / Unstage / Discard Changes do it to the open file",
+                handler: "",
+            },
+            ShortcutEntry {
+                keys: "Cmd/Ctrl+K Shift+A",
+                description: "Open the ⋯ actions menu: arrows, Enter, → / ← for its fly-outs, Esc",
+                handler: "",
+            },
+            ShortcutEntry {
+                keys: "Cmd/Ctrl+K Shift+C",
+                description: "Open the Commit button's ▾ menu (outside the terminal): arrows, Enter, Esc",
                 handler: "",
             },
             ShortcutEntry {

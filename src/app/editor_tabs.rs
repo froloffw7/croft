@@ -706,11 +706,29 @@ impl App {
     ) {
         match target {
             Some(target) => {
+                // Both copies of the file hold unsaved edits of their own
+                // (#2745): one tab cannot keep them both, so nothing moves.
+                let clash = self
+                    .editor_layout
+                    .group_ref_at_dfs(target)
+                    .is_some_and(|g| {
+                        matches!(
+                            g.landing_for(&self.editor),
+                            crate::widgets::editor::MoveLanding::Clash(_)
+                        )
+                    });
+                if clash {
+                    let label = self.editor.tab_display_label(self.editor.active_index());
+                    self.status = format!(
+                        "Move: {label} has other unsaved changes in that group; save or close one first"
+                    );
+                    return;
+                }
                 let moved = self.editor.take_active_editor();
                 let source_emptied = self.editor.is_blank_initial();
                 let reduced = std::mem::take(&mut self.editor);
                 self.editor = self.editor_layout.refocus_to_dfs(reduced, target);
-                self.editor.push_editor(moved);
+                self.editor.receive_moved(moved);
                 if source_emptied {
                     // The marks its last tab left go before the group does,
                     // as `collapse_split_if_empty` does; after the push, so
@@ -1970,6 +1988,16 @@ impl App {
         let text = relative_clipboard_text(&path, self.workspace_root());
         let landing = self.copy_where_pasted(&text);
         self.status = format!("Copied relative path: {text}{}", landing.note());
+    }
+
+    /// File: Reveal Active File in Explorer View (`Cmd+K E`): the active
+    /// tab's file, selected in the Explorer.
+    pub(super) fn reveal_active_file_in_explorer(&mut self) {
+        if let Some(path) = self.editor.path.clone() {
+            self.reveal_in_explorer(path);
+        } else {
+            self.status = String::from("Reveal in Explorer View: no active file");
+        }
     }
 
     /// Reveal `path` (an editor tab's file) in the Explorer tree: switch the

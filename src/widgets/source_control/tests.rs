@@ -2290,7 +2290,7 @@ fn a_refresh_keeps_the_selection_on_its_file() {
         ],
     );
     p.selected_change = Some(1);
-    p.list_focused = true;
+    p.keys = KeyStop::List;
     p.set_status(
         main(),
         vec![
@@ -2310,7 +2310,11 @@ fn a_refresh_keeps_the_selection_on_its_file() {
     );
     assert_eq!(p.selected_change, Some(2));
     p.set_status(main(), Vec::new());
-    assert!(!p.list_focused, "an empty list gives the keyboard back");
+    assert_eq!(
+        p.keys,
+        KeyStop::Message,
+        "an empty list gives the keyboard back"
+    );
 }
 
 /// #871: the multi-selection follows its files through a refresh that
@@ -2424,64 +2428,6 @@ fn split_commit_button_records_a_separate_caret_rect_at_default_widths() {
     );
     assert!(!p.click_button(caret_mid.0, caret_mid.1));
     assert!(p.click_commit_caret(caret_mid.0, caret_mid.1));
-}
-
-#[test]
-fn click_commit_menu_item_dispatches_on_recorded_rects() {
-    let mut p = SourceControlPanel::new();
-    p.commit_menu_item_areas = vec![
-        (
-            Rect {
-                x: 10,
-                y: 5,
-                width: 20,
-                height: 1,
-            },
-            CommitMenuItem::CommitAndPush,
-        ),
-        (
-            Rect {
-                x: 10,
-                y: 6,
-                width: 20,
-                height: 1,
-            },
-            CommitMenuItem::Push,
-        ),
-        (
-            Rect {
-                x: 10,
-                y: 7,
-                width: 20,
-                height: 1,
-            },
-            CommitMenuItem::ViewStagedDiff,
-        ),
-        (
-            Rect {
-                x: 10,
-                y: 8,
-                width: 20,
-                height: 1,
-            },
-            CommitMenuItem::ViewDefaultBranchDiff,
-        ),
-    ];
-    assert_eq!(
-        p.click_commit_menu_item(15, 5),
-        Some(CommitMenuItem::CommitAndPush)
-    );
-    assert_eq!(p.click_commit_menu_item(15, 6), Some(CommitMenuItem::Push));
-    assert_eq!(
-        p.click_commit_menu_item(15, 7),
-        Some(CommitMenuItem::ViewStagedDiff)
-    );
-    assert_eq!(
-        p.click_commit_menu_item(15, 8),
-        Some(CommitMenuItem::ViewDefaultBranchDiff)
-    );
-    assert_eq!(p.click_commit_menu_item(5, 5), None, "outside the rects");
-    assert_eq!(p.click_commit_menu_item(15, 9), None, "below the menu");
 }
 
 #[test]
@@ -2665,4 +2611,38 @@ fn a_one_line_message_keeps_the_three_row_box() {
     p.insert_str("just a subject");
     render_rows(&mut p);
     assert_eq!(p.last_input_area.height, 3);
+}
+
+/// On a panel too short to draw every REPOSITORIES row, the keyboard stops
+/// at the last row drawn and never opens one it cannot see (#871).
+#[test]
+fn the_keyboard_reaches_only_the_repository_rows_drawn() {
+    use ratatui::buffer::Buffer;
+    let mut p = SourceControlPanel::new();
+    p.status = dummy_status_with_branch("trunk");
+    p.status_known = true;
+    p.repositories = ["a", "b", "c", "d"]
+        .iter()
+        .enumerate()
+        .map(|(i, label)| RepoRow {
+            label: String::from(*label),
+            branch: Some(String::from("trunk")),
+            changes: 0,
+            active: i == 3,
+            workspace_root: std::path::PathBuf::from(format!("/w/{label}")),
+        })
+        .collect();
+    let area = Rect::new(0, 0, 34, 6);
+    let mut buf = Buffer::empty(area);
+    (&mut p).render(area, &mut buf);
+    let drawn = p.repo_row_areas.len();
+    assert!(drawn > 0 && drawn < 4, "{drawn} of 4 rows drawn");
+    p.focus_repositories();
+    assert_eq!(p.repo_cursor, drawn - 1, "the shown row is not drawn");
+    p.move_repo_cursor(isize::MAX);
+    assert_eq!(p.repo_cursor, drawn - 1);
+    assert_eq!(
+        p.repo_under_cursor().map(|r| r.label.as_str()),
+        Some(["a", "b", "c"][drawn - 1])
+    );
 }

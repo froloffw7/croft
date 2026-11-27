@@ -536,7 +536,7 @@ fn tab_list(tabs: &crate::widgets::editor::EditorTabs) -> String {
 
 /// The editor groups as they tile a 120x40 editor: each one's place and size
 /// and its tabs, the active group starred. `1` while there is one group.
-fn groups(app: &App) -> String {
+pub(super) fn groups(app: &App) -> String {
     let rects = app
         .editor_layout
         .leaf_rects(ratatui::layout::Rect::new(0, 0, 120, 40), 1);
@@ -671,8 +671,16 @@ fn scm_view(sc: &crate::widgets::source_control::SourceControlPanel) -> String {
     if sc.focused {
         out.push_str(" +focus");
     }
-    if sc.list_focused {
-        out.push_str(" +list");
+    match sc.keys {
+        crate::widgets::source_control::KeyStop::Message => {}
+        crate::widgets::source_control::KeyStop::List => out.push_str(" +list"),
+        crate::widgets::source_control::KeyStop::Commits => out.push_str(" +commits"),
+        crate::widgets::source_control::KeyStop::Repositories => {
+            out.push_str(&format!(" +repositories@{}", sc.repo_cursor));
+        }
+        crate::widgets::source_control::KeyStop::Card => {
+            out.push_str(&format!(" +card@{}", sc.card_button));
+        }
     }
     if let Some(i) = sc.selected_change {
         out.push_str(&format!(" sel={i}"));
@@ -722,29 +730,6 @@ fn git_state(root: &Path) -> String {
         }
     }
     parts.join(",")
-}
-
-/// `text` with every word that reads as a commit id (7 to 40 lowercase hex
-/// digits, letters among them or not) as `<id>`: a commit's id changes with
-/// the clock.
-fn no_commit_ids(text: &str) -> String {
-    let id = |w: &str| {
-        (7..=40).contains(&w.len())
-            && w.bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-    };
-    let mut out = String::new();
-    let mut word = String::new();
-    for c in text.chars().map(Some).chain([None]) {
-        if let Some(c) = c.filter(char::is_ascii_alphanumeric) {
-            word.push(c);
-            continue;
-        }
-        out.push_str(if id(&word) { "<id>" } else { &word });
-        word.clear();
-        out.extend(c);
-    }
-    out
 }
 
 /// What a key can change that a user sees or acts on next.
@@ -892,6 +877,7 @@ fn fields(app: &App, root: &Path, read: &[String; 5], hide_ids: bool) -> Fields 
             ("quit", on(app.quit)),
             ("drop_to_local", on(app.drop_to_local)),
             ("minimap", on(app.minimap_visible)),
+            ("minimap_left", on(app.minimap_side == MinimapSide::Left)),
             ("wrap", on(ed.wrap_enabled())),
             ("zen", on(app.zen_mode)),
             ("aux", on(app.secondary_side_bar_visible)),
@@ -980,8 +966,6 @@ fn fields(app: &App, root: &Path, read: &[String; 5], hide_ids: bool) -> Fields 
                     .map(|p| format!("{} {}", quote(&p.label), quote(&p.buffer))),
             ),
             ("menu", menu),
-            ("scm_menu", on(app.scm_menu.open)),
-            ("commit_menu", on(app.commit_menu_open)),
             (
                 "commit_feedback",
                 app.source_control
@@ -1898,6 +1882,30 @@ struct ProofPlace {
     commands: &'static [Command],
 }
 
+/// Source Control with its change list focused on the row for `path`, in
+/// the ledger's repository: where the list's own keys act (#871).
+fn scm_list_on(app: &mut App, path: &str) {
+    app.set_sidebar_view(SidebarView::SourceControl);
+    crate::test_budget::await_spawned(
+        std::time::Duration::from_millis(500),
+        "git status for Source Control",
+        || {
+            app.drain_git_responses();
+            app.source_control.entries.len() == 2
+        },
+    );
+    app.source_control.keys = crate::widgets::source_control::KeyStop::List;
+    app.source_control.selected_change = app
+        .source_control
+        .entries
+        .iter()
+        .position(|e| e.path == path);
+    assert!(
+        app.source_control.selected_change.is_some(),
+        "{path} has a row"
+    );
+}
+
 /// The places beyond the ledger's own contexts.
 const PROOF_PLACES: &[ProofPlace] = &[
     ProofPlace {
@@ -2076,6 +2084,56 @@ const PROOF_PLACES: &[ProofPlace] = &[
             Command::SearchTogglePreserveCase,
             Command::SearchToggleDetails,
         ],
+    },
+    ProofPlace {
+        context: Context {
+            name: "Source Control's change list on a new file",
+            repo: true,
+            setup: |app| scm_list_on(app, "todo.txt"),
+        },
+        commands: &[
+            Command::GitOpenChanges,
+            Command::GitStageChanges,
+            Command::GitDiscardChanges,
+        ],
+    },
+    ProofPlace {
+        context: Context {
+            name: "Source Control's change list on a staged file",
+            repo: true,
+            setup: |app| scm_list_on(app, "docs/notes.md"),
+        },
+        commands: &[Command::GitUnstageChanges],
+    },
+    ProofPlace {
+        context: Context {
+            name: "Source Control's COMMITS with the keys",
+            repo: true,
+            setup: |app| {
+                scm_list_on(app, "todo.txt");
+                app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+                    .unwrap();
+            },
+        },
+        commands: &[Command::GitRefresh],
+    },
+    ProofPlace {
+        context: Context {
+            name: "Source Control in a folder with no repository",
+            repo: false,
+            setup: |app| {
+                app.set_sidebar_view(SidebarView::SourceControl);
+                crate::test_budget::await_spawned(
+                    std::time::Duration::from_millis(500),
+                    "git status for Source Control",
+                    || {
+                        app.drain_git_responses();
+                        app.source_control.status_known
+                    },
+                );
+            },
+        },
+        commands: &[Command::GitInitializeRepository],
     },
 ];
 

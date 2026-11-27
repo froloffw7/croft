@@ -42,6 +42,7 @@ fn overlays_render_on_a_tiny_terminal_without_panicking() {
     draw(&mut app, 80, 9);
     let mut app = App::new(tmp.path().to_path_buf()).unwrap();
     app.pending_discard = Some(PendingDiscard {
+        root: std::path::PathBuf::new(),
         rel_path: String::from("a.txt"),
         untracked: false,
         staged: false,
@@ -5449,6 +5450,8 @@ fn the_terminal_image_yields_to_an_open_context_menu() {
         crumb: None,
         scroll: Default::default(),
         submenu_scroll: Default::default(),
+        look: MenuLook::Panel,
+        keyed: true,
         origin: (l.cell_x, l.cell_y),
         items: vec![
             MenuEntry::Item {

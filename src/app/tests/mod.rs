@@ -25,6 +25,7 @@ mod input;
 #[cfg(target_os = "linux")]
 mod key_ledger;
 mod keybindings;
+mod keyboard_routes;
 mod layout;
 mod lsp;
 mod menus;
@@ -36,6 +37,8 @@ mod popups;
 mod problems;
 mod remote;
 mod review;
+#[cfg(target_os = "linux")]
+mod right_click;
 mod sarif;
 mod scm;
 mod search;
@@ -302,6 +305,7 @@ fn key_predicates() -> Vec<(&'static str, KeyPredicate)> {
         is_peek_definition_key,
         is_go_to_references_key,
         is_run_to_cursor_key,
+        is_show_context_menu_key,
         is_peek_references_key,
         is_go_to_declaration_key,
         is_go_to_type_definition_key,
@@ -370,6 +374,30 @@ fn await_terminal_probe(app: &mut App, probe: &str) {
         budget.as_millis() / base.as_millis().max(1),
         app.terminal().visible_text()
     );
+}
+
+/// `text` with every word that reads as a commit id (7 to 40 lowercase hex
+/// digits, letters among them or not) as `<id>`: a commit's id changes with
+/// the clock. Only the Linux-only ledgers use it.
+#[cfg(target_os = "linux")]
+fn no_commit_ids(text: &str) -> String {
+    let id = |w: &str| {
+        (7..=40).contains(&w.len())
+            && w.bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    };
+    let mut out = String::new();
+    let mut word = String::new();
+    for c in text.chars().map(Some).chain([None]) {
+        if let Some(c) = c.filter(char::is_ascii_alphanumeric) {
+            word.push(c);
+            continue;
+        }
+        out.push_str(if id(&word) { "<id>" } else { &word });
+        word.clear();
+        out.extend(c);
+    }
+    out
 }
 
 /// Display label of a menu entry ("---" for a divider) — test helper for the
@@ -1790,12 +1818,12 @@ fn click_open_in_explorer(app: &mut App, name: &str) {
         width: 32,
         height: 20,
     };
-    app.tree.last_inner = Rect {
+    app.tree.pretend_drawn(Rect {
         x: 5,
         y: 1,
         width: 30,
         height: 18,
-    };
+    });
     app.focus_pane(Pane::Tree);
     let idx = app
         .tree

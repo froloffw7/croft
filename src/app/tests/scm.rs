@@ -2604,6 +2604,937 @@ fn arrows_and_enter_in_source_control_open_the_selected_changes_diff() {
     assert!(app.focus == Pane::Editor);
 }
 
+/// The open menu's label at the keyboard's row, on the level it is on.
+fn scm_menu_cursor(app: &App) -> String {
+    let menu = app.context_menu.as_ref().expect("a menu is open");
+    let entry = match menu.open_submenu.and_then(|i| menu.items.get(i)) {
+        Some(MenuEntry::Submenu { items, .. }) => items.get(menu.submenu_selected),
+        _ => menu.items.get(menu.selected),
+    };
+    match entry {
+        Some(MenuEntry::Item { label, .. } | MenuEntry::Submenu { label, .. }) => label.clone(),
+        other => panic!("the cursor is on {other:?}"),
+    }
+}
+
+fn scm_actions_menu_open(app: &App) -> bool {
+    app.context_menu
+        .as_ref()
+        .is_some_and(|m| matches!(m.look, MenuLook::ScmActions { .. }))
+}
+
+/// #871: Cmd+K Shift+A (Git: Show Source Control Actions) brings Source
+/// Control up from another view with its `⋯` menu open and the first action
+/// highlighted; the arrows walk the rows, past the separator, and Enter runs
+/// the one highlighted.
+#[test]
+fn cmd_k_shift_a_opens_source_control_actions_and_enter_runs_a_row() {
+    let (_tmp, mut app) = scm_with_two_changes();
+    app.set_sidebar_view(SidebarView::Explorer);
+    app.focus_pane(Pane::Editor);
+    app.handle_key(key(KeyCode::Char('k'), KeyModifiers::SUPER))
+        .unwrap();
+    app.handle_key(key(KeyCode::Char('A'), KeyModifiers::SHIFT))
+        .unwrap();
+    assert_eq!(app.sidebar_view, SidebarView::SourceControl);
+    assert!(scm_actions_menu_open(&app));
+    assert!(app.context_menu.as_ref().unwrap().keyed);
+    draw(&mut app, 120, 40);
+    assert!(scm_actions_menu_open(&app), "drawn, it stays open");
+    assert_eq!(scm_menu_cursor(&app), "Pull");
+    for _ in 0..3 {
+        app.handle_key(key(KeyCode::Down, KeyModifiers::NONE))
+            .unwrap();
+    }
+    assert_eq!(scm_menu_cursor(&app), "Checkout to");
+    app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    assert!(app.context_menu.is_none(), "running a row closes the menu");
+    assert!(
+        app.branch_picker.is_some(),
+        "Checkout to opens the branch picker"
+    );
+}
+
+/// #871: → opens a fly-out with its first row highlighted and ← closes it;
+/// Esc backs out of an open fly-out first, then closes the menu.
+#[test]
+fn source_control_actions_fly_outs_open_and_close_from_the_keyboard() {
+    let (_tmp, mut app) = scm_with_two_changes();
+    app.open_scm_actions_menu_from_keyboard();
+    draw(&mut app, 120, 40);
+    for _ in 0..5 {
+        app.handle_key(key(KeyCode::Down, KeyModifiers::NONE))
+            .unwrap();
+    }
+    assert_eq!(
+        scm_menu_cursor(&app),
+        "Commit",
+        "Down steps over the separator"
+    );
+    app.handle_key(key(KeyCode::Right, KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(scm_menu_cursor(&app), "Commit", "the fly-out's first row");
+    assert!(app.context_menu.as_ref().unwrap().open_submenu.is_some());
+    app.handle_key(key(KeyCode::Down, KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(scm_menu_cursor(&app), "Commit Staged");
+    app.handle_key(key(KeyCode::Left, KeyModifiers::NONE))
+        .unwrap();
+    assert!(app.context_menu.as_ref().unwrap().open_submenu.is_none());
+    app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    assert!(
+        app.context_menu.as_ref().unwrap().open_submenu.is_some(),
+        "Enter opens it too"
+    );
+    app.handle_key(key(KeyCode::Esc, KeyModifiers::NONE))
+        .unwrap();
+    assert!(scm_actions_menu_open(&app), "Esc closes the fly-out first");
+    assert!(app.context_menu.as_ref().unwrap().open_submenu.is_none());
+    app.handle_key(key(KeyCode::Esc, KeyModifiers::NONE))
+        .unwrap();
+    assert!(app.context_menu.is_none());
+}
+
+/// #871: a click on `⋯` opens the menu as it always has, with no row
+/// highlighted; the first key shows the highlight where it stands, and the
+/// next moves it. A second click on `⋯` closes the menu.
+#[test]
+fn a_click_on_the_more_pill_opens_the_menu_with_no_highlight_until_a_key() {
+    let (_tmp, mut app) = scm_with_two_changes();
+    draw(&mut app, 120, 40);
+    let more = app.source_control.header_more_btn;
+    assert!(more.width > 0);
+    left_click(&mut app, more.x, more.y);
+    assert!(scm_actions_menu_open(&app));
+    assert!(!app.context_menu.as_ref().unwrap().keyed);
+    app.handle_key(key(KeyCode::Down, KeyModifiers::NONE))
+        .unwrap();
+    assert!(app.context_menu.as_ref().unwrap().keyed);
+    assert_eq!(
+        scm_menu_cursor(&app),
+        "Pull",
+        "the first key only shows the row"
+    );
+    app.handle_key(key(KeyCode::Down, KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(scm_menu_cursor(&app), "Push");
+    draw(&mut app, 120, 40);
+    left_click(&mut app, more.x, more.y);
+    assert!(app.context_menu.is_none(), "a second click on ⋯ closes it");
+}
+
+/// #871: a click on a fly-out's row opens the fly-out, and a click on one
+/// of its rows runs it and closes the menu.
+#[test]
+fn a_click_on_a_fly_out_row_runs_it() {
+    let (_tmp, mut app) = scm_with_two_changes();
+    draw(&mut app, 120, 40);
+    let more = app.source_control.header_more_btn;
+    left_click(&mut app, more.x, more.y);
+    draw(&mut app, 120, 40);
+    let branch = app
+        .context_menu
+        .as_ref()
+        .unwrap()
+        .items
+        .iter()
+        .position(|e| matches!(e, MenuEntry::Submenu { label, .. } if label == "Branch"))
+        .unwrap();
+    let row = app.scm_menu_layout().unwrap().top.row(branch).unwrap();
+    left_click(&mut app, row.x + 2, row.y);
+    assert_eq!(
+        app.context_menu.as_ref().unwrap().open_submenu,
+        Some(branch)
+    );
+    draw(&mut app, 120, 40);
+    let (_, fly_out) = app.scm_menu_layout().unwrap().fly_out.unwrap();
+    let rename = fly_out.row(2).unwrap();
+    left_click(&mut app, rename.x + 2, rename.y);
+    assert!(app.context_menu.is_none());
+    assert!(
+        app.input_prompt.is_some(),
+        "Rename Branch asks for the new name"
+    );
+}
+
+/// #871: the menu hangs from the view's `⋯` pill, so it closes when the
+/// view, or the side bar it is in, leaves the screen; it never takes the
+/// keys while unseen.
+#[test]
+fn the_source_control_actions_menu_closes_when_its_view_leaves_the_screen() {
+    let (_tmp, mut app) = scm_with_two_changes();
+    app.open_scm_actions_menu_from_keyboard();
+    draw(&mut app, 120, 40);
+    assert!(scm_actions_menu_open(&app));
+    app.show_tree = false;
+    draw(&mut app, 120, 40);
+    assert!(app.context_menu.is_none(), "the side bar hid");
+    app.open_scm_actions_menu_from_keyboard();
+    assert!(app.show_tree, "the keyboard brings the side bar back");
+    draw(&mut app, 120, 40);
+    assert!(scm_actions_menu_open(&app));
+    app.sidebar_view = SidebarView::Explorer;
+    draw(&mut app, 120, 40);
+    assert!(app.context_menu.is_none(), "another view took the side bar");
+}
+
+/// #871 review: on a terminal too short for every row, the menu shows a
+/// window of its rows kept around the keyboard's row, so the row Enter
+/// would run is always the one highlighted on screen.
+#[test]
+fn a_short_terminal_scrolls_the_actions_menu_to_the_keyboards_row() {
+    let (_tmp, mut app) = scm_with_two_changes();
+    app.open_scm_actions_menu_from_keyboard();
+    draw(&mut app, 120, 12);
+    let layout = app.scm_menu_layout().expect("the menu is drawn");
+    assert!(
+        layout.top.shown() < layout.rows.len(),
+        "12 rows cannot show all of it"
+    );
+    app.handle_key(key(KeyCode::End, KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(scm_menu_cursor(&app), "Show Git Output");
+    let buf = draw_buffer(&mut app, 120, 12);
+    let selected = app.context_menu.as_ref().unwrap().selected;
+    let row = app
+        .scm_menu_layout()
+        .and_then(|l| l.top.row(selected))
+        .expect("the keyboard's row is drawn");
+    let text: String = (row.x..row.right())
+        .map(|x| buf[(x, row.y)].symbol().to_string())
+        .collect();
+    assert!(text.contains("Show Git Output"), "{text:?}");
+    assert_eq!(
+        app.scm_menu_layout()
+            .and_then(|l| l.top.row_at(row.x + 2, row.y)),
+        Some(selected),
+        "a click there picks the same row"
+    );
+    app.handle_key(key(KeyCode::Home, KeyModifiers::NONE))
+        .unwrap();
+    draw(&mut app, 120, 12);
+    assert!(
+        app.scm_menu_layout().and_then(|l| l.top.row(0)).is_some(),
+        "Home scrolls back to the first row"
+    );
+}
+
+fn commit_dropdown_open(app: &App) -> bool {
+    app.context_menu
+        .as_ref()
+        .is_some_and(|m| m.look == MenuLook::CommitActions)
+}
+
+/// #871: Cmd+K Shift+C (Git: Show Commit Actions) brings Source Control up
+/// with the Commit button's dropdown open and its first row highlighted;
+/// the arrows walk it and Enter runs the row highlighted.
+#[test]
+fn cmd_k_shift_c_opens_the_commit_dropdown_and_enter_runs_a_row() {
+    let (_tmp, mut app) = scm_with_two_changes();
+    app.set_sidebar_view(SidebarView::Explorer);
+    app.focus_pane(Pane::Editor);
+    app.handle_key(key(KeyCode::Char('k'), KeyModifiers::SUPER))
+        .unwrap();
+    app.handle_key(key(KeyCode::Char('C'), KeyModifiers::SHIFT))
+        .unwrap();
+    assert_eq!(app.sidebar_view, SidebarView::SourceControl);
+    assert!(commit_dropdown_open(&app));
+    assert!(app.context_menu.as_ref().unwrap().keyed);
+    draw(&mut app, 120, 40);
+    assert!(commit_dropdown_open(&app), "drawn, it stays open");
+    assert_eq!(scm_menu_cursor(&app), "Commit & Push");
+    for _ in 0..4 {
+        app.handle_key(key(KeyCode::Down, KeyModifiers::NONE))
+            .unwrap();
+    }
+    assert_eq!(scm_menu_cursor(&app), "Checkout / Create Branch");
+    app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    assert!(
+        app.context_menu.is_none(),
+        "running a row closes the dropdown"
+    );
+    assert!(
+        app.branch_picker.is_some(),
+        "the row opens the branch picker"
+    );
+}
+
+/// #871: in the terminal, Cmd+K Shift+C keeps copying the last command's
+/// output; it opens no dropdown.
+#[test]
+fn cmd_k_shift_c_in_the_terminal_still_acts_on_the_last_command() {
+    let (_tmp, mut app) = scm_with_two_changes();
+    app.focus_pane(Pane::Terminal);
+    app.handle_key(key(KeyCode::Char('k'), KeyModifiers::SUPER))
+        .unwrap();
+    app.handle_key(key(KeyCode::Char('C'), KeyModifiers::SHIFT))
+        .unwrap();
+    assert!(app.context_menu.is_none());
+    assert_eq!(app.status, "No finished commands yet");
+}
+
+/// #871 review: on the panel's other tabs (Output, Problems, Ports,
+/// Captures) the panel has focus but no shell, so Cmd+K Shift+C opens the
+/// Commit dropdown there too.
+#[test]
+fn cmd_k_shift_c_on_the_problems_tab_opens_the_commit_dropdown() {
+    let (_tmp, mut app) = scm_with_two_changes();
+    app.set_bottom_panel_tab(BottomPanelTab::Problems);
+    assert!(app.focus == Pane::Terminal, "the panel has focus");
+    app.handle_key(key(KeyCode::Char('k'), KeyModifiers::SUPER))
+        .unwrap();
+    app.handle_key(key(KeyCode::Char('C'), KeyModifiers::SHIFT))
+        .unwrap();
+    assert!(commit_dropdown_open(&app), "{}", app.status);
+}
+
+/// #871: a click on `▾` opens the dropdown with no row highlighted, a click
+/// on a row runs it, a second click on `▾` closes it, and Esc closes it.
+#[test]
+fn the_commit_dropdown_answers_clicks_and_esc() {
+    let (_tmp, mut app) = scm_with_two_changes();
+    draw(&mut app, 120, 40);
+    let caret = app.source_control.last_commit_caret_area;
+    assert!(caret.width > 0);
+    left_click(&mut app, caret.x, caret.y);
+    assert!(commit_dropdown_open(&app));
+    assert!(!app.context_menu.as_ref().unwrap().keyed);
+    draw(&mut app, 120, 40);
+    left_click(&mut app, caret.x, caret.y);
+    assert!(app.context_menu.is_none(), "a second click on ▾ closes it");
+    draw(&mut app, 120, 40);
+    assert!(app.context_menu.is_none(), "and it stays closed");
+    left_click(&mut app, caret.x, caret.y);
+    app.handle_key(key(KeyCode::Esc, KeyModifiers::NONE))
+        .unwrap();
+    assert!(app.context_menu.is_none(), "Esc closes it");
+    left_click(&mut app, caret.x, caret.y);
+    draw(&mut app, 120, 40);
+    let row = app.scm_menu_layout().unwrap().top.row(4).unwrap();
+    left_click(&mut app, row.x + 2, row.y);
+    assert!(app.context_menu.is_none());
+    assert!(app.branch_picker.is_some(), "Checkout / Create Branch runs");
+}
+
+/// #871: a click outside the dropdown closes it and still does what it
+/// does there, as it always has: here, the header's refresh.
+#[test]
+fn a_click_outside_the_commit_dropdown_closes_it_and_goes_on() {
+    let (_tmp, mut app) = scm_with_two_changes();
+    draw(&mut app, 120, 40);
+    let caret = app.source_control.last_commit_caret_area;
+    left_click(&mut app, caret.x, caret.y);
+    draw(&mut app, 120, 40);
+    assert!(commit_dropdown_open(&app));
+    let refresh = app.source_control.header_refresh_btn;
+    assert!(refresh.width > 0);
+    left_click(&mut app, refresh.x, refresh.y);
+    assert!(app.context_menu.is_none());
+    assert_eq!(app.status, "Refreshed Source Control");
+}
+
+/// #871 step 4: Source Control with `seed.txt` modified and `scratch.txt`
+/// new, and `seed.txt` open in the editor with the editor focused.
+fn scm_with_seed_open() -> (tempfile::TempDir, App) {
+    let (tmp, mut app) = scm_with_two_changes();
+    assert!(app.open_file_at_launch(&tmp.path().join("seed.txt")));
+    app.focus_pane(Pane::Editor);
+    (tmp, app)
+}
+
+fn staged_names(tmp: &tempfile::TempDir) -> String {
+    git_stdout(tmp.path(), &["diff", "--cached", "--name-only"])
+}
+
+/// Run a *Git: … Changes* command and wait for its read of the changes to
+/// land and the command to act (#871).
+fn run_git_file_command(app: &mut App, command: crate::widgets::command_palette::Command) {
+    app.run_command(command);
+    settle_git_file_commands(app);
+}
+
+/// Drain the *Git: … Changes* commands until none is reading and none can
+/// start: the queue is empty, or a discard is asking first.
+fn settle_git_file_commands(app: &mut App) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        app.drain_git_file_lookup();
+        let idle = app.git_file_lookup.is_none()
+            && (app.git_file_queue.is_empty() || app.pending_discard.is_some());
+        if idle {
+            return;
+        }
+        assert!(std::time::Instant::now() < deadline, "the read lands");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+/// #871 step 4: from the editor, Git: Stage Changes stages the open file
+/// and Git: Unstage Changes unstages it again, leaving the other change
+/// alone, as VS Code's do.
+#[test]
+fn git_stage_and_unstage_changes_act_on_the_open_file() {
+    use crate::widgets::command_palette::Command;
+    let (tmp, mut app) = scm_with_seed_open();
+    run_git_file_command(&mut app, Command::GitStageChanges);
+    assert_eq!(staged_names(&tmp).trim(), "seed.txt", "{}", app.status);
+    assert!(wait_for_changes(&mut app, |a| a
+        .source_control
+        .entries
+        .iter()
+        .any(
+            |e| e.path == "seed.txt" && e.kind.section() == crate::git::ChangeSection::Staged
+        )));
+    run_git_file_command(&mut app, Command::GitUnstageChanges);
+    assert_eq!(staged_names(&tmp).trim(), "", "{}", app.status);
+    assert!(git_stdout(tmp.path(), &["status", "--porcelain"]).contains("?? scratch.txt"));
+}
+
+/// #871 step 4: from the editor, Git: Discard Changes asks before it
+/// discards the open file, and Git: Open Changes opens its diff.
+#[test]
+fn git_discard_and_open_changes_act_on_the_open_file() {
+    use crate::widgets::command_palette::Command;
+    let (_tmp, mut app) = scm_with_seed_open();
+    run_git_file_command(&mut app, Command::GitDiscardChanges);
+    let pending = app.pending_discard.as_ref().expect("Discard asks first");
+    assert_eq!(pending.rel_path, "seed.txt");
+    app.pending_discard = None;
+    run_git_file_command(&mut app, Command::GitOpenChanges);
+    let diff = app
+        .editor
+        .diff
+        .as_ref()
+        .expect("Open Changes opens the diff");
+    assert!(diff.right_path.ends_with("seed.txt"));
+}
+
+/// #871 step 4: with the change list focused, the commands do exactly what
+/// the list's own keys do to the selected row, which are their shortcuts.
+#[test]
+fn git_file_commands_act_on_the_selected_row_in_the_change_list() {
+    use crate::widgets::command_palette::Command;
+    let (tmp, mut app) = scm_with_two_changes();
+    app.set_sidebar_view(SidebarView::SourceControl);
+    app.handle_key(key(KeyCode::Tab, KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(
+        app.source_control.keys,
+        crate::widgets::source_control::KeyStop::List
+    );
+    let scratch = app
+        .source_control
+        .entries
+        .iter()
+        .position(|e| e.path == "scratch.txt")
+        .unwrap();
+    app.source_control.selected_change = Some(scratch);
+    app.run_command(Command::GitStageChanges);
+    assert_eq!(staged_names(&tmp).trim(), "scratch.txt", "{}", app.status);
+}
+
+/// #871 step 4: a file with nothing to stage, or no open file, says so.
+#[test]
+fn git_file_commands_say_why_they_do_nothing() {
+    use crate::widgets::command_palette::Command;
+    let (tmp, mut app) = scm_with_seed_open();
+    run_git_file_command(&mut app, Command::GitUnstageChanges);
+    assert_eq!(app.status, "No staged changes in seed.txt");
+    std::fs::write(tmp.path().join("clean.txt"), "same\n").unwrap();
+    assert!(git_succeeds(tmp.path(), &["add", "clean.txt"]));
+    assert!(git_succeeds(tmp.path(), &["commit", "-q", "-m", "clean"]));
+    assert!(app.open_file_at_launch(&tmp.path().join("clean.txt")));
+    app.focus_pane(Pane::Editor);
+    run_git_file_command(&mut app, Command::GitStageChanges);
+    assert_eq!(app.status, "No changes in clean.txt");
+    assert_eq!(staged_names(&tmp).trim(), "");
+}
+
+/// #871 (review of #2732): the commands read the changes themselves.
+/// Source Control's list loads only while the view is open, so a file
+/// changed before the view was ever opened said "No changes" and stayed
+/// unstaged.
+#[test]
+fn git_file_commands_read_the_changes_before_source_control_opens() {
+    use crate::widgets::command_palette::Command;
+    let tmp = make_committed_repo();
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    assert!(wait_for_changes(&mut app, |a| a.git.status().in_repo));
+    std::fs::write(tmp.path().join("seed.txt"), b"changed\n").unwrap();
+    assert!(app.open_file_at_launch(&tmp.path().join("seed.txt")));
+    app.focus_pane(Pane::Editor);
+    assert!(
+        app.source_control.entries.is_empty(),
+        "Source Control has not loaded the change"
+    );
+    run_git_file_command(&mut app, Command::GitStageChanges);
+    assert_eq!(staged_names(&tmp).trim(), "seed.txt", "{}", app.status);
+}
+
+/// #871 (review of #2732): a deleted file's view names `/dev/null` as its
+/// new side, which the commands took for the file and called outside the
+/// repository; they act on the deleted file.
+#[test]
+fn git_file_commands_act_on_a_deleted_files_view() {
+    use crate::widgets::command_palette::Command;
+    let tmp = make_committed_repo();
+    std::fs::remove_file(tmp.path().join("seed.txt")).unwrap();
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    assert!(wait_for_changes(&mut app, |a| !a
+        .source_control
+        .entries
+        .is_empty()));
+    app.set_sidebar_view(SidebarView::SourceControl);
+    let row = app
+        .source_control
+        .entries
+        .iter()
+        .position(|e| e.path == "seed.txt")
+        .expect("the deletion is listed");
+    app.open_source_control_entry(row);
+    let diff = app.editor.diff.as_ref().expect("the deletion's view");
+    assert_eq!(diff.right_path, Path::new("/dev/null"));
+    app.focus_pane(Pane::Editor);
+    run_git_file_command(&mut app, Command::GitStageChanges);
+    assert_eq!(
+        git_stdout(tmp.path(), &["diff", "--cached", "--name-status"]).trim(),
+        "D\tseed.txt",
+        "{}",
+        app.status
+    );
+}
+
+/// #871 (review of #2732): a workspace opened through a symlink names its
+/// files one way and git names its root the other (macOS's `/var` is
+/// `/private/var`); the commands found every file outside the repository.
+#[cfg(unix)]
+#[test]
+fn git_file_commands_find_the_file_through_a_symlinked_folder() {
+    use crate::widgets::command_palette::Command;
+    let tmp = make_committed_repo();
+    let links = tempfile::tempdir().unwrap();
+    let link = links.path().join("through-a-link");
+    std::os::unix::fs::symlink(tmp.path(), &link).unwrap();
+    std::fs::write(tmp.path().join("seed.txt"), b"changed\n").unwrap();
+    let mut app = App::new(link.clone()).unwrap();
+    assert!(wait_for_changes(&mut app, |a| a.git.status().in_repo));
+    assert!(app.open_file_at_launch(&link.join("seed.txt")));
+    app.focus_pane(Pane::Editor);
+    run_git_file_command(&mut app, Command::GitStageChanges);
+    assert_eq!(staged_names(&tmp).trim(), "seed.txt", "{}", app.status);
+}
+
+/// #871 (review of #2732): before git's first status lands, the app takes the
+/// workspace folder for the repository's root. A folder inside a repository
+/// is not where git's paths start, so the command ran `git add sub/f.txt`
+/// from `sub` and failed; it acts in the repository its own read found.
+#[test]
+fn git_file_commands_act_in_the_repository_their_read_found() {
+    use crate::widgets::command_palette::Command;
+    let tmp = make_committed_repo();
+    let sub = tmp.path().join("sub");
+    std::fs::create_dir(&sub).unwrap();
+    std::fs::write(sub.join("f.txt"), b"one\n").unwrap();
+    assert!(git_succeeds(tmp.path(), &["add", "sub/f.txt"]));
+    assert!(git_succeeds(tmp.path(), &["commit", "-q", "-m", "sub"]));
+    std::fs::write(sub.join("f.txt"), b"two\n").unwrap();
+    let mut app = App::new(sub.clone()).unwrap();
+    assert!(app.open_file_at_launch(&sub.join("f.txt")));
+    app.focus_pane(Pane::Editor);
+    assert_eq!(
+        app.git.status().repo_root,
+        None,
+        "git's first status has not landed"
+    );
+    run_git_file_command(&mut app, Command::GitStageChanges);
+    assert_eq!(staged_names(&tmp).trim(), "sub/f.txt", "{}", app.status);
+}
+
+/// #871 (review of #2732): a command run while another is still reading the
+/// changes waits its turn; it replaced the first, which never ran.
+#[test]
+fn git_file_commands_run_while_one_is_reading_wait_their_turn() {
+    use crate::widgets::command_palette::Command;
+    let (tmp, mut app) = scm_with_seed_open();
+    app.run_command(Command::GitStageChanges);
+    assert!(
+        app.git_file_lookup.is_some(),
+        "Stage on seed.txt is reading"
+    );
+    assert!(app.open_file_at_launch(&tmp.path().join("scratch.txt")));
+    app.focus_pane(Pane::Editor);
+    run_git_file_command(&mut app, Command::GitStageChanges);
+    let staged = staged_names(&tmp);
+    assert!(
+        staged.contains("seed.txt") && staged.contains("scratch.txt"),
+        "both are staged: {staged:?} ({})",
+        app.status
+    );
+}
+
+/// #871 (review of #2732): a command waiting its turn does not run while a
+/// discard is asking first. A second Discard replaced the question's file,
+/// so answering yes discarded the wrong one; it now asks after the first is
+/// answered.
+#[test]
+fn a_waiting_command_holds_while_a_discard_asks_first() {
+    use crate::widgets::command_palette::Command;
+    let (tmp, mut app) = scm_with_seed_open();
+    app.run_command(Command::GitDiscardChanges);
+    assert!(app.open_file_at_launch(&tmp.path().join("scratch.txt")));
+    app.focus_pane(Pane::Editor);
+    run_git_file_command(&mut app, Command::GitDiscardChanges);
+    let asking = |app: &App| app.pending_discard.as_ref().map(|p| p.rel_path.clone());
+    assert_eq!(asking(&app).as_deref(), Some("seed.txt"));
+    for _ in 0..20 {
+        app.drain_git_file_lookup();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(
+        asking(&app).as_deref(),
+        Some("seed.txt"),
+        "the question stays on its own file"
+    );
+    app.confirm_pending_discard();
+    assert_eq!(
+        std::fs::read_to_string(tmp.path().join("seed.txt")).unwrap(),
+        git_stdout_untrimmed(tmp.path(), &["show", "HEAD:seed.txt"]),
+        "yes discarded seed.txt"
+    );
+    assert!(
+        tmp.path().join("scratch.txt").exists(),
+        "scratch.txt is kept"
+    );
+    settle_git_file_commands(&mut app);
+    assert_eq!(asking(&app).as_deref(), Some("scratch.txt"));
+}
+
+/// #871 (review of #2732): a command whose read is in flight when a discard
+/// in the change list starts asking does not land behind the question. Its
+/// Discard replaced the file the question was about, so yes deleted the
+/// wrong one; it now reads again once the question is answered.
+#[test]
+fn a_command_reading_when_a_discard_asks_reads_again_after() {
+    use crate::widgets::command_palette::Command;
+    let (tmp, mut app) = scm_with_seed_open();
+    app.run_command(Command::GitDiscardChanges);
+    assert!(
+        app.git_file_lookup.is_some(),
+        "Discard on seed.txt is reading"
+    );
+    let scratch = app
+        .source_control
+        .entries
+        .iter()
+        .position(|e| e.path == "scratch.txt")
+        .expect("scratch.txt is listed");
+    app.request_discard_source_control_entry(scratch);
+    let asking = |app: &App| app.pending_discard.as_ref().map(|p| p.rel_path.clone());
+    for _ in 0..20 {
+        app.drain_git_file_lookup();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(
+        asking(&app).as_deref(),
+        Some("scratch.txt"),
+        "the question stays on its own file"
+    );
+    app.confirm_pending_discard();
+    assert!(
+        !tmp.path().join("scratch.txt").exists(),
+        "yes discarded scratch.txt"
+    );
+    assert_ne!(
+        std::fs::read_to_string(tmp.path().join("seed.txt")).unwrap(),
+        git_stdout_untrimmed(tmp.path(), &["show", "HEAD:seed.txt"]),
+        "seed.txt is untouched"
+    );
+    settle_git_file_commands(&mut app);
+    assert_eq!(asking(&app).as_deref(), Some("seed.txt"));
+}
+
+/// #871 (review of #2732): a command run while an earlier one waits its
+/// turn joins the back of the line. Run between a discard's answer and the
+/// next tick, Unstage started ahead of the Stage set aside for the question,
+/// and the Stage then staged the whole file.
+#[test]
+fn a_command_run_while_one_waits_goes_behind_it() {
+    use crate::widgets::command_palette::Command;
+    let (tmp, mut app) = scm_with_seed_open();
+    app.run_command(Command::GitStageChanges);
+    let scratch = app
+        .source_control
+        .entries
+        .iter()
+        .position(|e| e.path == "scratch.txt")
+        .expect("scratch.txt is listed");
+    app.request_discard_source_control_entry(scratch);
+    app.drain_git_file_lookup();
+    assert!(app.git_file_lookup.is_none(), "Stage is set aside");
+    assert_eq!(app.git_file_queue.len(), 1);
+    app.cancel_pending_discard();
+    app.run_command(Command::GitUnstageChanges);
+    settle_git_file_commands(&mut app);
+    assert_eq!(app.status, "Unstaged seed.txt");
+    assert_eq!(
+        staged_names(&tmp).trim(),
+        "",
+        "Stage ran first, then Unstage"
+    );
+}
+
+/// #871 step 5: a repository with `n` commits and a clean tree, Source
+/// Control showing its COMMITS loaded and drawn at 120x40.
+fn scm_with_history(n: usize) -> (tempfile::TempDir, App) {
+    let tmp = make_committed_repo();
+    for i in 1..n {
+        std::fs::write(tmp.path().join("seed.txt"), format!("change {i}\n")).unwrap();
+        assert!(git_succeeds(
+            tmp.path(),
+            &["commit", "-q", "-am", &format!("change {i}")]
+        ));
+    }
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    assert!(wait_for_changes(&mut app, |a| a
+        .source_control
+        .status
+        .in_repo));
+    app.set_sidebar_view(SidebarView::SourceControl);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !(app.commit_graph.is_loaded() && app.commit_graph.last_row() + 1 == n) {
+        app.sync_explorer_panels();
+        assert!(std::time::Instant::now() < deadline, "COMMITS loads");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    draw(&mut app, 120, 40);
+    (tmp, app)
+}
+
+fn press(app: &mut App, code: KeyCode, mods: KeyModifiers) {
+    app.handle_key(key(code, mods)).unwrap();
+}
+
+/// #871 step 5: Tab steps message box -> change list -> COMMITS -> message
+/// box, and Shift+Tab goes round the other way.
+#[test]
+fn tab_steps_through_source_control_message_list_and_commits() {
+    let (_tmp, mut app) = scm_with_two_changes();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !app.commit_graph.is_loaded() {
+        app.sync_explorer_panels();
+        assert!(std::time::Instant::now() < deadline, "COMMITS loads");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    draw(&mut app, 120, 40);
+    let at = |app: &App| match app.source_control.keys {
+        crate::widgets::source_control::KeyStop::Message => "message",
+        crate::widgets::source_control::KeyStop::List => "list",
+        crate::widgets::source_control::KeyStop::Commits => "commits",
+        crate::widgets::source_control::KeyStop::Repositories => "repositories",
+        crate::widgets::source_control::KeyStop::Card => "card",
+    };
+    assert_eq!(at(&app), "message");
+    press(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+    assert_eq!(at(&app), "list");
+    press(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+    assert_eq!(at(&app), "commits");
+    assert!(
+        app.commit_graph.selected_commit().is_some(),
+        "a commit is picked"
+    );
+    // One stop has the keys at a time: the message box shows no caret
+    // while COMMITS has them.
+    draw(&mut app, 120, 40);
+    assert_eq!(app.source_control.cursor_screen_pos(), None);
+    press(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+    assert_eq!(at(&app), "message");
+    draw(&mut app, 120, 40);
+    assert!(app.source_control.cursor_screen_pos().is_some());
+    press(&mut app, KeyCode::BackTab, KeyModifiers::SHIFT);
+    assert_eq!(at(&app), "commits");
+    press(&mut app, KeyCode::BackTab, KeyModifiers::SHIFT);
+    assert_eq!(at(&app), "list");
+    press(&mut app, KeyCode::BackTab, KeyModifiers::SHIFT);
+    assert_eq!(at(&app), "message");
+}
+
+/// #871 step 5: a clean repository has no change list, so Tab goes from
+/// the message box straight to COMMITS.
+#[test]
+fn tab_skips_an_empty_change_list_to_commits() {
+    let (_tmp, mut app) = scm_with_history(3);
+    press(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+    assert_eq!(
+        app.source_control.keys,
+        crate::widgets::source_control::KeyStop::Commits
+    );
+}
+
+/// #871 (review of #2733): Tab to COMMITS before its history has loaded
+/// picks the newest commit once it lands, so Enter opens it; nothing stayed
+/// picked until an arrow was pressed.
+#[test]
+fn commits_given_the_keys_while_loading_pick_the_newest_once_loaded() {
+    let tmp = make_committed_repo();
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    assert!(wait_for_changes(&mut app, |a| a
+        .source_control
+        .status
+        .in_repo));
+    app.set_sidebar_view(SidebarView::SourceControl);
+    assert!(!app.commit_graph.is_loaded(), "COMMITS is still loading");
+    press(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+    assert_eq!(
+        app.source_control.keys,
+        crate::widgets::source_control::KeyStop::Commits
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !app.commit_graph.is_loaded() {
+        app.sync_explorer_panels();
+        assert!(std::time::Instant::now() < deadline, "COMMITS loads");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(
+        app.commit_graph
+            .selected_commit()
+            .map(|c| c.summary.as_str()),
+        Some("init")
+    );
+}
+
+/// #871 (review of #2733): with COMMITS holding the keys, screen reader mode
+/// reads COMMITS and the picked commit, which Enter opens; it read the change
+/// list's selected file, or nothing in a clean repository.
+#[test]
+fn screen_reader_mode_reads_the_picked_commit() {
+    let (_tmp, mut app) = scm_with_history(3);
+    press(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+    let read = |app: &App| {
+        let snap = app.a11y_snapshot();
+        (snap.focus, snap.item)
+    };
+    let picked = |app: &App| {
+        let c = app.commit_graph.selected_commit().unwrap();
+        format!("{}, by {}, {}", c.summary, c.author, c.short_hash)
+    };
+    let (focus, item) = read(&app);
+    assert_eq!(focus, "Source Control, Commits, 3 commits");
+    assert_eq!(item, Some(picked(&app)));
+    assert!(item.unwrap().starts_with("change 2, by "));
+    press(&mut app, KeyCode::Down, KeyModifiers::NONE);
+    let (_, item) = read(&app);
+    assert!(item.as_deref().unwrap().starts_with("change 1, by "));
+    press(&mut app, KeyCode::Left, KeyModifiers::NONE);
+    assert_eq!(
+        read(&app),
+        (String::from("Source Control, Commits, collapsed"), None)
+    );
+}
+
+/// #871 step 5: in COMMITS the arrows, Home / End and PageUp / PageDown
+/// pick a commit and keep it on screen, Enter opens the picked commit,
+/// and Left / Right collapse and expand the section.
+#[test]
+fn commits_answer_the_keyboard() {
+    let (_tmp, mut app) = scm_with_history(40);
+    press(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+    let summary = |app: &App| app.commit_graph.selected_commit().unwrap().summary.clone();
+    assert_eq!(summary(&app), "change 39", "the newest commit first");
+    press(&mut app, KeyCode::Down, KeyModifiers::NONE);
+    assert_eq!(summary(&app), "change 38");
+    press(&mut app, KeyCode::End, KeyModifiers::NONE);
+    assert_eq!(summary(&app), "init");
+    let buf = draw_buffer(&mut app, 120, 40);
+    let area = app.commit_graph.last_area;
+    let drawn: String = (area.y..area.bottom())
+        .flat_map(|y| (area.x..area.right()).map(move |x| (x, y)))
+        .map(|(x, y)| buf[(x, y)].symbol().to_string())
+        .collect();
+    assert!(
+        drawn.contains("init"),
+        "End scrolls the oldest commit on screen"
+    );
+    press(&mut app, KeyCode::PageUp, KeyModifiers::NONE);
+    assert_ne!(summary(&app), "init");
+    press(&mut app, KeyCode::Home, KeyModifiers::NONE);
+    assert_eq!(summary(&app), "change 39");
+    let short = app
+        .commit_graph
+        .selected_commit()
+        .unwrap()
+        .short_hash
+        .clone();
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(app.status, format!("Loading commit {short}\u{2026}"));
+    press(&mut app, KeyCode::Left, KeyModifiers::NONE);
+    assert!(app.commit_graph.collapsed);
+    press(&mut app, KeyCode::Down, KeyModifiers::NONE);
+    assert_eq!(
+        summary(&app),
+        "change 39",
+        "a collapsed section does not move"
+    );
+    press(&mut app, KeyCode::Right, KeyModifiers::NONE);
+    assert!(!app.commit_graph.collapsed);
+}
+
+/// #871 step 5: a click on a commit picks it and gives COMMITS the keys; a
+/// click back in the message box takes them away.
+#[test]
+fn a_click_on_a_commit_picks_it_for_the_keyboard() {
+    let (tmp, mut app) = scm_with_history(5);
+    let row_y = (0..40)
+        .find(|&y| {
+            app.commit_graph
+                .commit_at(y)
+                .is_some_and(|c| c.summary == "change 2")
+        })
+        .expect("the commit is drawn");
+    let x = app.commit_graph.last_area.x + 4;
+    left_click(&mut app, x, row_y);
+    assert_eq!(
+        app.source_control.keys,
+        crate::widgets::source_control::KeyStop::Commits
+    );
+    assert_eq!(
+        app.commit_graph.selected_commit().unwrap().summary,
+        "change 2"
+    );
+    press(&mut app, KeyCode::Down, KeyModifiers::NONE);
+    assert_eq!(
+        app.commit_graph.selected_commit().unwrap().summary,
+        "change 1"
+    );
+    draw(&mut app, 120, 40);
+    let input = app.source_control.last_input_area;
+    left_click(&mut app, input.x + 1, input.y);
+    assert_eq!(
+        app.source_control.keys,
+        crate::widgets::source_control::KeyStop::Message
+    );
+    drop(tmp);
+}
+
+/// #871 step 5: R in the change list or COMMITS refreshes, as the header's
+/// button does (Git: Refresh); in the message box it is a letter.
+#[test]
+fn r_refreshes_from_the_lists_and_types_in_the_message_box() {
+    let (_tmp, mut app) = scm_with_two_changes();
+    press(&mut app, KeyCode::Char('r'), KeyModifiers::NONE);
+    assert_eq!(app.source_control.message, "r");
+    press(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+    app.status.clear();
+    press(&mut app, KeyCode::Char('r'), KeyModifiers::NONE);
+    assert_eq!(app.status, "Refreshed Source Control");
+    press(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+    app.status.clear();
+    press(&mut app, KeyCode::Char('r'), KeyModifiers::NONE);
+    assert_eq!(app.status, "Refreshed Source Control");
+}
+
 /// #871: in the list `s` stages the selected row, `u` unstages it and `d`
 /// asks before discarding it, each staying on the file it moved.
 #[test]
@@ -7324,6 +8255,7 @@ fn discarding_a_submodule_refuses_instead_of_claiming_success() {
     let inner_head = git_stdout_untrimmed(&root.join("lib"), &["rev-parse", "HEAD"]);
     let mut app = App::new(root.clone()).unwrap();
     app.pending_discard = Some(PendingDiscard {
+        root: root.clone(),
         rel_path: "lib".into(),
         untracked: false,
         staged: false,
@@ -7354,6 +8286,7 @@ fn a_plain_file_beside_a_submodule_still_discards() {
     std::fs::write(root.join("a.txt"), "changed\n").unwrap();
     let mut app = App::new(root.clone()).unwrap();
     app.pending_discard = Some(PendingDiscard {
+        root: root.clone(),
         rel_path: "a.txt".into(),
         untracked: false,
         staged: false,
@@ -7836,5 +8769,427 @@ fn the_source_control_badge_counts_every_row_in_every_folder() {
         term.backend().buffer()[corner].symbol(),
         "3",
         "the same count as with pictures"
+    );
+}
+
+/// #871 review: the Commit dropdown keeps the keyboard's row on screen too,
+/// when the terminal is too short for all ten rows below the button.
+#[test]
+fn a_short_terminal_scrolls_the_commit_dropdown_to_the_keyboards_row() {
+    let (_tmp, mut app) = scm_with_two_changes();
+    app.open_commit_actions_menu_from_keyboard();
+    draw(&mut app, 120, 18);
+    let layout = app.scm_menu_layout().expect("the dropdown is drawn");
+    assert!(
+        layout.top.shown() < layout.rows.len(),
+        "18 rows cannot show all of it"
+    );
+    app.handle_key(key(KeyCode::End, KeyModifiers::NONE))
+        .unwrap();
+    assert!(scm_menu_cursor(&app).starts_with("View Changes vs "));
+    let buf = draw_buffer(&mut app, 120, 18);
+    let selected = app.context_menu.as_ref().unwrap().selected;
+    let row = app
+        .scm_menu_layout()
+        .and_then(|l| l.top.row(selected))
+        .expect("the keyboard's row is drawn");
+    let text: String = (row.x..row.right())
+        .map(|x| buf[(x, row.y)].symbol().to_string())
+        .collect();
+    assert!(text.contains("View Changes vs "), "{text:?}");
+}
+
+/// With two folders open, Source Control shows the folder of the focused
+/// file; its Initialize Repository button turns THAT folder into a
+/// repository, not the first folder (which already is one).
+#[test]
+fn initialize_repository_inits_the_folder_source_control_shows() {
+    let tmp = tempfile::tempdir().unwrap();
+    let a = tmp.path().join("repa");
+    std::fs::create_dir(&a).unwrap();
+    git_ok(&a, &["init", "-q"]);
+    std::fs::write(a.join("f.txt"), "x\n").unwrap();
+    let b = tmp.path().join("plain");
+    std::fs::create_dir(&b).unwrap();
+    std::fs::write(b.join("g.txt"), "y\n").unwrap();
+    let mut app = App::new(a.clone()).unwrap();
+    app.add_workspace_folder(b.clone());
+    let b = b.canonicalize().unwrap();
+    app.set_sidebar_view(SidebarView::SourceControl);
+    app.editor.open_pinned(&b.join("g.txt")).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        let _ = app.drain_git_responses();
+        let _ = draw_buffer(&mut app, 140, 50);
+        if app.active_scm_root == b && app.source_control.last_init_repo_button_area.width > 0 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "Source Control never showed the plain folder's card"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let btn = app.source_control.last_init_repo_button_area;
+    left_click(&mut app, btn.x + btn.width / 2, btn.y + 1);
+    assert!(
+        b.join(".git").is_dir(),
+        "the shown folder became a repository; status: {}",
+        app.status
+    );
+    // And Source Control then shows it as one.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while !app.source_control.status.in_repo {
+        let _ = app.drain_git_responses();
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the card stayed after Initialize"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+/// Once Initialize Repository has made the folder a repository, the spot
+/// where its button was is the change list's (or nothing's): a click there
+/// does what is drawn there now, and never runs `git init` again (#2736).
+#[test]
+fn a_click_where_initialize_was_does_not_init_again() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("a.txt"), "x\n").unwrap();
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    app.set_sidebar_view(SidebarView::SourceControl);
+    let _ = draw_buffer(&mut app, 140, 50);
+    let btn = app.source_control.last_init_repo_button_area;
+    assert!(btn.width > 0, "the card offers Initialize Repository");
+    let (x, y) = (btn.x + btn.width / 2, btn.y + 1);
+    left_click(&mut app, x, y);
+    assert!(tmp.path().join(".git").is_dir(), "status: {}", app.status);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while !app.source_control.status.in_repo {
+        let _ = app.drain_git_responses();
+        assert!(
+            std::time::Instant::now() < deadline,
+            "Source Control never showed the new repository"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let _ = draw_buffer(&mut app, 140, 50);
+    app.status.clear();
+    left_click(&mut app, x, y);
+    assert!(
+        !app.status.starts_with("Initialized"),
+        "a click where the button was ran git init again: {}",
+        app.status
+    );
+}
+
+use crate::widgets::source_control::KeyStop;
+
+/// Two open folders that are both repositories, with Source Control open
+/// on the first and REPOSITORIES drawn: (temp dir, app, first, second).
+fn scm_with_two_repositories() -> (
+    tempfile::TempDir,
+    App,
+    std::path::PathBuf,
+    std::path::PathBuf,
+) {
+    let tmp = tempfile::tempdir().unwrap();
+    let mk_repo = |name: &str| {
+        let dir = tmp.path().join(name);
+        std::fs::create_dir(&dir).unwrap();
+        git_ok(&dir, &["init", "-q"]);
+        std::fs::write(dir.join("f.txt"), "x\n").unwrap();
+        dir.canonicalize().unwrap()
+    };
+    let (a, b) = (mk_repo("repa"), mk_repo("repb"));
+    let mut app = App::new(a.clone()).unwrap();
+    app.add_workspace_folder(b.clone());
+    app.set_sidebar_view(SidebarView::SourceControl);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        let _ = app.drain_git_responses();
+        app.sync_focus_flags();
+        draw(&mut app, 120, 40);
+        if app.source_control.repo_row_areas.len() == 2 && app.source_control.status.in_repo {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "REPOSITORIES never drew both rows"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    (tmp, app, a, b)
+}
+
+/// Source Control open on `app`'s folder, drawn at `w` x `h` until git
+/// has answered for it, so the no-repository card has the keys.
+fn scm_card_ready(app: &mut App, w: u16, h: u16) {
+    app.set_sidebar_view(SidebarView::SourceControl);
+    app.sync_focus_flags();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        let _ = app.drain_git_responses();
+        draw(app, w, h);
+        if app.source_control.status_known {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "git never answered for the folder"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    draw(app, w, h);
+}
+
+/// #871 step 5b: REPOSITORIES is the first Tab stop. Shift+Tab from the
+/// message box reaches it on the shown repository's row, the arrows move,
+/// Enter shows the row's repository and keeps the keys there, and Tab goes
+/// on to the message box; Tab from COMMITS comes round to it.
+#[test]
+fn the_repositories_rows_answer_the_keyboard() {
+    let (_tmp, mut app, a, b) = scm_with_two_repositories();
+    assert_eq!(app.source_control.keys, KeyStop::Message);
+    press(&mut app, KeyCode::BackTab, KeyModifiers::SHIFT);
+    assert_eq!(app.source_control.keys, KeyStop::Repositories);
+    assert_eq!(app.active_scm_root, a);
+    assert_eq!(app.source_control.repo_cursor, 0, "on the shown row");
+    press(&mut app, KeyCode::Down, KeyModifiers::NONE);
+    assert_eq!(app.source_control.repo_cursor, 1);
+    press(&mut app, KeyCode::Down, KeyModifiers::NONE);
+    assert_eq!(app.source_control.repo_cursor, 1, "stops at the last row");
+    assert_eq!(app.active_scm_root, a, "moving shows nothing yet");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(app.active_scm_root, b, "Enter shows the row's repository");
+    assert_eq!(app.scm_pin.as_ref(), Some(&b), "pinned, as a click pins");
+    assert_eq!(app.source_control.keys, KeyStop::Repositories);
+    press(&mut app, KeyCode::Home, KeyModifiers::NONE);
+    assert_eq!(app.source_control.repo_cursor, 0);
+    press(&mut app, KeyCode::Char(' '), KeyModifiers::NONE);
+    assert_eq!(app.active_scm_root, a, "Space shows it too");
+    press(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+    assert_eq!(app.source_control.keys, KeyStop::Message);
+    // Round the other way: from COMMITS, Tab comes back to REPOSITORIES.
+    press(&mut app, KeyCode::BackTab, KeyModifiers::SHIFT);
+    press(&mut app, KeyCode::BackTab, KeyModifiers::SHIFT);
+    assert_eq!(app.source_control.keys, KeyStop::Commits);
+    press(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+    assert_eq!(app.source_control.keys, KeyStop::Repositories);
+}
+
+/// While REPOSITORIES has the keys, the keyboard's row wears the focused
+/// selection band and the shown repository's row only its bold label; with
+/// the keys back in the message box the band returns to the shown row,
+/// greyed, as the change list's does without the keys.
+#[test]
+fn the_repositories_band_follows_the_keyboard_row() {
+    let (_tmp, mut app, _, _) = scm_with_two_repositories();
+    let rows = app.source_control.repo_row_areas.clone();
+    let bg = |app: &mut App, row: usize| {
+        let buf = draw_buffer(app, 120, 40);
+        let r = rows[row].0;
+        buf[(r.x + r.width / 2, r.y)].bg
+    };
+    let shown_unkeyed = bg(&mut app, 0);
+    let other_unkeyed = bg(&mut app, 1);
+    assert_ne!(shown_unkeyed, other_unkeyed, "the shown row has the band");
+    press(&mut app, KeyCode::BackTab, KeyModifiers::SHIFT);
+    press(&mut app, KeyCode::Down, KeyModifiers::NONE);
+    let shown_keyed = bg(&mut app, 0);
+    let cursor_keyed = bg(&mut app, 1);
+    assert_eq!(shown_keyed, other_unkeyed, "the band left the shown row");
+    assert_ne!(
+        cursor_keyed, shown_unkeyed,
+        "the keyed band wears the focus"
+    );
+    assert_ne!(
+        cursor_keyed, other_unkeyed,
+        "the keyboard's row has the band"
+    );
+}
+
+/// A click on a REPOSITORIES row gives the rows the keys on that row, as a
+/// click on a change does for the change list; a click elsewhere in the
+/// view takes them back.
+#[test]
+fn a_click_on_a_repository_row_gives_it_the_keys() {
+    let (_tmp, mut app, _, b) = scm_with_two_repositories();
+    let (rect, _) = app.source_control.repo_row_areas[1].clone();
+    left_click(&mut app, rect.x + 2, rect.y);
+    assert_eq!(app.active_scm_root, b);
+    assert_eq!(app.source_control.keys, KeyStop::Repositories);
+    assert_eq!(app.source_control.repo_cursor, 1);
+    draw(&mut app, 120, 40);
+    let input = app.source_control.last_input_area;
+    left_click(&mut app, input.x + 2, input.y + 1);
+    assert_eq!(app.source_control.keys, KeyStop::Message);
+}
+
+/// #871 step 5b: in a folder with no repository the card's Initialize
+/// Repository has the keys (typing writes nowhere), Enter presses it, and
+/// once the folder is a repository the keys are the message box's.
+#[test]
+fn the_no_repository_card_answers_the_keyboard() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("a.txt"), "x\n").unwrap();
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    scm_card_ready(&mut app, 120, 40);
+    assert_eq!(app.source_control.keys, KeyStop::Card);
+    assert_eq!(
+        app.source_control.keyed_card_button(),
+        Some(crate::widgets::source_control::CardButton::Initialize)
+    );
+    press(&mut app, KeyCode::Char('x'), KeyModifiers::NONE);
+    assert_eq!(app.source_control.message, "", "no hidden message box");
+    press(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+    assert_eq!(app.source_control.keys, KeyStop::Card, "the only stop");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(tmp.path().join(".git").is_dir(), "status: {}", app.status);
+    assert!(wait_for_changes(&mut app, |a| a
+        .source_control
+        .status
+        .in_repo));
+    assert_eq!(app.source_control.keys, KeyStop::Message);
+}
+
+/// With repositories in subfolders, the card's Open buttons are its stops:
+/// Tab and Down walk them, Shift+Tab and Up walk back, and Enter opens the
+/// one with the keys.
+#[test]
+fn tab_walks_the_cards_open_buttons() {
+    let (tmp, _) = nested_repo_1227();
+    let other = tmp.path().join("zother");
+    std::fs::create_dir(&other).unwrap();
+    git_init_with_identity(&other);
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    scm_card_ready(&mut app, 140, 50);
+    assert_eq!(app.source_control.nested_repo_button_areas.len(), 2);
+    assert_eq!(app.source_control.keys, KeyStop::Card);
+    assert_eq!(app.source_control.card_button, 0);
+    press(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+    assert_eq!(app.source_control.card_button, 1);
+    press(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+    assert_eq!(app.source_control.card_button, 0, "round again");
+    press(&mut app, KeyCode::BackTab, KeyModifiers::SHIFT);
+    assert_eq!(app.source_control.card_button, 1, "from the last");
+    press(&mut app, KeyCode::Up, KeyModifiers::NONE);
+    assert_eq!(app.source_control.card_button, 0);
+    press(&mut app, KeyCode::Down, KeyModifiers::NONE);
+    let target = app.source_control.nested_repo_button_areas[1].1.clone();
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(app.workspace_root(), target.as_path());
+}
+
+/// The card's button with the keys lifts as a hovered one does, on a
+/// surfaces theme and on a plain one, and only while Source Control is
+/// focused.
+#[test]
+fn the_keyed_card_button_lifts() {
+    for theme in [crate::theme::Theme::LOCH, crate::theme::Theme::DARK_BLUE] {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+        app.apply_theme_visuals(theme);
+        scm_card_ready(&mut app, 120, 40);
+        let buf = draw_buffer(&mut app, 120, 40);
+        let b = app.source_control.last_init_repo_button_area;
+        let keyed = buf[(b.x + 1, b.y + 1)].bg;
+        app.focus_pane(Pane::Editor);
+        app.sync_focus_flags();
+        let buf = draw_buffer(&mut app, 120, 40);
+        let unkeyed = buf[(b.x + 1, b.y + 1)].bg;
+        assert_ne!(keyed, unkeyed, "{theme:?}: the keys show on the button");
+    }
+}
+
+/// Screen reader mode names the new stops: a REPOSITORIES row with its
+/// branch, changes and whether it is the one shown, and the card's button.
+#[test]
+fn screen_reader_names_the_repository_row_and_the_card_button() {
+    let (_tmp, mut app, _, _) = scm_with_two_repositories();
+    press(&mut app, KeyCode::BackTab, KeyModifiers::SHIFT);
+    let (focus, item) = app.source_control_a11y();
+    assert_eq!(focus, "Source Control, Repositories, 2 repositories");
+    let item = item.unwrap();
+    assert!(
+        item.starts_with("repa, ") && item.ends_with(", selected"),
+        "{item}"
+    );
+    let tmp = tempfile::tempdir().unwrap();
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    scm_card_ready(&mut app, 120, 40);
+    assert_eq!(
+        app.source_control_a11y(),
+        (
+            String::from("Source Control, No repository detected"),
+            Some(String::from("Initialize Repository, button"))
+        )
+    );
+}
+
+/// Git: Initialize Repository from the palette in a folder that already
+/// is a repository says so and runs nothing.
+#[test]
+fn initialize_repository_in_a_repository_says_so() {
+    let (_tmp, mut app) = scm_with_history(1);
+    app.run_command(crate::command_registry::Command::GitInitializeRepository);
+    assert!(
+        app.status.ends_with("is already in a Git repository"),
+        "{}",
+        app.status
+    );
+}
+
+/// Until git has answered, Source Control's status is a default that reads
+/// as "no repository" and the card is drawn; the keys stay with the message
+/// box, as before the card took any, so Enter pressed that early in a
+/// repository commits rather than running `git init`. Once git says the
+/// folder is in none, the card has them.
+#[test]
+fn the_card_takes_the_keys_only_once_git_has_answered() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    app.set_sidebar_view(SidebarView::SourceControl);
+    app.sync_focus_flags();
+    draw(&mut app, 120, 40);
+    assert!(!app.source_control.status_known);
+    assert_eq!(app.source_control.keys, KeyStop::Message);
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(
+        !tmp.path().join(".git").exists(),
+        "Enter before git answered ran git init"
+    );
+    scm_card_ready(&mut app, 120, 40);
+    assert_eq!(app.source_control.keys, KeyStop::Card);
+}
+
+/// Git: Initialize Repository in a folder whose subfolders are repositories
+/// runs nothing, as the card offers only their Open there: `git init` would
+/// wrap them (#871).
+#[test]
+fn initialize_repository_leaves_a_folder_of_repositories_alone() {
+    let (tmp, _) = nested_repo_1227();
+    let mut app = App::new(tmp.path().to_path_buf()).unwrap();
+    app.run_command(crate::command_registry::Command::GitInitializeRepository);
+    assert!(!tmp.path().join(".git").exists(), "status: {}", app.status);
+    assert!(app.status.contains("subfolders"), "{}", app.status);
+}
+
+/// Initialize Repository asks git itself whether the folder is inside a
+/// repository, so a folder below one is never given a nested repository,
+/// even before Source Control's own status has arrived (#871).
+#[test]
+fn initialize_repository_inside_a_repository_runs_no_git_init() {
+    let tmp = make_committed_repo();
+    let sub = tmp.path().join("sub");
+    std::fs::create_dir(&sub).unwrap();
+    let mut app = App::new(sub.clone()).unwrap();
+    assert!(!app.source_control.status_known, "git has not answered yet");
+    app.run_command(crate::command_registry::Command::GitInitializeRepository);
+    assert!(!sub.join(".git").exists(), "status: {}", app.status);
+    assert!(
+        app.status.ends_with("is already in a Git repository"),
+        "{}",
+        app.status
     );
 }

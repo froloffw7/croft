@@ -987,6 +987,7 @@ fn owned_goldens() -> Vec<String> {
     fixed
         .into_iter()
         .map(String::from)
+        .chain(SCM_MENU_GOLDENS.map(String::from))
         .chain(confirms)
         .chain(confirms_themed)
         .chain(themed)
@@ -1008,11 +1009,13 @@ fn every_golden_belongs_to_a_scene() {
         return;
     };
     // Goldens other test modules save here: the key ledger's, the
-    // command registry's and the git module's recorded calls.
+    // command registry's, the git module's recorded calls and the
+    // right-click menus.
     const SAVED_ELSEWHERE: [&str; 3] = ["key-ledger", "commands", "git-calls"];
     let owned: Vec<String> = owned_goldens()
         .into_iter()
         .chain(SAVED_ELSEWHERE.map(String::from))
+        .chain(super::right_click::RIGHT_CLICK_GOLDENS.map(String::from))
         .map(|name| format!("{name}.txt"))
         .collect();
     let mut orphans: Vec<String> = entries
@@ -1118,6 +1121,19 @@ fn workbench_scene(name: &str, app: &mut App) {
         crate::color_depth::ColorDepth::TrueColor,
         no_masks,
     );
+}
+
+/// [`workbench_scene`], returning a mismatch instead of failing, so one
+/// test can draw several scenes and name every one that differs.
+fn workbench_scene_result(name: &str, app: &mut App) -> Option<String> {
+    scene(
+        name,
+        app,
+        (120, 40),
+        crate::color_depth::ColorDepth::TrueColor,
+        no_masks,
+    )
+    .err()
 }
 
 #[test]
@@ -1252,10 +1268,12 @@ fn hermetic_git(dir: &Path, args: &[&str]) {
     );
 }
 
-#[test]
-fn source_control_with_a_staged_and_an_unstaged_change() {
+/// Source Control's fixture: a repository with one commit, then a staged
+/// new file and an unstaged change, shown in Source Control in `theme`
+/// with every git answer taken.
+fn source_control_app(theme: crate::theme::Theme) -> (Fixture, App) {
     refuse_inherited_git_state();
-    let (_fixture, root) = workspace(&[("src/main.rs", MAIN_RS), ("README.md", "# golden\n")]);
+    let (fixture, root) = workspace(&[("src/main.rs", MAIN_RS), ("README.md", "# golden\n")]);
     // No template: its hooks and excludes would be the developer's.
     hermetic_git(&root, &["init", "-q", "--template=", "-b", "main"]);
     // The app's own git runs read the user's global config, which the
@@ -1273,7 +1291,7 @@ fn source_control_with_a_staged_and_an_unstaged_change() {
     hermetic_git(&root, &["add", "src/greeting.rs"]);
     std::fs::write(root.join("README.md"), "# golden\n\nNow with a greeting.\n").unwrap();
 
-    let mut app = app_with_theme(&root, crate::theme::Theme::default());
+    let mut app = app_with_theme(&root, theme);
     assert!(app.open_file_at_launch(&root.join("src/main.rs")));
     app.run_command(crate::widgets::command_palette::Command::ShowSourceControl);
     // Status, the change list, the default branch and the COMMITS graph
@@ -1292,7 +1310,257 @@ fn source_control_with_a_staged_and_an_unstaged_change() {
                 && !app.graph_fetch.is_some()
         },
     );
+    (fixture, app)
+}
+
+#[test]
+fn source_control_with_a_staged_and_an_unstaged_change() {
+    let (_fixture, mut app) = source_control_app(crate::theme::Theme::default());
     workbench_scene("source-control", &mut app);
+}
+
+/// The Source Control menus' scenes (#871): the `⋯` actions menu with each
+/// fly-out open and with a rebase under way, and the Commit button's
+/// dropdown, in a theme that draws plain panels (Croft Black) and in one
+/// that draws cards (Croft Loch, the default) with the row under the
+/// pointer lifted. Moving the two menus onto the shared menu left every one
+/// unchanged but the message box's caret, hidden while a menu takes the
+/// keys. The `-keys` scenes open the `⋯` menu from the keyboard, which shows
+/// its highlight.
+const SCM_MENU_GOLDENS: [&str; 19] = [
+    "scm-menu-plain",
+    "scm-menu-plain-commit",
+    "scm-menu-plain-changes",
+    "scm-menu-plain-pull-push",
+    "scm-menu-plain-branch",
+    "scm-menu-plain-remote",
+    "scm-menu-plain-stash",
+    "scm-menu-plain-tags",
+    "scm-menu-plain-rebase",
+    "scm-menu-card",
+    "scm-menu-card-commit",
+    "scm-menu-plain-keys",
+    "scm-menu-plain-keys-commit",
+    "scm-menu-card-keys",
+    "scm-menu-card-keys-commit",
+    "commit-menu-plain",
+    "commit-menu-card",
+    "commit-menu-plain-keys",
+    "commit-menu-card-keys",
+];
+
+/// The `⋯` menu's fly-outs, by the label of their row and the suffix of
+/// their scene.
+const SCM_FLYOUTS: [(&str, &str); 7] = [
+    ("Commit", "commit"),
+    ("Changes", "changes"),
+    ("Pull, Push", "pull-push"),
+    ("Branch", "branch"),
+    ("Remote", "remote"),
+    ("Stash", "stash"),
+    ("Tags", "tags"),
+];
+
+/// A left press at `(column, row)`, as the mouse sends it.
+fn press(app: &mut App, (column, row): (u16, u16)) {
+    app.handle_mouse(crossterm::event::MouseEvent {
+        kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        column,
+        row,
+        modifiers: KeyModifiers::NONE,
+    });
+}
+
+/// The pointer moved to `(column, row)` with no button held.
+fn point_at(app: &mut App, (column, row): (u16, u16)) {
+    app.handle_mouse(crossterm::event::MouseEvent {
+        kind: crossterm::event::MouseEventKind::Moved,
+        column,
+        row,
+        modifiers: KeyModifiers::NONE,
+    });
+}
+
+/// The middle cell of `rect`.
+fn middle(rect: Rect) -> (u16, u16) {
+    (rect.x + rect.width / 2, rect.y + rect.height / 2)
+}
+
+/// Source Control in `theme` with its `⋯` menu opened by a click on the
+/// header's `⋯` pill.
+fn scm_menu_app(theme: crate::theme::Theme) -> (Fixture, App) {
+    let (fixture, mut app) = source_control_app(theme);
+    let _ = draw(&mut app, 120, 40);
+    let more = app.source_control.header_more_btn;
+    assert!(more.width > 0, "the header draws its ⋯ pill");
+    press(&mut app, middle(more));
+    assert!(
+        app.scm_menu_layout().is_some(),
+        "a click on ⋯ opens the menu"
+    );
+    (fixture, app)
+}
+
+/// The open Source Control menu's top-level row `i`, as it is laid out now:
+/// the `⋯` menu's or the Commit dropdown's.
+fn scm_menu_row(app: &App, i: usize) -> Rect {
+    let layout = app
+        .scm_menu_layout()
+        .expect("a Source Control menu is open");
+    layout.top.row(i).expect("the row is drawn")
+}
+
+/// Open the `⋯` menu's fly-out whose row reads `label`, by a click on it.
+fn open_scm_flyout(app: &mut App, label: &str) {
+    let _ = draw(app, 120, 40);
+    let index = app
+        .context_menu
+        .as_ref()
+        .and_then(|menu| {
+            menu.items.iter().position(
+                |entry| matches!(entry, MenuEntry::Submenu { label: l, .. } if l == label),
+            )
+        })
+        .unwrap_or_else(|| panic!("the menu has a {label:?} fly-out"));
+    let row = scm_menu_row(app, index);
+    press(app, middle(row));
+    let open = app.context_menu.as_ref().and_then(|m| m.open_submenu);
+    assert_eq!(open, Some(index), "{label:?} opens");
+}
+
+#[test]
+fn source_control_actions_menu_in_a_plain_theme() {
+    let plain = crate::theme::Theme::BLACK;
+    assert!(crate::widgets::surface::tones(plain).is_none());
+    let mut failures = Vec::new();
+    let (_fixture, mut app) = scm_menu_app(plain);
+    failures.extend(workbench_scene_result("scm-menu-plain", &mut app));
+    for (label, suffix) in SCM_FLYOUTS {
+        let (_fixture, mut app) = scm_menu_app(plain);
+        open_scm_flyout(&mut app, label);
+        let name = format!("scm-menu-plain-{suffix}");
+        failures.extend(workbench_scene_result(&name, &mut app));
+    }
+    // A rebase under way leads the menu with its own rows (#1356).
+    let (_fixture, mut app) = scm_menu_app(plain);
+    app.open_scm_actions_menu_for(
+        Some(crate::git::RepoOp::Rebase { step: 2, total: 5 }),
+        false,
+    );
+    failures.extend(workbench_scene_result("scm-menu-plain-rebase", &mut app));
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+#[test]
+fn source_control_actions_menu_as_a_card() {
+    let card = crate::theme::Theme::default();
+    assert!(crate::widgets::surface::tones(card).is_some());
+    let mut failures = Vec::new();
+    // The pointer on the first action row lifts it.
+    let (_fixture, mut app) = scm_menu_app(card);
+    let _ = draw(&mut app, 120, 40);
+    let first = scm_menu_row(&app, 0);
+    point_at(&mut app, middle(first));
+    failures.extend(workbench_scene_result("scm-menu-card", &mut app));
+    // With the Commit fly-out open, the pointer on its second row.
+    let (_fixture, mut app) = scm_menu_app(card);
+    open_scm_flyout(&mut app, "Commit");
+    let _ = draw(&mut app, 120, 40);
+    let fly_out = app.scm_menu_layout().and_then(|l| l.fly_out).unwrap();
+    let second = fly_out.1.row(1).unwrap();
+    point_at(&mut app, middle(second));
+    failures.extend(workbench_scene_result("scm-menu-card-commit", &mut app));
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+/// Source Control in `theme` with its `⋯` menu opened from the keyboard:
+/// Cmd+K Shift+A, Git: Show Source Control Actions.
+fn scm_menu_keys_app(theme: crate::theme::Theme) -> (Fixture, App) {
+    let (fixture, mut app) = source_control_app(theme);
+    let _ = draw(&mut app, 120, 40);
+    app.handle_key(key(KeyCode::Char('k'), KeyModifiers::SUPER))
+        .unwrap();
+    app.handle_key(key(KeyCode::Char('A'), KeyModifiers::SHIFT))
+        .unwrap();
+    assert!(
+        app.context_menu.as_ref().is_some_and(|m| m.keyed),
+        "Cmd+K Shift+A opens the menu with the keyboard on it"
+    );
+    (fixture, app)
+}
+
+#[test]
+fn source_control_actions_menu_from_the_keyboard() {
+    let mut failures = Vec::new();
+    for (theme, look) in [
+        (crate::theme::Theme::BLACK, "plain"),
+        (crate::theme::Theme::default(), "card"),
+    ] {
+        // The first action highlighted.
+        let (_fixture, mut app) = scm_menu_keys_app(theme);
+        failures.extend(workbench_scene_result(
+            &format!("scm-menu-{look}-keys"),
+            &mut app,
+        ));
+        // Down to Commit, past the separator, and → into its fly-out: the
+        // highlight on the fly-out's first row.
+        let (_fixture, mut app) = scm_menu_keys_app(theme);
+        for _ in 0..5 {
+            app.handle_key(key(KeyCode::Down, KeyModifiers::NONE))
+                .unwrap();
+        }
+        app.handle_key(key(KeyCode::Right, KeyModifiers::NONE))
+            .unwrap();
+        let menu = app.context_menu.as_ref().unwrap();
+        assert!(
+            matches!(menu.open_submenu.and_then(|i| menu.items.get(i)), Some(MenuEntry::Submenu { label, .. }) if label == "Commit"),
+            "→ opens the Commit fly-out"
+        );
+        let name = format!("scm-menu-{look}-keys-commit");
+        failures.extend(workbench_scene_result(&name, &mut app));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+#[test]
+fn commit_button_dropdown() {
+    let mut failures = Vec::new();
+    for (theme, name) in [
+        (crate::theme::Theme::BLACK, "commit-menu-plain"),
+        (crate::theme::Theme::default(), "commit-menu-card"),
+    ] {
+        let (_fixture, mut app) = source_control_app(theme);
+        let _ = draw(&mut app, 120, 40);
+        let caret = app.source_control.last_commit_caret_area;
+        assert!(caret.width > 0, "the Commit button draws its ▾");
+        press(&mut app, middle(caret));
+        assert!(
+            app.context_menu
+                .as_ref()
+                .is_some_and(|m| m.look == MenuLook::CommitActions && !m.keyed),
+            "a click on ▾ opens the dropdown"
+        );
+        // The pointer on the second row (a card theme lifts it).
+        let _ = draw(&mut app, 120, 40);
+        let row = scm_menu_row(&app, 1);
+        point_at(&mut app, middle(row));
+        failures.extend(workbench_scene_result(name, &mut app));
+        // Opened from the keyboard, Cmd+K Shift+C: the first row highlighted.
+        let (_fixture, mut app) = source_control_app(theme);
+        let _ = draw(&mut app, 120, 40);
+        app.handle_key(key(KeyCode::Char('k'), KeyModifiers::SUPER))
+            .unwrap();
+        app.handle_key(key(KeyCode::Char('C'), KeyModifiers::SHIFT))
+            .unwrap();
+        assert!(
+            app.context_menu
+                .as_ref()
+                .is_some_and(|m| m.look == MenuLook::CommitActions && m.keyed),
+            "Cmd+K Shift+C opens the dropdown with the keyboard on it"
+        );
+        failures.extend(workbench_scene_result(&format!("{name}-keys"), &mut app));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }
 
 /// A confirm dialog over the workbench, raised by setting the state its
@@ -1315,6 +1583,7 @@ const CONFIRM_SCENES: [ConfirmScene; 13] = [
         name: "confirm-discard",
         raise: |app, _| {
             app.pending_discard = Some(PendingDiscard {
+                root: std::path::PathBuf::new(),
                 rel_path: String::from("src/main.rs"),
                 untracked: false,
                 staged: false,

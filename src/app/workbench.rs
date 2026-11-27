@@ -916,6 +916,8 @@ impl App {
             crumb: None,
             scroll: Default::default(),
             submenu_scroll: Default::default(),
+            look: MenuLook::Panel,
+            keyed: true,
             origin,
             items: self.customize_layout_items(),
             selected,
@@ -1633,10 +1635,9 @@ impl App {
             {
                 self.overlays.hero.request_clear_if_displayed();
             }
-            // The Source Control commit dropdown is anchored to that view;
-            // close it on any view change so it can't linger over the next
-            // sidebar.
-            self.commit_menu_open = false;
+            // Source Control's menus are anchored to that view; close them
+            // on any view change so they can't linger over the next sidebar.
+            self.close_scm_menus();
         }
         self.sidebar_view = view;
         if self.sidebar_view == SidebarView::Remote && self.remote.refresh_if_config_changed() {
@@ -1657,7 +1658,7 @@ impl App {
                 self.refresh_source_control();
                 // Opening the view lands in the message box, so typing a
                 // message never stages or discards from the list (#871).
-                self.source_control.list_focused = false;
+                self.source_control.keys = crate::widgets::source_control::KeyStop::Message;
                 self.focus_pane(Pane::Tree);
             }
             SidebarView::Remote => self.focus_pane(Pane::Tree),
