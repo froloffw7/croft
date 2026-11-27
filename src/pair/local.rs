@@ -13,7 +13,7 @@
 //! on the spot and remembered for the session, and `CROFT_PAIR_API=openai`
 //! (or `anthropic`) pins the choice.
 
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::sync::mpsc::Sender;
 use std::time::Duration;
 
@@ -72,6 +72,29 @@ pub(crate) fn auth_for(base_url: &str, token: Option<&str>) -> (String, Option<S
         Some(t) if credential_allowed(base_url) => (t.to_string(), Some(format!("Bearer {t}"))),
         _ => (String::from("croft"), None),
     }
+}
+
+/// Whether `base_url` is an OpenCode gateway, which refuses a request without
+/// a stable `x-opencode-session` ("MissingSessionID") so it can route a
+/// conversation to one backend and reuse its prompt cache. A real URL parse:
+/// the host must be `opencode.ai` or a subdomain of it.
+pub(crate) fn wants_session_header(base_url: &str) -> bool {
+    url::Url::parse(base_url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_ascii_lowercase))
+        .is_some_and(|h| h == "opencode.ai" || h.ends_with(".opencode.ai"))
+}
+
+/// One opaque id for this croft run: every turn of the conversation carries
+/// the same value, a new run starts a new one. Nothing about the user in it.
+fn session_id() -> &'static str {
+    static ID: OnceLock<String> = OnceLock::new();
+    ID.get_or_init(|| {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        format!("croft-{}-{nanos:x}", std::process::id())
+    })
 }
 
 /// Whether the credential may travel to `base_url`: https anywhere, http
@@ -200,6 +223,9 @@ pub(crate) fn stream_turn_until(
         }
         if let Some(bearer) = &bearer {
             post = post.header("authorization", bearer);
+        }
+        if wants_session_header(base_url) {
+            post = post.header("x-opencode-session", session_id());
         }
         post.send(req.to_string())
     };

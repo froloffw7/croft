@@ -225,6 +225,10 @@ body), croft retries the turn on `/v1/chat/completions` and remembers that for t
 `CROFT_PAIR_API=openai` (or `anthropic`) pins the wire and skips the probe. Reasoning models'
 `reasoning_content` is ignored; only the answer is fenced.
 
+**OpenCode gateway.** `https://opencode.ai/inference/go` (give the base without `/v1`; croft adds it) needs
+`ANTHROPIC_AUTH_TOKEN` and `CROFT_PAIR_API=openai`. The gateway also demands an `x-opencode-session` header
+(without it: `MissingSessionID`); croft sends one opaque id per run to `opencode.ai` hosts only.
+
 **Context window.** A local model has a fixed window (whatever the server was started with) and
 croft cannot read it from every server, so declare it: `croft pair --provider local --model <m>
 --context 131072` (kept in the pair record; later `croft pair` runs inherit it). croft then keeps

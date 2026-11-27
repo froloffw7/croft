@@ -1193,6 +1193,19 @@ fn a_token_limit_truncation_is_a_failed_turn() {
     pump.join().unwrap();
 }
 
+/// An OpenCode gateway wants a session header; no other host gets one, and a
+/// look-alike domain does not count.
+#[test]
+fn only_opencode_gateways_get_the_session_header() {
+    use local::wants_session_header as w;
+    assert!(w("https://opencode.ai/inference/go"));
+    assert!(w("https://api.opencode.ai/x"));
+    assert!(!w("http://localhost:11434"));
+    assert!(!w("https://notopencode.ai/x"));
+    assert!(!w("https://opencode.ai.evil.example/x"));
+    assert!(!w("https://evil.example/opencode.ai"));
+}
+
 /// The environment credential only ever travels to https or loopback
 /// destinations; a cleartext remote hop gets the harmless placeholder.
 #[test]
