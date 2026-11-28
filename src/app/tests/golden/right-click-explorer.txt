@@ -1,5 +1,5 @@
 == a folder row
-opens at (7, 2), Panel, keyed, row 0 lit
+opens at (6, 2), Panel, keyed, row 0 lit
 New File goes in <ws>/src
   New File  =>  Create(File)
   New Folder  =>  Create(Folder)
@@ -11,7 +11,7 @@ New File goes in <ws>/src
 keys: Tree
 selected "src", marked []
 == a file row
-opens at (7, 4), Panel, keyed, row 0 lit
+opens at (6, 4), Panel, keyed, row 0 lit
 New File goes in <ws>
   New File  =>  Create(File)
   New Folder  =>  Create(Folder)
@@ -23,7 +23,7 @@ New File goes in <ws>
 keys: Tree
 selected "README.md", marked []
 == one of two marked rows
-opens at (7, 3), Panel, keyed, row 0 lit
+opens at (6, 3), Panel, keyed, row 0 lit
 New File goes in <ws>
   New File  =>  Create(File)
   New Folder  =>  Create(Folder)
@@ -34,7 +34,7 @@ New File goes in <ws>
 keys: Tree
 selected "notes.txt", marked ["README.md", "notes.txt"]
 == the empty space below the rows
-opens at (7, 5), Panel, keyed, row 0 lit
+opens at (6, 5), Panel, keyed, row 0 lit
 New File goes in <ws>
   New File  =>  Create(File)
   New Folder  =>  Create(Folder)

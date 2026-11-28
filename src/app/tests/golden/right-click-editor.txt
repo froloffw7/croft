@@ -1,5 +1,5 @@
 == the text, nothing selected
-opens at (47, 4), Panel, keyed, row 0 lit
+opens at (46, 4), Panel, keyed, row 0 lit
 New File goes in <ws>
   Go to Definition  =>  GoToDefinitionAt { row: 1, col: 5 }
   Go Back  =>  NavigateBack
@@ -14,7 +14,7 @@ New File goes in <ws>
   Command Palette  =>  ShowCommandPalette
 keys: Editor
 == the text, a word selected
-opens at (47, 4), Panel, keyed, row 0 lit
+opens at (46, 4), Panel, keyed, row 0 lit
 New File goes in <ws>
   Go to Definition  =>  GoToDefinitionAt { row: 1, col: 5 }
   Go Back  =>  NavigateBack

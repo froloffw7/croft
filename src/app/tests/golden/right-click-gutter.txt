@@ -1,5 +1,5 @@
 == the gutter of line 3
-opens at (37, 5), Panel, keyed, row 0 lit
+opens at (36, 5), Panel, keyed, row 0 lit
 New File goes in <ws>
   Toggle Bookmark  =>  ToggleBookmarkAt { line: 3 }
   Next Bookmark  =>  NextBookmark
@@ -9,7 +9,7 @@ New File goes in <ws>
   Add Logpoint  =>  EditLogpointAt { line: 3 }
 keys: Editor
 == the gutter of line 3, with a conditional logpoint
-opens at (37, 5), Panel, keyed, row 0 lit
+opens at (36, 5), Panel, keyed, row 0 lit
 New File goes in <ws>
   Toggle Bookmark  =>  ToggleBookmarkAt { line: 3 }
   Next Bookmark  =>  NextBookmark

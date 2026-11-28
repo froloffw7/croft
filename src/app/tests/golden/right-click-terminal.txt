@@ -1,5 +1,5 @@
 == a lone terminal
-opens at (98, 24), Panel, keyed, row 0 lit
+opens at (97, 24), Panel, keyed, row 0 lit
 New File goes in <ws>
   Paste  =>  TerminalPaste
   Rename Terminal  =>  RenameTerminal(0)
@@ -12,7 +12,7 @@ New File goes in <ws>
 keys: Terminal
 active pane 0
 == the middle of three terminals
-opens at (98, 24), Panel, keyed, row 0 lit
+opens at (97, 24), Panel, keyed, row 0 lit
 New File goes in <ws>
   Paste  =>  TerminalPaste
   Rename Terminal  =>  RenameTerminal(1)
@@ -29,7 +29,7 @@ New File goes in <ws>
 keys: Terminal
 active pane 1
 == the middle of three terminals, broadcasting
-opens at (98, 24), Panel, keyed, row 0 lit
+opens at (97, 24), Panel, keyed, row 0 lit
 New File goes in <ws>
   Paste  =>  TerminalPaste
   Rename Terminal  =>  RenameTerminal(1)
@@ -47,7 +47,7 @@ New File goes in <ws>
 keys: Terminal
 active pane 1
 == a folded terminal's strip
-opens at (36, 21), Panel, keyed, row 0 lit
+opens at (35, 21), Panel, keyed, row 0 lit
 New File goes in <ws>
   Rename Terminal  =>  RenameTerminal(0)
   Clear  =>  ClearTerminal(0)

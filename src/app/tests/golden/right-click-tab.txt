@@ -1,5 +1,5 @@
 == the first tab
-opens at (36, 0), Panel, keyed, row 0 lit
+opens at (35, 0), Panel, keyed, row 0 lit
 New File goes in <ws>
   Close  =>  CloseTab(0)
   Close Others  =>  CloseOtherTabs(0)
@@ -27,7 +27,7 @@ New File goes in <ws>
   Copy into New Window  =>  CopyIntoNewWindow(0)
 keys: Editor
 == the middle tab
-opens at (46, 0), Panel, keyed, row 0 lit
+opens at (45, 0), Panel, keyed, row 0 lit
 New File goes in <ws>
   Close  =>  CloseTab(1)
   Close Others  =>  CloseOtherTabs(1)
@@ -55,7 +55,7 @@ New File goes in <ws>
   Copy into New Window  =>  CopyIntoNewWindow(1)
 keys: Editor
 == the last tab
-opens at (56, 0), Panel, keyed, row 0 lit
+opens at (55, 0), Panel, keyed, row 0 lit
 New File goes in <ws>
   Close  =>  CloseTab(2)
   Close Others  =>  CloseOtherTabs(2)

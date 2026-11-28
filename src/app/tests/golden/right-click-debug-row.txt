@@ -2,7 +2,7 @@
 no menu
 keys: Tree
 == Run and Debug: a frame
-opens at (7, 2), Panel, keyed, row 0 lit
+opens at (6, 2), Panel, keyed, row 0 lit
 New File goes in <ws>
   Copy Call Stack  =>  CopyCallStack
 keys: Tree
@@ -10,19 +10,19 @@ keys: Tree
 no menu
 keys: Tree
 == Run and Debug: a variable with an expression
-opens at (7, 4), Panel, keyed, row 0 lit
+opens at (6, 4), Panel, keyed, row 0 lit
 New File goes in <ws>
   Copy Value  =>  CopyDebugValue { expression: Some("self.count"), value: "42" }
   Copy as Expression  =>  CopyDebugExpression("self.count")
   Add to Watch  =>  AddDebugWatch("self.count")
 keys: Tree
 == Run and Debug: a variable without one
-opens at (7, 5), Panel, keyed, row 0 lit
+opens at (6, 5), Panel, keyed, row 0 lit
 New File goes in <ws>
   Copy Value  =>  CopyDebugValue { expression: None, value: "42" }
 keys: Tree
 == Run and Debug: a watch
-opens at (7, 6), Panel, keyed, row 0 lit
+opens at (6, 6), Panel, keyed, row 0 lit
 New File goes in <ws>
   Copy Value  =>  CopyDebugValue { expression: Some("len(items)"), value: "3" }
   Copy Expression  =>  CopyDebugExpression("len(items)")

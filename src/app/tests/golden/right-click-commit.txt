@@ -1,5 +1,5 @@
 == a COMMITS row
-opens at (8, 37), Panel, keyed, row 0 lit
+opens at (7, 37), Panel, keyed, row 0 lit
 New File goes in <ws>
   Cherry-Pick  =>  CommitAction { action: CherryPick, hash: "<id>", short: "<id>" }
   Revert  =>  CommitAction { action: Revert, hash: "<id>", short: "<id>" }

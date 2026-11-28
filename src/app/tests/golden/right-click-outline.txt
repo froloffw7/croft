@@ -1,5 +1,5 @@
 == an OUTLINE row
-opens at (6, 35), Panel, keyed, row 0 lit
+opens at (5, 35), Panel, keyed, row 0 lit
 New File goes in <ws>
   Go to Symbol  =>  GoToOutlineSymbol { path: "<ws>/lib.rs", line: 3, col: 3 }
   Open Symbol in Its Own Tab  =>  OpenSymbolTab { path: "<ws>/lib.rs", name: "b", first: 3, last: 5 }
