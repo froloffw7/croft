@@ -644,7 +644,18 @@ impl Widget for &mut Editor {
             if text_height > 0 {
                 let cursor_vrow = self.cursor_visual_row(tw);
                 let mut top = self.top_visual_row(tw);
-                if cursor_vrow < top {
+                // A top inside the cursor line's own comment box (wheeled
+                // there to read a tall answer) leaves the caret's text row
+                // above the window; that is allowed, or every frame would
+                // snap the view back to the line and the box could never be
+                // read past its first screenful.
+                let in_own_box = cursor_vrow < top
+                    && top
+                        < (0..self.cursor_row)
+                            .map(|l| self.group_visual_rows(l, tw))
+                            .sum::<usize>()
+                            + self.group_visual_rows(self.cursor_row, tw);
+                if cursor_vrow < top && !in_own_box {
                     top = cursor_vrow;
                 } else if cursor_vrow >= top + text_height {
                     top = cursor_vrow + 1 - text_height;
