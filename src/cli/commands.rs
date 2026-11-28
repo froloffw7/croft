@@ -275,6 +275,16 @@ pub enum CliCommand {
         /// conversation to stay inside it and refuses a turn that cannot fit.
         #[arg(long, value_name = "TOKENS")]
         context: Option<usize>,
+        /// Pin the local endpoint's wire: "openai" (`/chat/completions`) or
+        /// "anthropic" (`/messages`). Without it croft tries `/messages` and
+        /// switches on a route-level 404. Recorded with the workspace.
+        #[arg(long, value_parser = ["openai", "anthropic"])]
+        api: Option<String>,
+        /// The reply cap in tokens for the local endpoint (default 8192).
+        /// Reasoning models spend it on hidden thinking; raise it when a turn
+        /// ends "reply truncated". Recorded with the workspace.
+        #[arg(long, value_name = "TOKENS")]
+        max_tokens: Option<u64>,
         /// Deactivate the navigator for the workspace instead.
         #[arg(long, default_value_t = false)]
         off: bool,

@@ -329,6 +329,8 @@ impl Cli {
                 provider,
                 base_url,
                 context,
+                api,
+                max_tokens,
                 off,
                 repl,
             }) => {
@@ -380,6 +382,18 @@ impl Cli {
                         .then(|| current.as_ref().and_then(|r| r.context))
                         .flatten()
                 });
+                let tuning = crate::session::PairTuning {
+                    api: api.or_else(|| {
+                        inherit
+                            .then(|| current.as_ref().and_then(|r| r.tuning.api.clone()))
+                            .flatten()
+                    }),
+                    max_tokens: max_tokens.or_else(|| {
+                        inherit
+                            .then(|| current.as_ref().and_then(|r| r.tuning.max_tokens))
+                            .flatten()
+                    }),
+                };
                 let provider = provider.or(recorded);
                 let (provider, base_url) = resolve_pair_provider(provider, base_url)?;
                 let name = pair_seat_name(
@@ -398,6 +412,7 @@ impl Cli {
                             provider,
                             base_url,
                             context,
+                            tuning: tuning.clone(),
                         },
                     )?;
                     println!("navigator deactivated for {}", workspace.display());
@@ -409,6 +424,7 @@ impl Cli {
                      a local endpoint has no CLI default"
                 );
                 if repl {
+                    crate::pair::local::configure(tuning.api.as_deref(), tuning.max_tokens);
                     let socket = crate::session::collab_socket_path(&workspace);
                     crate::collab::ensure_relay(&socket)?;
                     return crate::pair::run(crate::pair::PairConfig {
@@ -437,6 +453,7 @@ impl Cli {
                         provider,
                         base_url,
                         context,
+                        tuning: tuning.clone(),
                     },
                 )?;
                 // The relay is up before croft looks, so the seat connects

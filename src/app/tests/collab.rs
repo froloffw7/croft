@@ -887,6 +887,7 @@ fn solo_guest_never_hosts_the_navigator() {
             provider: None,
             base_url: None,
             context: None,
+            tuning: Default::default(),
         },
     )
     .unwrap();

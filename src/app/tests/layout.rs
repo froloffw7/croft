@@ -2664,6 +2664,7 @@ fn a_failed_spawner_releases_the_lock_so_another_window_can_host() {
         provider: None,
         base_url: None,
         context: None,
+        tuning: Default::default(),
     };
 
     let mut a = App::new(tmp.path().to_path_buf()).unwrap();

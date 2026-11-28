@@ -32,6 +32,7 @@ fn max_tokens() -> u64 {
     std::env::var("CROFT_PAIR_MAX_TOKENS")
         .ok()
         .and_then(|v| v.trim().parse::<u64>().ok())
+        .or_else(|| TUNING.lock().ok().and_then(|t| t.1))
         .map_or(MAX_TOKENS, |n| n.clamp(256, 200_000))
 }
 
@@ -51,14 +52,24 @@ static OPENAI_ENDPOINTS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 /// `CROFT_PAIR_API`: `openai` or `anthropic` pins the wire; anything else
 /// (or unset) leaves it to the 404 probe.
 fn pinned_api() -> Option<Api> {
-    match std::env::var("CROFT_PAIR_API")
-        .ok()?
-        .to_lowercase()
-        .as_str()
-    {
+    let spelled = |s: &str| match s.to_lowercase().as_str() {
         "openai" => Some(Api::OpenAi),
         "anthropic" => Some(Api::Anthropic),
         _ => None,
+    };
+    std::env::var("CROFT_PAIR_API")
+        .ok()
+        .and_then(|v| spelled(&v))
+        .or_else(|| TUNING.lock().ok().and_then(|t| t.0.as_deref().and_then(spelled)))
+}
+
+/// The workspace record's wire and reply cap (`api`, `max_tokens`), set when
+/// the seat is created; the environment variables override them.
+static TUNING: Mutex<(Option<String>, Option<u64>)> = Mutex::new((None, None));
+
+pub(crate) fn configure(api: Option<&str>, max_tokens: Option<u64>) {
+    if let Ok(mut t) = TUNING.lock() {
+        *t = (api.map(str::to_owned), max_tokens);
     }
 }
 
@@ -477,7 +488,7 @@ pub(crate) fn stream_turn_until(
         Some(err)
     } else if truncated {
         Some(format!(
-            "reply truncated at the {}-token limit (raise it with CROFT_PAIR_MAX_TOKENS)",
+            "reply truncated at the {}-token limit (raise it with `croft pair --max-tokens`)",
             max_tokens()
         ))
     } else if !clean_end {

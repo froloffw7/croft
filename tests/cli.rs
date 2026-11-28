@@ -287,7 +287,7 @@ fn pair_off_and_reactivation_keep_the_recorded_backend() {
         "http://localhost:9999",
     ]);
     let record_path = || {
-        let dir = home.path().join(".cache/croft/sessions");
+        let dir = home.path().join(".local/state/croft/pair");
         std::fs::read_dir(&dir)
             .unwrap()
             .filter_map(|e| e.ok())
@@ -322,6 +322,49 @@ fn pair_off_and_reactivation_keep_the_recorded_backend() {
         "the ollama endpoint must not survive a provider switch: {r}"
     );
     assert!(!r.contains("qwen3-coder:30b"), "{r}");
+    reap_pair_relays(home.path());
+}
+
+/// The pair record lives in the state directory, and one an older croft left
+/// in the cache's sessions folder moves over on the next `croft pair`.
+#[test]
+fn pair_record_moves_from_the_cache_to_the_state_directory() {
+    let home = tempfile::tempdir().unwrap();
+    let ws = tempfile::tempdir().unwrap();
+    let run = |args: &[&str]| {
+        Command::cargo_bin("croft")
+            .unwrap()
+            .args(args)
+            .arg("--workspace")
+            .arg(ws.path())
+            .env("HOME", home.path())
+            .env_remove("XDG_STATE_HOME")
+            .assert()
+            .success();
+    };
+    run(&[
+        "pair", "--provider", "local", "--model", "m", "--base-url", "http://localhost:9999",
+        "--api", "openai", "--max-tokens", "16000",
+    ]);
+    let state = home.path().join(".local/state/croft/pair");
+    let file = std::fs::read_dir(&state)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .find(|p| p.to_string_lossy().ends_with(".pair.json"))
+        .expect("the record is in the state directory");
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert!(text.contains("\"api\":\"openai\"") && text.contains("16000"), "{text}");
+    // Park it where an older croft kept it, then re-run: it comes back.
+    let legacy_dir = home.path().join(".cache/croft/sessions");
+    std::fs::create_dir_all(&legacy_dir).unwrap();
+    let legacy = legacy_dir.join(file.file_name().unwrap());
+    std::fs::rename(&file, &legacy).unwrap();
+    run(&["pair", "--off"]);
+    assert!(file.exists(), "the record moved back to the state directory");
+    assert!(!legacy.exists(), "the cache copy is gone");
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert!(text.contains("http://localhost:9999") && text.contains("\"api\":\"openai\""));
     reap_pair_relays(home.path());
 }
 
@@ -364,7 +407,7 @@ fn pair_rerun_without_name_keeps_the_recorded_name() {
         String::from_utf8(out.get_output().stdout.clone()).unwrap()
     };
     let read = || {
-        let dir = home.path().join(".cache/croft/sessions");
+        let dir = home.path().join(".local/state/croft/pair");
         let path = std::fs::read_dir(&dir)
             .unwrap()
             .filter_map(|e| e.ok())

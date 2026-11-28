@@ -436,7 +436,7 @@ turn-based driver/navigator pairing.
 ### Activation
 
 - `croft pair [--workspace <p>] [--model <m>] [--name <n>]` writes a
-  `<hash>.pair.json` sidecar beside the workspace's collab socket, ensures
+  `<hash>.pair.json` record in `~/.local/state/croft/pair/` (an older croft kept it beside the collab socket in the cache; it moves over on the next `croft pair`), ensures
   the relay, and exits.
 - A running croft checks the record on a 1s cadence and seats the navigator
   in-process.
@@ -590,7 +590,7 @@ croft pair --base-url http://box:8080 --model qwen3-coder:30b   # implies ollama
   style, alongside `anthropic-version`.
 - **Token safety**: the token only travels over https or to a loopback host.
   A cleartext remote `--base-url http://box:8080` gets a placeholder.
-  `pair.json` records only provider, base_url and model, never a token.
+  `pair.json` records provider, base_url, model, context, and the non-secret `--api` / `--max-tokens` knobs (the environment variables `CROFT_PAIR_API` and `CROFT_PAIR_MAX_TOKENS` still override them), never a token.
 
 ## Recording a session (`croft record`)
 

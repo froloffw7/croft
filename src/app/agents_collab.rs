@@ -917,6 +917,7 @@ impl App {
             )
             .with_context(record.context),
         };
+        crate::pair::local::configure(record.tuning.api.as_deref(), record.tuning.max_tokens);
         #[cfg(test)]
         let spawned = match &self.pair_spawn_override {
             Some(spawn) => spawn(&cfg),
@@ -1326,6 +1327,10 @@ impl App {
             provider: current.as_ref().and_then(|r| r.provider.clone()),
             base_url: current.as_ref().and_then(|r| r.base_url.clone()),
             context: None,
+            tuning: current
+                .as_ref()
+                .map(|r| r.tuning.clone())
+                .unwrap_or_default(),
         };
         if let Some(dir) = self.pair_record_path.parent() {
             let _ = std::fs::create_dir_all(dir);
