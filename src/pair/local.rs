@@ -84,6 +84,33 @@ pub(crate) fn auth_for(base_url: &str, token: Option<&str>) -> (String, Option<S
     }
 }
 
+/// `base_url` + the route, where `path` is spelled `/v1/...`. A base that
+/// already names an API version (`.../v1`, Gemini's `.../v1beta/openai`,
+/// Mistral/Together style `.../v1`) keeps it: the route's own `/v1` is dropped
+/// instead of doubled. A bare host or a plain prefix (`https://x/inference/go`,
+/// `http://localhost:11434`) gets the full `/v1/...` as before.
+pub(crate) fn endpoint_url(base_url: &str, path: &str) -> String {
+    let base = base_url.trim_end_matches('/');
+    let versioned = url::Url::parse(base).is_ok_and(|u| {
+        u.path_segments().is_some_and(|mut segs| {
+            segs.any(|seg| {
+                seg.strip_prefix('v').is_some_and(|rest| {
+                    let digits = rest.trim_end_matches(|c: char| c.is_ascii_alphabetic());
+                    !digits.is_empty()
+                        && digits.chars().all(|c| c.is_ascii_digit())
+                        && rest[digits.len()..].chars().all(|c| c.is_ascii_alphabetic())
+                })
+            })
+        })
+    });
+    let route = if versioned {
+        path.strip_prefix("/v1").unwrap_or(path)
+    } else {
+        path
+    };
+    format!("{base}{route}")
+}
+
 /// Whether `base_url` is an OpenCode gateway, which refuses a request without
 /// a stable `x-opencode-session` ("MissingSessionID") so it can route a
 /// conversation to one backend and reuse its prompt cache. A real URL parse:
@@ -217,7 +244,7 @@ pub(crate) fn stream_turn_until(
             }
         };
         let mut post = agent
-            .post(format!("{base_url}{path}"))
+            .post(endpoint_url(base_url, path))
             .config()
             // The whole exchange (headers, cold-model wait, every body read)
             // shares the turn's remaining wall-clock budget.

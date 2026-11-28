@@ -225,7 +225,7 @@ body), croft retries the turn on `/v1/chat/completions` and remembers that for t
 `CROFT_PAIR_API=openai` (or `anthropic`) pins the wire and skips the probe. Reasoning models'
 `reasoning_content` is ignored; only the answer is fenced.
 
-**OpenCode gateway.** `https://opencode.ai/inference/go` (give the base without `/v1`; croft adds it) needs
+**OpenCode gateway.** `https://opencode.ai/inference/go` (with or without `/v1`; a base that already has a version, like Gemini's `.../v1beta/openai`, is used as given) needs
 `ANTHROPIC_AUTH_TOKEN` and `CROFT_PAIR_API=openai`. The gateway also demands an `x-opencode-session` header
 (without it: `MissingSessionID`); croft sends one opaque id per run to `opencode.ai` hosts only.
 Reasoning models spend the reply budget on hidden thinking; when a turn ends with "reply truncated", raise the

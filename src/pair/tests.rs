@@ -1193,6 +1193,39 @@ fn a_token_limit_truncation_is_a_failed_turn() {
     pump.join().unwrap();
 }
 
+/// A base that already carries an API version keeps it (Gemini's
+/// `/v1beta/openai`, OpenAI-style `/v1`); a bare host or prefix gets `/v1`.
+#[test]
+fn the_endpoint_url_does_not_double_an_api_version() {
+    use local::endpoint_url as u;
+    let chat = "/v1/chat/completions";
+    assert_eq!(
+        u("https://generativelanguage.googleapis.com/v1beta/openai", chat),
+        "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+    );
+    assert_eq!(
+        u("https://opencode.ai/inference/go/v1/", chat),
+        "https://opencode.ai/inference/go/v1/chat/completions"
+    );
+    assert_eq!(
+        u("https://opencode.ai/inference/go", chat),
+        "https://opencode.ai/inference/go/v1/chat/completions"
+    );
+    assert_eq!(
+        u("http://localhost:11434", "/v1/messages"),
+        "http://localhost:11434/v1/messages"
+    );
+    assert_eq!(
+        u("https://api.example.com/v2", chat),
+        "https://api.example.com/v2/chat/completions"
+    );
+    // Not a version: names that merely start with a v.
+    assert_eq!(
+        u("https://host/vllm", chat),
+        "https://host/vllm/v1/chat/completions"
+    );
+}
+
 /// An OpenCode gateway wants a session header; no other host gets one, and a
 /// look-alike domain does not count.
 #[test]
