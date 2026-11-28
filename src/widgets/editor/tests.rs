@@ -22865,6 +22865,65 @@ fn wheeling_up_reaches_a_tall_comment_box_above_the_caret() {
 }
 
 
+/// The wheel walks through a box taller than the window, wrap mode included:
+/// every point of the answer shows on some frame, middle too, wherever the
+/// caret happens to sit (on the box's own line, above it or below it).
+#[test]
+fn wrap_wheeling_down_walks_through_a_tall_comment_box() {
+    let area = Rect {
+        x: 0,
+        y: 0,
+        width: 60,
+        height: 10,
+    };
+    let screen = |e: &mut Editor| -> String {
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        (e as &mut Editor).render(area, &mut buf);
+        (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let mut missing = Vec::new();
+    for caret in [0usize, 1, 3] {
+        let mut e = editor_with("first\nsecond\nthird\nfourth");
+        e.wrap_override = Some(true);
+        e.comment_boxes = vec![CommentBox {
+            id: 1,
+            line: 0,
+            author: "navigator".into(),
+            body: (0..40)
+                .map(|i| format!("point {i}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        }];
+        e.cursor_row = caret;
+        screen(&mut e);
+        let mut seen = std::collections::HashSet::new();
+        // Up first (the caret below the box starts with the view at the
+        // box's tail), then back down.
+        for step in 0..160 {
+            if step < 80 {
+                e.scroll_up(1);
+            } else {
+                e.scroll_down(1);
+            }
+            let s = screen(&mut e);
+            for i in 0..40 {
+                if s.contains(&format!("point {i} ")) {
+                    seen.insert(i);
+                }
+            }
+        }
+        missing.extend((0..40).filter(|i| !seen.contains(i)).map(|i| (caret, i)));
+    }
+    assert!(missing.is_empty(), "never on screen (caret row, point): {missing:?}");
+}
+
 /// Ignore is red, and the `you:` label of an echoed reply gets its own colour.
 #[test]
 fn comment_box_colours_forget_hide_and_you_label() {
