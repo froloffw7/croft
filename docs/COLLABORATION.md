@@ -228,6 +228,8 @@ body), croft retries the turn on `/v1/chat/completions` and remembers that for t
 **OpenCode gateway.** `https://opencode.ai/inference/go` (give the base without `/v1`; croft adds it) needs
 `ANTHROPIC_AUTH_TOKEN` and `CROFT_PAIR_API=openai`. The gateway also demands an `x-opencode-session` header
 (without it: `MissingSessionID`); croft sends one opaque id per run to `opencode.ai` hosts only.
+Reasoning models spend the reply budget on hidden thinking; when a turn ends with "reply truncated", raise the
+cap with `CROFT_PAIR_MAX_TOKENS` (default 8192, range 256-200000).
 
 **Context window.** A local model has a fixed window (whatever the server was started with) and
 croft cannot read it from every server, so declare it: `croft pair --provider local --model <m>

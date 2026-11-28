@@ -25,6 +25,16 @@ use super::{FenceMachine, PairState, TurnEnd, apply_fence_event};
 /// reject nothing under their context limit.
 const MAX_TOKENS: u64 = 8192;
 
+/// The reply cap sent as `max_tokens`. `CROFT_PAIR_MAX_TOKENS` raises it for
+/// reasoning models, whose hidden thinking eats the same budget as the answer
+/// ("reply truncated"); clamped so a typo cannot ask for nothing or the moon.
+fn max_tokens() -> u64 {
+    std::env::var("CROFT_PAIR_MAX_TOKENS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .map_or(MAX_TOKENS, |n| n.clamp(256, 200_000))
+}
+
 /// Which wire a local endpoint speaks.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Api {
@@ -186,7 +196,7 @@ pub(crate) fn stream_turn_until(
                 "/v1/messages",
                 json!({
                     "model": model,
-                    "max_tokens": MAX_TOKENS,
+                    "max_tokens": max_tokens(),
                     "stream": true,
                     "system": system,
                     "messages": messages,
@@ -199,7 +209,7 @@ pub(crate) fn stream_turn_until(
                     "/v1/chat/completions",
                     json!({
                         "model": model,
-                        "max_tokens": MAX_TOKENS,
+                        "max_tokens": max_tokens(),
                         "stream": true,
                         "messages": all,
                     }),
@@ -439,7 +449,10 @@ pub(crate) fn stream_turn_until(
     let failure = if let Some(err) = stream_error {
         Some(err)
     } else if truncated {
-        Some(format!("reply truncated at the {MAX_TOKENS}-token limit"))
+        Some(format!(
+            "reply truncated at the {}-token limit (raise it with CROFT_PAIR_MAX_TOKENS)",
+            max_tokens()
+        ))
     } else if !clean_end {
         Some(String::from(match api {
             Api::Anthropic => "stream ended before message_stop",
