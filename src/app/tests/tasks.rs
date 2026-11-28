@@ -1171,6 +1171,7 @@ fn resident_seating_never_replays_a_persisted_task() {
             provider: None,
             base_url: None,
             context: None,
+            tuning: Default::default(),
         },
     )
     .unwrap();

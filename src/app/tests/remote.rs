@@ -833,6 +833,7 @@ fn a_relay_failure_releases_the_host_lock() {
             provider: None,
             base_url: None,
             context: None,
+            tuning: Default::default(),
         },
     )
     .unwrap();

@@ -321,6 +321,7 @@ fn turn_done_status_keeps_the_notes_visible() {
             provider: None,
             base_url: None,
             context: None,
+            tuning: Default::default(),
         },
     )
     .unwrap();

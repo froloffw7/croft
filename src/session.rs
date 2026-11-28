@@ -78,7 +78,36 @@ pub(crate) fn meta_path(socket: &Path) -> PathBuf {
 /// at startup) and seats the pilot in-process. Same keying as the other
 /// workspace sidecars.
 pub(crate) fn pair_record_path(workspace: &Path) -> PathBuf {
-    sessions_dir().join(format!("{}.pair.json", socket_name(workspace)))
+    let name = format!("{}.pair.json", socket_name(workspace));
+    let path = pair_record_dir().join(&name);
+    // A record an older croft left in the cache's sessions folder moves over
+    // once; the cache is what a cleaner deletes, the record is the user's
+    // own choice of backend.
+    let legacy = sessions_dir().join(&name);
+    if legacy != path && !path.exists() && legacy.is_file() {
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if std::fs::rename(&legacy, &path).is_err()
+            && std::fs::copy(&legacy, &path).is_ok()
+        {
+            let _ = std::fs::remove_file(&legacy);
+        }
+    }
+    path
+}
+
+/// Where the pair records live: `~/.local/state/croft/pair`, or the cache's
+/// sessions folder under test (which redirects the cache, not the state dir).
+fn pair_record_dir() -> PathBuf {
+    #[cfg(test)]
+    {
+        sessions_dir()
+    }
+    #[cfg(not(test))]
+    {
+        crate::paths::state_dir().join("pair")
+    }
 }
 
 /// Advisory lock guarding self-appointed navigator ownership for a workspace:
@@ -181,6 +210,22 @@ pub(crate) struct PairRecord {
     /// inside it and refuses a single turn that cannot fit.
     #[serde(default)]
     pub(crate) context: Option<usize>,
+    /// Wire and reply-cap settings for a local endpoint (never a token).
+    #[serde(default, flatten)]
+    pub(crate) tuning: PairTuning,
+}
+
+/// What `CROFT_PAIR_API` and `CROFT_PAIR_MAX_TOKENS` used to carry, kept with
+/// the workspace's record instead of the shell. The environment still wins
+/// when set, for a one-off override.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub(crate) struct PairTuning {
+    /// "openai" or "anthropic" pins the wire; absent = probe.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) api: Option<String>,
+    /// Reply cap in tokens (`max_tokens`), for reasoning models.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) max_tokens: Option<u64>,
 }
 
 pub(crate) fn write_pair_record(path: &Path, record: &PairRecord) -> Result<()> {
@@ -371,6 +416,39 @@ mod tests {
     /// rapid writes under coarse clock granularity). A per-write nonce
     /// (pid + process-local counter) differs even when the clock stands
     /// still.
+    /// The wire and reply cap persist beside the endpoint, flat in the JSON,
+    /// and a record written before they existed still reads.
+    #[test]
+    fn pair_record_keeps_the_wire_and_reply_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("x.pair.json");
+        let record = PairRecord {
+            model: Some("m".into()),
+            name: "local".into(),
+            enabled: true,
+            task: None,
+            provider: Some("local".into()),
+            base_url: Some("https://h/v1".into()),
+            context: Some(131072),
+            tuning: PairTuning {
+                api: Some("openai".into()),
+                max_tokens: Some(16000),
+            },
+        };
+        write_pair_record(&path, &record).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(v["api"], "openai");
+        assert_eq!(v["max_tokens"], 16000);
+        assert_eq!(read_pair_record(&path), Some(record));
+        std::fs::write(
+            &path,
+            r#"{"model":null,"name":"nav","enabled":true,"provider":"local"}"#,
+        )
+        .unwrap();
+        assert_eq!(read_pair_record(&path).unwrap().tuning, PairTuning::default());
+    }
+
     #[test]
     fn every_pair_record_write_serializes_differently() {
         let dir = tempfile::tempdir().unwrap();
@@ -383,6 +461,7 @@ mod tests {
             provider: None,
             base_url: None,
             context: None,
+            tuning: Default::default(),
         };
         write_pair_record(&path, &record).unwrap();
         let a = std::fs::read(&path).unwrap();
@@ -612,6 +691,7 @@ mod tests {
             provider: None,
             base_url: None,
             context: None,
+            tuning: Default::default(),
         };
         write_pair_record(&path, &record).unwrap();
         assert_eq!(read_pair_record(&path), Some(record));
@@ -638,6 +718,7 @@ mod tests {
             provider: Some("ollama".into()),
             base_url: Some("http://localhost:11434".into()),
             context: None,
+            tuning: Default::default(),
         };
         write_pair_record(&path, &record).unwrap();
         assert_eq!(read_pair_record(&path), Some(record));

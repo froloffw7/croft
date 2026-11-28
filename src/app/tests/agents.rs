@@ -434,6 +434,7 @@ fn navigator_record_seats_the_pilot_and_self_appoints_owner() {
             provider: None,
             base_url: None,
             context: None,
+            tuning: Default::default(),
         },
     )
     .unwrap();
@@ -503,6 +504,7 @@ fn navigator_record_seats_the_pilot_and_self_appoints_owner() {
             provider: None,
             base_url: None,
             context: None,
+            tuning: Default::default(),
         },
     )
     .unwrap();
@@ -567,6 +569,7 @@ fn app_seats_local_provider_from_record() {
             provider: Some("ollama".into()),
             base_url: Some("http://localhost:11500".into()),
             context: None,
+            tuning: Default::default(),
         },
     )
     .unwrap();
@@ -618,6 +621,7 @@ fn a_dead_navigator_is_not_respawned_until_reactivated() {
                 provider: None,
                 base_url: None,
                 context: None,
+                tuning: Default::default(),
             },
         )
         .unwrap();
@@ -651,6 +655,7 @@ fn a_dead_navigator_is_not_respawned_until_reactivated() {
             provider: None,
             base_url: None,
             context: None,
+            tuning: Default::default(),
         },
     )
     .unwrap();
@@ -681,6 +686,7 @@ fn toggling_the_navigator_preserves_its_provider() {
             provider: Some(String::from("ollama")),
             base_url: Some(String::from("http://localhost:11434")),
             context: None,
+            tuning: Default::default(),
         },
     )
     .unwrap();
@@ -731,6 +737,7 @@ fn only_one_croft_self_appoints_the_navigator_owner() {
                 provider: None,
                 base_url: None,
                 context: None,
+                tuning: Default::default(),
             },
         )
         .unwrap();
@@ -810,6 +817,7 @@ fn unseating_the_navigator_resets_the_turn_note_counters() {
         provider: None,
         base_url: None,
         context: None,
+        tuning: Default::default(),
     };
     let mut app = App::new(tmp.path().to_path_buf()).unwrap();
     app.pair_record_path = tmp.path().join("x.pair.json");
@@ -870,6 +878,7 @@ fn a_record_rewrite_re_arms_a_downed_navigator() {
         provider: None,
         base_url: None,
         context: None,
+        tuning: Default::default(),
     };
     let mut app = App::new(tmp.path().to_path_buf()).unwrap();
     app.pair_record_path = tmp.path().join("x.pair.json");

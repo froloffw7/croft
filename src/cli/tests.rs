@@ -854,6 +854,8 @@ fn parses_pair_subcommand() {
             provider: None,
             base_url: None,
             context: None,
+            api: None,
+            max_tokens: None,
             off: false,
             repl: true,
         }) => {
@@ -876,10 +878,21 @@ fn parses_pair_subcommand() {
             provider: None,
             base_url: None,
             context: None,
+            api: None,
+            max_tokens: None,
             off: false,
             repl: false,
         })
     ));
+    // The wire and reply cap ride along with the endpoint.
+    let cli = Cli::parse_from([
+        "croft", "pair", "--api", "openai", "--max-tokens", "16000",
+    ]);
+    assert!(matches!(
+        cli.command,
+        Some(CliCommand::Pair { api: Some(ref a), max_tokens: Some(16000), .. }) if a == "openai"
+    ));
+    assert!(Cli::try_parse_from(["croft", "pair", "--api", "grpc"]).is_err());
     // --off deactivates; --repl keeps the debug terminal driver.
     let cli = Cli::parse_from(["croft", "pair", "--off"]);
     assert!(matches!(

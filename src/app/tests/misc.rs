@@ -388,6 +388,7 @@ fn an_unopenable_host_lock_is_reported_as_such_and_re_announced_when_the_reason_
             provider: None,
             base_url: None,
             context: None,
+            tuning: Default::default(),
         },
     )
     .unwrap();
